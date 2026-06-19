@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Allows building Windows-only WinForms apps on macOS/Linux. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+
+    <AssemblyName>JBTheatreTools</AssemblyName>
+    <!-- File description shown in Task Manager / file properties; window title is set in code. -->
+    <AssemblyTitle>JB Theatre Tools</AssemblyTitle>
+    <Product>JB Theatre Tools</Product>
+    <Version>1.0.0</Version>
+    <Company>James Breedon</Company>
+    <RootNamespace>JBTheatreTools</RootNamespace>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The shared catalog lives at the repo root; embed it so the single-file exe is self-contained. -->
+    <EmbeddedResource Include="../catalog.json" LogicalName="catalog.json" />
+    <!-- Embedded so the window/taskbar icon shows at runtime too. -->
+    <EmbeddedResource Include="app.ico" LogicalName="app.ico" />
+  </ItemGroup>
+
+</Project>

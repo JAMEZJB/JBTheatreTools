@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64. macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe.",
+  "apps": [
+    {
+      "id": "helocontrol",
+      "name": "HeloControl",
+      "blurb": "Control AJA HELO stream / record encoders.",
+      "owner": "JAMEZJB",
+      "repo": "HeloControl",
+      "assets": {
+        "macos": "HeloControl-macOS.zip",
+        "windows-x64": "HeloControl-Windows-x64.exe",
+        "windows-arm64": "HeloControl-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "machineinventory",
+      "name": "Machine Inventory",
+      "blurb": "Collect hardware / software inventory from show machines.",
+      "owner": "JAMEZJB",
+      "repo": "ShowMachinesInventory",
+      "assets": {
+        "macos": "MachineInventory-macOS.zip",
+        "windows-x64": "MachineInventory-Windows-x64.exe",
+        "windows-arm64": "MachineInventory-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "ciscoswitchtools",
+      "name": "Cisco Switch Tools",
+      "blurb": "Back up & manage Cisco CBS350 / SG switches over SSH.",
+      "owner": "JAMEZJB",
+      "repo": "CiscoSwitchTools",
+      "assets": {
+        "macos": "Cisco.Switch.Tools.macOS.universal2.zip",
+        "windows-x64": "Cisco.Switch.Tools.x64.exe",
+        "windows-arm64": "Cisco.Switch.Tools.arm64.exe"
+      }
+    },
+    {
+      "id": "ciscobrotherlabels",
+      "name": "CiscoBrotherLabels",
+      "blurb": "Generate Brother P-touch port labels from Cisco switch configs.",
+      "owner": "JAMEZJB",
+      "repo": "CiscoBrotherLabels",
+      "assets": {
+        "macos": "CiscoBrotherLabels-macOS.zip",
+        "windows-x64": "CiscoBrotherLabels-Windows-x64.exe",
+        "windows-arm64": "CiscoBrotherLabels-Windows-arm64.exe"
+      }
+    }
+  ]
+}
