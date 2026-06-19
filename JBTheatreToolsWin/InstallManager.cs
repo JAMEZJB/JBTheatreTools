@@ -96,4 +96,13 @@ public sealed class InstallManager
         var path = InstalledPath(app.Id) ?? throw new InvalidOperationException("App is not installed.");
         Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
     }
+
+    /// <summary>Removes the installed app's folder and its manifest entry.</summary>
+    public void Uninstall(string appId)
+    {
+        var dir = Path.Combine(AppsDir, appId);
+        try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        var m = Manifest();
+        if (m.Remove(appId)) WriteManifest(m);
+    }
 }

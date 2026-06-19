@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace JBTheatreTools;
 
 public sealed class MainForm : Form
@@ -9,6 +11,8 @@ public sealed class MainForm : Form
     private readonly FlowLayoutPanel _list = new();
     private readonly Panel _tokenBanner = new();
     private readonly Label _tokenBannerText = new();
+    private readonly Panel _updateBanner = new();
+    private readonly Label _updateBannerText = new();
     private readonly Button _refresh = new();
     private readonly Button _settingsBtn = new();
     private readonly Label _title = new();
@@ -27,30 +31,40 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 4,
+            RowCount = 5,
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));    // header
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));    // launcher-update banner
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));    // token banner
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // list
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));    // footer (credit)
 
         root.Controls.Add(BuildHeader(), 0, 0);
-        root.Controls.Add(BuildTokenBanner(), 0, 1);
+        root.Controls.Add(BuildUpdateBanner(), 0, 1);
+        root.Controls.Add(BuildTokenBanner(), 0, 2);
 
         _list.Dock = DockStyle.Fill;
         _list.FlowDirection = FlowDirection.TopDown;
         _list.WrapContents = false;
         _list.AutoScroll = true;
         _list.Padding = new Padding(10);
-        root.Controls.Add(_list, 0, 2);
+        root.Controls.Add(_list, 0, 3);
 
-        root.Controls.Add(BuildFooter(), 0, 3);
+        root.Controls.Add(BuildFooter(), 0, 4);
 
         Controls.Add(root);
 
         LoadCatalog();
         ApplyTheme();
-        Shown += async (_, _) => await RefreshAllAsync();
+        Shown += async (_, _) =>
+        {
+            _tokenBanner.Visible = TokenStore.Load() == null;
+            if (_settings.UpdateMode == "everyLaunch")
+            {
+                await RefreshAllAsync();
+                await CheckLauncherUpdateAsync();
+            }
+        };
     }
 
     // MARK: - UI construction
@@ -87,6 +101,46 @@ public sealed class MainForm : Form
         return header;
     }
 
+    private Control BuildUpdateBanner()
+    {
+        _updateBanner.Dock = DockStyle.Fill;
+        _updateBanner.Height = 44;
+        _updateBanner.BackColor = Color.FromArgb(219, 234, 254);
+        _updateBanner.Visible = false;
+
+        _updateBannerText.AutoSize = true;
+        _updateBannerText.Location = new Point(14, 13);
+        _updateBannerText.ForeColor = Color.FromArgb(30, 64, 120);
+
+        var download = new Button { Text = "Download Update", AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+        download.Click += async (_, _) =>
+        {
+            if (_catalog.Self == null) return;
+            download.Enabled = false;
+            var prev = download.Text;
+            download.Text = "Downloading…";
+            try
+            {
+                var dest = await LauncherUpdate.DownloadAndRevealAsync(_catalog.Self);
+                _updateBannerText.Text = $"Saved {Path.GetFileName(dest)} to Downloads — quit & replace JB Theatre Tools.";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Download failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                download.Text = prev;
+                download.Enabled = true;
+            }
+        };
+
+        _updateBanner.Controls.Add(_updateBannerText);
+        _updateBanner.Controls.Add(download);
+        _updateBanner.Resize += (_, _) => download.Location = new Point(_updateBanner.Width - download.Width - 14, 8);
+        return _updateBanner;
+    }
+
     private Control BuildTokenBanner()
     {
         _tokenBanner.Dock = DockStyle.Fill;
@@ -112,7 +166,7 @@ public sealed class MainForm : Form
     {
         try
         {
-            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            var asm = Assembly.GetExecutingAssembly();
             var name = asm.GetManifestResourceNames()
                           .FirstOrDefault(n => n.EndsWith("app.ico", StringComparison.OrdinalIgnoreCase));
             if (name == null) return;
@@ -157,6 +211,8 @@ public sealed class MainForm : Form
         {
             var row = new AppRowControl(app) { Width = Math.Max(400, _list.ClientSize.Width - 30) };
             row.InstallRequested += InstallAsync;
+            row.InstallVersionRequested += InstallVersionAsync;
+            row.UninstallRequested += Uninstall;
             row.LaunchRequested += Launch;
             row.SetState(InstallManager.Shared.InstalledVersion(app.Id), null, null, RowStatus.Unknown);
             _rows.Add(row);
@@ -186,12 +242,20 @@ public sealed class MainForm : Form
                 var installed = InstallManager.Shared.InstalledVersion(row.App.Id);
                 try
                 {
-                    var info = await client.LatestReleaseAsync(row.App.Owner, row.App.Repo);
-                    var asset = info.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAssetName);
-                    row.SetState(installed, info.TagName, asset?.Id, ComputeStatus(installed, info.TagName, asset != null));
+                    var all = await client.ReleasesAsync(row.App.Owner, row.App.Repo);
+                    row.SetReleases(all);
+                    var latest = all.FirstOrDefault(r => !r.Prerelease) ?? all.FirstOrDefault();
+                    if (latest == null)
+                    {
+                        row.SetState(installed, null, null, RowStatus.NoRelease);
+                        continue;
+                    }
+                    var asset = latest.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAssetName);
+                    row.SetState(installed, latest.TagName, asset?.Id, ComputeStatus(installed, latest.TagName, asset != null));
                 }
                 catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.NoRelease)
                 {
+                    row.SetReleases(new List<ReleaseInfo>());
                     row.SetState(installed, null, null, RowStatus.NoRelease);
                 }
                 catch
@@ -206,10 +270,12 @@ public sealed class MainForm : Form
         }
     }
 
-    private async Task InstallAsync(AppRowControl row)
+    private Task InstallAsync(AppRowControl row) => InstallVersionAsync(row, null);
+
+    private async Task InstallVersionAsync(AppRowControl row, string? tag)
     {
         var token = TokenStore.Load();
-        if (token == null || row.LatestAssetId == null || row.Latest == null) return;
+        if (token == null) return;
         var assetName = row.App.WindowsAssetName;
         if (assetName == null) return;
 
@@ -217,11 +283,22 @@ public sealed class MainForm : Form
         try
         {
             using var client = new GitHubClient(token);
-            var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{row.App.Id}-{row.Latest}-{assetName}");
+            var releases = row.Releases.Count > 0
+                ? row.Releases
+                : await client.ReleasesAsync(row.App.Owner, row.App.Repo);
+            var rel = tag != null
+                ? releases.FirstOrDefault(r => r.TagName == tag)
+                : (releases.FirstOrDefault(r => !r.Prerelease) ?? releases.FirstOrDefault());
+            if (rel == null) throw new Exception($"Version {tag ?? "latest"} not found.");
+            var asset = rel.Assets.FirstOrDefault(a => a.Name == assetName)
+                ?? throw new Exception($"No Windows asset in {rel.TagName}.");
+
+            var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{row.App.Id}-{rel.TagName}-{assetName}");
             var progress = new Progress<double>(p => row.SetProgress(p));
-            await client.DownloadAssetAsync(row.App.Owner, row.App.Repo, row.LatestAssetId.Value, cache, progress);
-            InstallManager.Shared.Install(row.App, row.Latest, cache, assetName);
-            row.SetState(row.Latest, row.Latest, row.LatestAssetId, RowStatus.UpToDate);
+            await client.DownloadAssetAsync(row.App.Owner, row.App.Repo, asset.Id, cache, progress);
+            InstallManager.Shared.Install(row.App, rel.TagName, cache, assetName);
+            var latest = row.Latest ?? rel.TagName;
+            row.SetState(rel.TagName, row.Latest, row.LatestAssetId, ComputeStatus(rel.TagName, latest, true));
         }
         catch (Exception ex)
         {
@@ -231,6 +308,24 @@ public sealed class MainForm : Form
         finally
         {
             row.SetBusy(false);
+        }
+    }
+
+    private void Uninstall(AppRowControl row)
+    {
+        if (MessageBox.Show(this, $"Uninstall {row.App.Name}?", "Uninstall",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        try
+        {
+            InstallManager.Shared.Uninstall(row.App.Id);
+            var status = row.LatestAssetId != null
+                ? RowStatus.NotInstalled
+                : (row.Latest == null ? RowStatus.Unknown : RowStatus.MissingAsset);
+            row.SetState(null, row.Latest, row.LatestAssetId, status);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Uninstall failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -246,9 +341,30 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task CheckLauncherUpdateAsync()
+    {
+        var s = _catalog.Self;
+        if (s == null) return;
+        try
+        {
+            using var client = new GitHubClient(TokenStore.Load());   // launcher repo is public; token optional
+            var info = await client.LatestReleaseAsync(s.Owner, s.Repo);
+            if (Versions.IsNewer(info.TagName, CurrentVersion()))
+            {
+                _updateBannerText.Text = $"JB Theatre Tools {info.TagName} is available (you have v{CurrentVersion()}).";
+                _updateBanner.Visible = true;
+            }
+            else
+            {
+                _updateBanner.Visible = false;
+            }
+        }
+        catch { /* ignore — self-update check is best-effort */ }
+    }
+
     private void OpenSettings()
     {
-        using var dlg = new SettingsDialog(_settings);
+        using var dlg = new SettingsDialog(_settings, _catalog.Self, CurrentVersion());
         dlg.ApplyTheme(Theme.IsDark(_settings.Appearance));
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
@@ -260,21 +376,17 @@ public sealed class MainForm : Form
 
     // MARK: - Helpers
 
+    private static string CurrentVersion()
+    {
+        var v = Assembly.GetExecutingAssembly().GetName().Version;
+        return v == null ? "1.0.0" : $"{v.Major}.{v.Minor}.{v.Build}";
+    }
+
     private static RowStatus ComputeStatus(string? installed, string latest, bool hasAsset)
     {
         if (!hasAsset) return RowStatus.MissingAsset;
         if (installed == null) return RowStatus.NotInstalled;
-        return VersionsEqual(installed, latest) ? RowStatus.UpToDate : RowStatus.UpdateAvailable;
-    }
-
-    private static bool VersionsEqual(string a, string b)
-    {
-        static string Norm(string s)
-        {
-            s = s.Trim();
-            return s.StartsWith('v') || s.StartsWith('V') ? s[1..] : s;
-        }
-        return Norm(a) == Norm(b);
+        return Versions.Equal(installed, latest) ? RowStatus.UpToDate : RowStatus.UpdateAvailable;
     }
 
     private void ApplyTheme()

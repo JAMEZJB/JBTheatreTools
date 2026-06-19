@@ -1,17 +1,24 @@
 import Foundation
 
 /// Headless command-line interface — used for scripting and for verifying the catalog,
-/// GitHub API access, asset resolution, and the download/install path without the GUI.
+/// GitHub API access, asset resolution, install/uninstall, version listing, and the launcher
+/// self-update check without the GUI.
 ///
 /// Token resolution order: `--token <pat>`, then `$GITHUB_TOKEN`, then the Keychain.
 ///
-///   JBTheatreTools --list            [--token X] [--catalog path]
+///   JBTheatreTools --list                 [--token X] [--catalog path]
 ///   JBTheatreTools --installed
-///   JBTheatreTools --install <id>    [--token X]
-///   JBTheatreTools --launch  <id>
+///   JBTheatreTools --releases <id>        [--token X]
+///   JBTheatreTools --install  <id>        [--tag vX.Y.Z] [--token X]
+///   JBTheatreTools --uninstall <id>
+///   JBTheatreTools --launch   <id>
+///   JBTheatreTools --self-check           [--token X]
 ///   JBTheatreTools --help
 enum CLI {
-    static let commands: Set<String> = ["--list", "--installed", "--install", "--launch", "--help", "-h"]
+    static let commands: Set<String> = [
+        "--list", "--installed", "--releases", "--install", "--uninstall",
+        "--launch", "--self-check", "--self-download", "--help", "-h",
+    ]
 
     static func run(args: [String]) {
         var args = args
@@ -20,12 +27,14 @@ enum CLI {
 
         var token = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
         var catalogPath: String?
+        var tag: String?
         var positional: [String] = []
         var i = 0
         while i < args.count {
             switch args[i] {
             case "--token":   i += 1; token = i < args.count ? args[i] : nil
             case "--catalog": i += 1; catalogPath = i < args.count ? args[i] : nil
+            case "--tag":     i += 1; tag = i < args.count ? args[i] : nil
             default:          positional.append(args[i])
             }
             i += 1
@@ -41,11 +50,15 @@ enum CLI {
         }
 
         switch cmd {
-        case "--list":      list(catalog: catalog, token: token)
-        case "--installed": installed(catalog: catalog)
-        case "--install":   install(catalog: catalog, token: token, id: positional.first)
-        case "--launch":    launch(catalog: catalog, id: positional.first)
-        default:            printHelp()
+        case "--list":       list(catalog: catalog, token: token)
+        case "--installed":  installed(catalog: catalog)
+        case "--releases":   releases(catalog: catalog, token: token, id: positional.first)
+        case "--install":    install(catalog: catalog, token: token, id: positional.first, tag: tag)
+        case "--uninstall":  uninstall(catalog: catalog, id: positional.first)
+        case "--launch":     launch(catalog: catalog, id: positional.first)
+        case "--self-check": selfCheck(catalog: catalog, token: token)
+        case "--self-download": selfDownload(catalog: catalog, token: token, dir: positional.first)
+        default:             printHelp()
         }
     }
 
@@ -92,8 +105,28 @@ enum CLI {
         }
     }
 
-    private static func install(catalog: Catalog, token: String?, id: String?) {
-        guard let id = id, let app = catalog.apps.first(where: { $0.id == id }) else {
+    private static func releases(catalog: Catalog, token: String?, id: String?) {
+        guard let app = appFor(id, catalog) else {
+            fputs("error: pass an app id. Known ids: \(catalog.apps.map { $0.id }.joined(separator: ", "))\n", stderr)
+            exit(1)
+        }
+        guard let token = token else { fputs("error: no token.\n", stderr); exit(1) }
+        let client = GitHubClient(token: token)
+        runBlocking {
+            do {
+                let all = try await client.releases(owner: app.owner, repo: app.repo)
+                print("\(app.name) — \(all.count) release(s):\n")
+                for rel in all {
+                    let hasMac = rel.assets.contains { $0.name == app.macAssetName }
+                    let flags = (rel.prerelease ? " [pre-release]" : "") + (hasMac ? "" : " [no macOS asset]")
+                    print("  \(pad(rel.tagName, 12))\(flags)")
+                }
+            } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
+        }
+    }
+
+    private static func install(catalog: Catalog, token: String?, id: String?, tag: String?) {
+        guard let app = appFor(id, catalog) else {
             fputs("error: pass an app id. Known ids: \(catalog.apps.map { $0.id }.joined(separator: ", "))\n", stderr)
             exit(1)
         }
@@ -105,41 +138,99 @@ enum CLI {
         let im = InstallManager.shared
         runBlocking {
             do {
-                let info = try await client.latestRelease(owner: app.owner, repo: app.repo)
-                guard let asset = info.assets.first(where: { $0.name == app.macAssetName }) else {
-                    fputs("error: release \(info.tagName) has no macOS asset.\n", stderr); exit(1)
+                let all = try await client.releases(owner: app.owner, repo: app.repo)
+                let release = tag != nil
+                    ? all.first { $0.tagName == tag }
+                    : (all.first { !$0.prerelease } ?? all.first)
+                guard let rel = release else { fputs("error: version \(tag ?? "latest") not found.\n", stderr); exit(1) }
+                guard let asset = rel.assets.first(where: { $0.name == app.macAssetName }) else {
+                    fputs("error: release \(rel.tagName) has no macOS asset.\n", stderr); exit(1)
                 }
-                print("Downloading \(asset.name) (\(byteString(asset.size))) @ \(info.tagName)…")
-                let zip = im.cacheDir.appendingPathComponent("\(app.id)-\(info.tagName).zip")
-                // Delegate callbacks are serialised, so an @unchecked Sendable box is safe here.
+                print("Downloading \(asset.name) (\(byteString(asset.size))) @ \(rel.tagName)…")
+                let zip = im.cacheDir.appendingPathComponent("\(app.id)-\(rel.tagName).zip")
                 final class PctBox: @unchecked Sendable { var last = -1 }
                 let pctBox = PctBox()
                 try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: asset.id, to: zip) { p in
                     let pct = Int(p * 100)
                     if pct != pctBox.last, pct % 10 == 0 { pctBox.last = pct; print("  \(pct)%") }
                 }
-                let dest = try im.install(app: app, version: info.tagName, downloadedZip: zip)
+                let dest = try im.install(app: app, version: rel.tagName, downloadedZip: zip)
                 try? FileManager.default.removeItem(at: zip)
-                print("Installed \(app.name) \(info.tagName) → \(dest.path)")
-            } catch {
-                fputs("error: \(error.localizedDescription)\n", stderr); exit(1)
-            }
+                print("Installed \(app.name) \(rel.tagName) → \(dest.path)")
+            } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
         }
     }
 
+    private static func uninstall(catalog: Catalog, id: String?) {
+        guard let app = appFor(id, catalog) else { fputs("error: pass an app id.\n", stderr); exit(1) }
+        do {
+            try InstallManager.shared.uninstall(app.id)
+            print("Uninstalled \(app.name).")
+        } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
+    }
+
     private static func launch(catalog: Catalog, id: String?) {
-        guard let id = id, let app = catalog.apps.first(where: { $0.id == id }) else {
-            fputs("error: pass an app id.\n", stderr); exit(1)
-        }
+        guard let app = appFor(id, catalog) else { fputs("error: pass an app id.\n", stderr); exit(1) }
         do {
             try InstallManager.shared.launch(app: app)
             print("Launched \(app.name).")
-        } catch {
-            fputs("error: \(error.localizedDescription)\n", stderr); exit(1)
+        } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
+    }
+
+    private static func selfCheck(catalog: Catalog, token: String?) {
+        guard let s = catalog.selfInfo else { fputs("error: no `self` entry in catalog.\n", stderr); exit(1) }
+        let current = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
+        let client = GitHubClient(token: token)
+        runBlocking {
+            do {
+                let info = try await client.latestRelease(owner: s.owner, repo: s.repo)
+                let newer = isNewer(info.tagName, than: current)
+                print("JB Theatre Tools: current v\(current), latest \(info.tagName) → \(newer ? "UPDATE AVAILABLE" : "up to date")")
+            } catch GitHubError.noRelease {
+                print("JB Theatre Tools: current v\(current), no launcher release published yet")
+            } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
+        }
+    }
+
+    private static func selfDownload(catalog: Catalog, token: String?, dir: String?) {
+        guard let s = catalog.selfInfo else { fputs("error: no `self` entry in catalog.\n", stderr); exit(1) }
+        let destDir = dir ?? NSTemporaryDirectory()
+        let client = GitHubClient(token: token)
+        runBlocking {
+            do {
+                let info = try await client.latestRelease(owner: s.owner, repo: s.repo)
+                guard let asset = info.assets.first(where: { $0.name == s.macAssetName }) else {
+                    fputs("error: release \(info.tagName) has no macOS asset.\n", stderr); exit(1)
+                }
+                let dest = URL(fileURLWithPath: destDir).appendingPathComponent(asset.name)
+                print("Downloading \(asset.name) (\(byteString(asset.size))) @ \(info.tagName)…")
+                try await client.downloadAsset(owner: s.owner, repo: s.repo, assetId: asset.id, to: dest)
+                print("Saved → \(dest.path)")
+            } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
         }
     }
 
     // MARK: - Helpers
+
+    private static func appFor(_ id: String?, _ catalog: Catalog) -> CatalogApp? {
+        guard let id = id else { return nil }
+        return catalog.apps.first { $0.id == id }
+    }
+
+    private static func isNewer(_ a: String, than b: String) -> Bool {
+        func parts(_ s: String) -> [Int] {
+            var t = s.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("v") || t.hasPrefix("V") { t.removeFirst() }
+            return t.split(separator: ".").map { Int($0.prefix { $0.isNumber }) ?? 0 }
+        }
+        let pa = parts(a), pb = parts(b)
+        for i in 0..<max(pa.count, pb.count) {
+            let x = i < pa.count ? pa[i] : 0
+            let y = i < pb.count ? pb[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
 
     private static func printHelp() {
         print("""
@@ -147,11 +238,15 @@ enum CLI {
 
           --list                 List the catalog with installed & latest versions
           --installed            Show locally installed apps
-          --install <id>         Download & install an app's latest macOS build
-          --launch  <id>         Launch an installed app
+          --releases  <id>       List all available versions of an app
+          --install   <id>       Download & install (latest, or --tag vX.Y.Z for an older one)
+          --uninstall <id>       Remove an installed app
+          --launch    <id>       Launch an installed app
+          --self-check           Check whether a newer launcher release exists
           --help                 This help
 
-        Options: --token <pat>   GitHub PAT (else $GITHUB_TOKEN, else Keychain)
+        Options: --token <pat>    GitHub PAT (else $GITHUB_TOKEN, else Keychain)
+                 --tag <vX.Y.Z>   Install a specific release (with --install)
                  --catalog <path> Use a specific catalog.json
         """)
     }

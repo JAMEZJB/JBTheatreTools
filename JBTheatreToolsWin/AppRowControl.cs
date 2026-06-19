@@ -10,6 +10,7 @@ public sealed class AppRowControl : UserControl
     public long? LatestAssetId { get; private set; }
     public string? Installed { get; private set; }
     public RowStatus Status { get; private set; } = RowStatus.Unknown;
+    public List<ReleaseInfo> Releases { get; private set; } = new();
 
     private readonly Label _name = new();
     private readonly Label _blurb = new();
@@ -17,9 +18,12 @@ public sealed class AppRowControl : UserControl
     private readonly Label _badge = new();
     private readonly Button _install = new();
     private readonly Button _launch = new();
+    private readonly Button _more = new();
     private readonly ProgressBar _progress = new();
 
     public event Func<AppRowControl, Task>? InstallRequested;
+    public event Func<AppRowControl, string, Task>? InstallVersionRequested;
+    public event Action<AppRowControl>? UninstallRequested;
     public event Action<AppRowControl>? LaunchRequested;
 
     public AppRowControl(CatalogApp app)
@@ -53,29 +57,71 @@ public sealed class AppRowControl : UserControl
         _launch.AutoSize = true;
         _launch.Click += (_, _) => LaunchRequested?.Invoke(this);
 
+        _more.Text = "⋯";
+        _more.Size = new Size(30, 24);
+        _more.Click += (_, _) => ShowMoreMenu();
+
         _progress.Style = ProgressBarStyle.Continuous;
         _progress.Maximum = 100;
         _progress.Visible = false;
         _progress.Size = new Size(220, 6);
 
-        Controls.AddRange(new Control[] { _name, _blurb, _version, _badge, _install, _launch, _progress });
+        Controls.AddRange(new Control[] { _name, _blurb, _version, _badge, _install, _launch, _more, _progress });
         Resize += (_, _) => LayoutControls();
         LayoutControls();
         UpdateVisual();
     }
 
+    private void ShowMoreMenu()
+    {
+        var menu = new ContextMenuStrip();
+        if (Releases.Count > 0)
+        {
+            var versions = new ToolStripMenuItem("Install version");
+            foreach (var rel in Releases)
+            {
+                var label = rel.TagName
+                    + (rel.Prerelease ? " (pre-release)" : "")
+                    + (rel.TagName == Installed ? "  ✓ installed" : "");
+                var tag = rel.TagName;
+                var item = new ToolStripMenuItem(label);
+                item.Click += async (_, _) =>
+                {
+                    if (InstallVersionRequested != null) await InstallVersionRequested(this, tag);
+                };
+                versions.DropDownItems.Add(item);
+            }
+            menu.Items.Add(versions);
+        }
+        if (Installed != null)
+        {
+            if (menu.Items.Count > 0) menu.Items.Add(new ToolStripSeparator());
+            var uninstall = new ToolStripMenuItem($"Uninstall {App.Name}");
+            uninstall.Click += (_, _) => UninstallRequested?.Invoke(this);
+            menu.Items.Add(uninstall);
+        }
+        if (menu.Items.Count > 0) menu.Show(_more, new Point(0, _more.Height));
+    }
+
     private void LayoutControls()
     {
-        int right = Width - 14;
-        _launch.Location = new Point(right - _launch.Width, 28);
-        _install.Location = new Point(_launch.Left - _install.Width - 8, 28);
-        _badge.Location = new Point((_install.Visible ? _install.Left : _launch.Left) - _badge.Width - 12, 32);
+        int x = Width - 14;
+        _more.Location = new Point(x - _more.Width, 28); x = _more.Left - 8;
+        if (_launch.Visible) { _launch.Location = new Point(x - _launch.Width, 28); x = _launch.Left - 8; }
+        if (_install.Visible) { _install.Location = new Point(x - _install.Width, 28); x = _install.Left - 8; }
+        _badge.Location = new Point(x - _badge.Width - 4, 32);
         _progress.Location = new Point(14, 70);
     }
 
     public void SetChecking()
     {
         Status = RowStatus.Checking;
+        UpdateVisual();
+    }
+
+    public void SetReleases(List<ReleaseInfo> releases)
+    {
+        Releases = releases;
         UpdateVisual();
     }
 
@@ -98,6 +144,7 @@ public sealed class AppRowControl : UserControl
     {
         _install.Enabled = !busy;
         _launch.Enabled = !busy;
+        _more.Enabled = !busy;
         _progress.Visible = busy;
         if (!busy) _progress.Value = 0;
     }
@@ -125,6 +172,7 @@ public sealed class AppRowControl : UserControl
         _install.Text = Status == RowStatus.UpdateAvailable ? "Update" : (installed ? "Retry" : "Install");
         _install.Enabled = LatestAssetId != null;
         _launch.Visible = installed && Status is RowStatus.UpToDate or RowStatus.UpdateAvailable or RowStatus.Error;
+        _more.Visible = Releases.Count > 0 || installed;
 
         LayoutControls();
     }

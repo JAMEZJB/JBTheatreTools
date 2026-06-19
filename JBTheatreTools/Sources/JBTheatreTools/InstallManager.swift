@@ -102,6 +102,16 @@ final class InstallManager {
         try proc.run()
     }
 
+    /// Removes the installed `.app` bundle and its manifest entry.
+    func uninstall(_ appId: String) throws {
+        var m = manifest()
+        if let rec = m[appId] {
+            try? fm.removeItem(at: URL(fileURLWithPath: rec.path))
+        }
+        m.removeValue(forKey: appId)
+        writeManifest(m)
+    }
+
     // MARK: - Helpers
 
     private func ditto(extract zip: URL, to dir: URL) throws {

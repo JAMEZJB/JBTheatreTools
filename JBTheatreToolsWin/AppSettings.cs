@@ -6,6 +6,7 @@ namespace JBTheatreTools;
 public sealed class AppSettings
 {
     public string Appearance { get; set; } = "system";   // "system" | "light" | "dark"
+    public string UpdateMode { get; set; } = "everyLaunch"; // "everyLaunch" | "manual" | "never"
 
     private static string Dir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JBTheatreTools");

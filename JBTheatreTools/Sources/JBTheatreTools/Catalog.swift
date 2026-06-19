@@ -5,6 +5,13 @@ import Foundation
 struct Catalog: Decodable {
     let schemaVersion: Int
     let apps: [CatalogApp]
+    /// JBTheatreTools' own release info, for the launcher self-update check.
+    let selfInfo: SelfInfo?
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, apps
+        case selfInfo = "self"
+    }
 
     /// Loads the catalog from (1) an explicit path, (2) the app bundle, or
     /// (3) by walking up from the current directory (dev / CLI use).
@@ -46,5 +53,13 @@ struct CatalogApp: Decodable, Identifiable {
     let assets: [String: String]
 
     /// The macOS launcher only ever installs the macOS build of each tool.
+    var macAssetName: String? { assets["macos"] }
+}
+
+/// JBTheatreTools' own release info (for the self-update check).
+struct SelfInfo: Decodable {
+    let owner: String
+    let repo: String
+    let assets: [String: String]
     var macAssetName: String? { assets["macos"] }
 }

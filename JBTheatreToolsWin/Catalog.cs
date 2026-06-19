@@ -12,6 +12,8 @@ public sealed class Catalog
 {
     [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; set; }
     [JsonPropertyName("apps")] public List<CatalogApp> Apps { get; set; } = new();
+    /// <summary>JBTheatreTools' own release info, for the launcher self-update check.</summary>
+    [JsonPropertyName("self")] public SelfInfo? Self { get; set; }
 
     /// <summary>Loads from (1) an explicit path, (2) the embedded resource, or (3) a parent dir of CWD.</summary>
     public static Catalog Load(string? explicitPath = null)
@@ -60,4 +62,12 @@ public sealed class CatalogApp
 
     /// <summary>The Windows asset name for this machine's architecture.</summary>
     public string? WindowsAssetName => Assets.TryGetValue(Platform.AssetKey, out var n) ? n : null;
+}
+
+/// <summary>JBTheatreTools' own release info (for the self-update check).</summary>
+public sealed class SelfInfo
+{
+    [JsonPropertyName("owner")] public string Owner { get; set; } = "";
+    [JsonPropertyName("repo")] public string Repo { get; set; } = "";
+    [JsonPropertyName("assets")] public Dictionary<string, string> Assets { get; set; } = new();
 }

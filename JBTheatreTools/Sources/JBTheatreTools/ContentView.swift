@@ -22,9 +22,24 @@ enum AppAppearance: String, CaseIterable, Identifiable {
     }
 }
 
+/// When the launcher automatically checks for updates.
+enum UpdateCheckMode: String, CaseIterable, Identifiable {
+    case everyLaunch, manual, never
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .everyLaunch: return "Every launch"
+        case .manual: return "Manual only"
+        case .never: return "Never"
+        }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var state: AppState
     @AppStorage("theatre.appearance") private var appearance: AppAppearance = .system
+    @AppStorage("theatre.updateMode") private var updateMode: UpdateCheckMode = .everyLaunch
     @State private var showSettings = false
     @State private var refreshing = false
 
@@ -39,7 +54,7 @@ struct ContentView: View {
         .frame(minWidth: 600, minHeight: 440)
         .preferredColorScheme(appearance.colorScheme)
         .sheet(isPresented: $showSettings) {
-            SettingsView(appearance: $appearance).environmentObject(state)
+            SettingsView(appearance: $appearance, updateMode: $updateMode).environmentObject(state)
         }
         .task { await firstRefresh() }
     }
@@ -76,6 +91,7 @@ struct ContentView: View {
             banner(err, systemImage: "exclamationmark.triangle.fill", tint: .red)
             Spacer()
         } else {
+            if let v = state.launcherUpdateAvailable { launcherBanner(v) }
             if !state.hasToken { tokenBanner }
             List {
                 ForEach($state.rows) { $row in
@@ -85,6 +101,28 @@ struct ContentView: View {
             }
             .listStyle(.plain)
         }
+    }
+
+    private func launcherBanner(_ version: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.down.circle.fill").foregroundStyle(.blue)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("JB Theatre Tools \(version) is available").font(.callout).bold()
+                Text(state.launcherDownloadMessage ?? "You're running v\(state.currentVersion).")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button {
+                Task { await state.downloadLauncherUpdate() }
+            } label: {
+                if state.launcherDownloading { ProgressView().controlSize(.small) }
+                else { Text("Download Update") }
+            }
+            .disabled(state.launcherDownloading)
+        }
+        .padding(12)
+        .background(Color.blue.opacity(0.12))
     }
 
     private var tokenBanner: some View {
@@ -121,8 +159,9 @@ struct ContentView: View {
     }
 
     private func firstRefresh() async {
-        guard state.hasToken, !refreshing else { return }
-        await refreshAll()
+        guard updateMode == .everyLaunch, !refreshing else { return }
+        if state.hasToken { await refreshAll() }
+        await state.checkLauncherUpdate()
     }
 
     private func refreshAll() async {
@@ -215,7 +254,41 @@ struct AppRowView: View {
             default:
                 EmptyView()
             }
+            if !row.releases.isEmpty || row.installed != nil { rowMenu }
         }
+    }
+
+    /// Overflow menu: install a specific (older) version, or uninstall.
+    private var rowMenu: some View {
+        Menu {
+            if !row.releases.isEmpty {
+                Section("Install version") {
+                    ForEach(row.releases) { rel in
+                        Button { Task { await state.install(row.id, tag: rel.tagName) } }
+                            label: { Text(versionLabel(rel)) }
+                    }
+                }
+            }
+            if row.installed != nil {
+                Divider()
+                Button("Uninstall \(row.app.name)", role: .destructive) {
+                    state.uninstall(row.id)
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(row.busy)
+        .help("More versions & uninstall")
+    }
+
+    private func versionLabel(_ rel: ReleaseInfo) -> String {
+        var s = rel.tagName
+        if rel.prerelease { s += " (pre-release)" }
+        if rel.tagName == row.installed { s += "  ✓ installed" }
+        return s
     }
 
     private func installButton(title: String) -> some View {

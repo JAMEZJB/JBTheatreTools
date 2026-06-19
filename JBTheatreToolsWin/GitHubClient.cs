@@ -15,6 +15,8 @@ public sealed class ReleaseInfo
 {
     [JsonPropertyName("tag_name")] public string TagName { get; set; } = "";
     [JsonPropertyName("assets")] public List<ReleaseAsset> Assets { get; set; } = new();
+    [JsonPropertyName("prerelease")] public bool Prerelease { get; set; }
+    [JsonPropertyName("draft")] public bool Draft { get; set; }
 }
 
 public enum GitHubErrorKind { NoRelease, Http, AssetNotFound, Bad }
@@ -36,10 +38,11 @@ public sealed class GitHubException : Exception
 /// </summary>
 public sealed class GitHubClient : IDisposable
 {
-    private readonly string _token;
+    private readonly string? _token;
     private readonly HttpClient _http;
 
-    public GitHubClient(string token)
+    /// <summary>`token` may be null for unauthenticated calls against public repos (self-update check).</summary>
+    public GitHubClient(string? token)
     {
         _token = token;
         _http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
@@ -51,7 +54,8 @@ public sealed class GitHubClient : IDisposable
     private HttpRequestMessage NewRequest(string url, string accept)
     {
         var req = new HttpRequestMessage(HttpMethod.Get, url);
-        req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {_token}");
+        if (!string.IsNullOrEmpty(_token))
+            req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {_token}");
         req.Headers.TryAddWithoutValidation("Accept", accept);
         req.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2022-11-28");
         req.Headers.TryAddWithoutValidation("User-Agent", "JBTheatreTools");
@@ -70,6 +74,21 @@ public sealed class GitHubClient : IDisposable
         var json = await resp.Content.ReadAsStringAsync();
         return JsonSerializer.Deserialize<ReleaseInfo>(json)
             ?? throw new GitHubException(GitHubErrorKind.Bad, "Unexpected response from GitHub.");
+    }
+
+    /// <summary>Fetches all (non-draft) releases, newest first — used for the version picker.</summary>
+    public async Task<List<ReleaseInfo>> ReleasesAsync(string owner, string repo)
+    {
+        var url = $"https://api.github.com/repos/{owner}/{repo}/releases?per_page=50";
+        using var req = NewRequest(url, "application/vnd.github+json");
+        using var resp = await _http.SendAsync(req);
+        if (resp.StatusCode == HttpStatusCode.NotFound)
+            throw new GitHubException(GitHubErrorKind.NoRelease, "No published release found.");
+        if (!resp.IsSuccessStatusCode)
+            throw new GitHubException(GitHubErrorKind.Http, $"GitHub returned HTTP {(int)resp.StatusCode}.");
+        var json = await resp.Content.ReadAsStringAsync();
+        var all = JsonSerializer.Deserialize<List<ReleaseInfo>>(json) ?? new();
+        return all.Where(r => !r.Draft).ToList();
     }
 
     public async Task DownloadAssetAsync(string owner, string repo, long assetId, string dest,

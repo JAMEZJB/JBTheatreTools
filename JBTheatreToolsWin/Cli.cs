@@ -8,10 +8,13 @@ namespace JBTheatreTools;
 ///
 /// Token order: <c>--token &lt;pat&gt;</c>, then <c>$GITHUB_TOKEN</c>, then Credential Manager.
 ///
-///   JBTheatreTools.exe --list            [--token X] [--catalog path]
+///   JBTheatreTools.exe --list                 [--token X] [--catalog path]
 ///   JBTheatreTools.exe --installed
-///   JBTheatreTools.exe --install &lt;id&gt;    [--token X]
-///   JBTheatreTools.exe --launch  &lt;id&gt;
+///   JBTheatreTools.exe --releases &lt;id&gt;        [--token X]
+///   JBTheatreTools.exe --install  &lt;id&gt;        [--tag vX.Y.Z] [--token X]
+///   JBTheatreTools.exe --uninstall &lt;id&gt;
+///   JBTheatreTools.exe --launch   &lt;id&gt;
+///   JBTheatreTools.exe --self-check           [--token X]
 ///   JBTheatreTools.exe --help
 /// </summary>
 public static class Cli
@@ -23,6 +26,7 @@ public static class Cli
 
         string? token = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
         string? catalogPath = null;
+        string? tag = null;
         var positional = new List<string>();
         for (int i = 1; i < args.Length; i++)
         {
@@ -30,6 +34,7 @@ public static class Cli
             {
                 case "--token": if (++i < args.Length) token = args[i]; break;
                 case "--catalog": if (++i < args.Length) catalogPath = args[i]; break;
+                case "--tag": if (++i < args.Length) tag = args[i]; break;
                 default: positional.Add(args[i]); break;
             }
         }
@@ -41,11 +46,14 @@ public static class Cli
 
         return cmd switch
         {
-            "--list"      => await ListAsync(catalog, token),
-            "--installed" => Installed(catalog),
-            "--install"   => await InstallAsync(catalog, token, positional.FirstOrDefault()),
-            "--launch"    => Launch(catalog, positional.FirstOrDefault()),
-            _             => PrintHelpReturn(),
+            "--list"       => await ListAsync(catalog, token),
+            "--installed"  => Installed(catalog),
+            "--releases"   => await ReleasesAsync(catalog, token, positional.FirstOrDefault()),
+            "--install"    => await InstallAsync(catalog, token, positional.FirstOrDefault(), tag),
+            "--uninstall"  => Uninstall(catalog, positional.FirstOrDefault()),
+            "--launch"     => Launch(catalog, positional.FirstOrDefault()),
+            "--self-check" => await SelfCheckAsync(catalog, token),
+            _              => PrintHelpReturn(),
         };
     }
 
@@ -89,7 +97,28 @@ public static class Cli
         return 0;
     }
 
-    private static async Task<int> InstallAsync(Catalog catalog, string? token, string? id)
+    private static async Task<int> ReleasesAsync(Catalog catalog, string? token, string? id)
+    {
+        var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
+        if (app == null) { Console.Error.WriteLine($"error: pass an app id. Known ids: {string.Join(", ", catalog.Apps.Select(a => a.Id))}"); return 1; }
+        if (token == null) { Console.Error.WriteLine("error: no token."); return 1; }
+        using var client = new GitHubClient(token);
+        try
+        {
+            var all = await client.ReleasesAsync(app.Owner, app.Repo);
+            Console.WriteLine($"{app.Name} — {all.Count} release(s):\n");
+            foreach (var rel in all)
+            {
+                bool hasWin = rel.Assets.Any(a => a.Name == app.WindowsAssetName);
+                var flags = (rel.Prerelease ? " [pre-release]" : "") + (hasWin ? "" : $" [no {Platform.AssetKey} asset]");
+                Console.WriteLine($"  {Pad(rel.TagName, 12)}{flags}");
+            }
+            return 0;
+        }
+        catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
+    }
+
+    private static async Task<int> InstallAsync(Catalog catalog, string? token, string? id, string? tag)
     {
         var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
         if (app == null)
@@ -102,12 +131,16 @@ public static class Cli
         using var client = new GitHubClient(token);
         try
         {
-            var info = await client.LatestReleaseAsync(app.Owner, app.Repo);
-            var asset = info.Assets.FirstOrDefault(a => a.Name == app.WindowsAssetName);
-            if (asset == null) { Console.Error.WriteLine($"error: release {info.TagName} has no {Platform.AssetKey} asset."); return 1; }
+            var all = await client.ReleasesAsync(app.Owner, app.Repo);
+            var rel = tag != null
+                ? all.FirstOrDefault(r => r.TagName == tag)
+                : (all.FirstOrDefault(r => !r.Prerelease) ?? all.FirstOrDefault());
+            if (rel == null) { Console.Error.WriteLine($"error: version {tag ?? "latest"} not found."); return 1; }
+            var asset = rel.Assets.FirstOrDefault(a => a.Name == app.WindowsAssetName);
+            if (asset == null) { Console.Error.WriteLine($"error: release {rel.TagName} has no {Platform.AssetKey} asset."); return 1; }
 
-            Console.WriteLine($"Downloading {asset.Name} ({ByteString(asset.Size)}) @ {info.TagName}…");
-            var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{app.Id}-{info.TagName}-{asset.Name}");
+            Console.WriteLine($"Downloading {asset.Name} ({ByteString(asset.Size)}) @ {rel.TagName}…");
+            var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{app.Id}-{rel.TagName}-{asset.Name}");
             int last = -1;
             var progress = new Progress<double>(p =>
             {
@@ -115,10 +148,18 @@ public static class Cli
                 if (pct != last && pct % 10 == 0) { last = pct; Console.WriteLine($"  {pct}%"); }
             });
             await client.DownloadAssetAsync(app.Owner, app.Repo, asset.Id, cache, progress);
-            var dest = InstallManager.Shared.Install(app, info.TagName, cache, asset.Name);
-            Console.WriteLine($"Installed {app.Name} {info.TagName} → {dest}");
+            var dest = InstallManager.Shared.Install(app, rel.TagName, cache, asset.Name);
+            Console.WriteLine($"Installed {app.Name} {rel.TagName} → {dest}");
             return 0;
         }
+        catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
+    }
+
+    private static int Uninstall(Catalog catalog, string? id)
+    {
+        var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
+        if (app == null) { Console.Error.WriteLine("error: pass an app id."); return 1; }
+        try { InstallManager.Shared.Uninstall(app.Id); Console.WriteLine($"Uninstalled {app.Name}."); return 0; }
         catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
     }
 
@@ -127,6 +168,29 @@ public static class Cli
         var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
         if (app == null) { Console.Error.WriteLine("error: pass an app id."); return 1; }
         try { InstallManager.Shared.Launch(app); Console.WriteLine($"Launched {app.Name}."); return 0; }
+        catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
+    }
+
+    private static async Task<int> SelfCheckAsync(Catalog catalog, string? token)
+    {
+        var s = catalog.Self;
+        if (s == null) { Console.Error.WriteLine("error: no `self` entry in catalog."); return 1; }
+        var current = "1.0.0";
+        var v = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        if (v != null) current = $"{v.Major}.{v.Minor}.{v.Build}";
+        using var client = new GitHubClient(token);
+        try
+        {
+            var info = await client.LatestReleaseAsync(s.Owner, s.Repo);
+            var newer = Versions.IsNewer(info.TagName, current);
+            Console.WriteLine($"JB Theatre Tools: current v{current}, latest {info.TagName} → {(newer ? "UPDATE AVAILABLE" : "up to date")}");
+            return 0;
+        }
+        catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.NoRelease)
+        {
+            Console.WriteLine($"JB Theatre Tools: current v{current}, no launcher release published yet");
+            return 0;
+        }
         catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
     }
 
@@ -143,11 +207,15 @@ public static class Cli
 
           --list                 List the catalog with installed & latest versions
           --installed            Show locally installed apps
-          --install <id>         Download & install an app's latest Windows build
-          --launch  <id>         Launch an installed app
+          --releases  <id>       List all available versions of an app
+          --install   <id>       Download & install (latest, or --tag vX.Y.Z for an older one)
+          --uninstall <id>       Remove an installed app
+          --launch    <id>       Launch an installed app
+          --self-check           Check whether a newer launcher release exists
           --help                 This help
 
         Options: --token <pat>    GitHub PAT (else $GITHUB_TOKEN, else Credential Manager)
+                 --tag <vX.Y.Z>   Install a specific release (with --install)
                  --catalog <path> Use a specific catalog.json
         """);
 

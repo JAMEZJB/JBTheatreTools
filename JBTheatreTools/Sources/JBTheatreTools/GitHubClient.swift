@@ -6,12 +6,15 @@ struct ReleaseAsset: Decodable {
     let size: Int
 }
 
-struct ReleaseInfo: Decodable {
+struct ReleaseInfo: Decodable, Identifiable {
     let tagName: String
     let assets: [ReleaseAsset]
+    let prerelease: Bool
+    let draft: Bool
+    var id: String { tagName }
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
-        case assets
+        case assets, prerelease, draft
     }
 }
 
@@ -39,7 +42,7 @@ enum GitHubError: LocalizedError {
 /// that carries both a Bearer header and its own signed query params. We do that in the
 /// `willPerformHTTPRedirection` delegate below.
 final class GitHubClient: NSObject {
-    private let token: String
+    private let token: String?
     private let lock = NSLock()
     private var contexts: [Int: DownloadContext] = [:]
 
@@ -49,14 +52,17 @@ final class GitHubClient: NSObject {
         return URLSession(configuration: .default, delegate: self, delegateQueue: queue)
     }()
 
-    init(token: String) {
+    /// `token` may be nil for unauthenticated calls against public repos (e.g. the self-update check).
+    init(token: String?) {
         self.token = token
         super.init()
     }
 
     private func apiRequest(_ url: URL, accept: String) -> URLRequest {
         var req = URLRequest(url: url)
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let token = token, !token.isEmpty {
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         req.setValue(accept, forHTTPHeaderField: "Accept")
         req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
         req.setValue("JBTheatreTools", forHTTPHeaderField: "User-Agent")
@@ -72,6 +78,17 @@ final class GitHubClient: NSObject {
         if http.statusCode == 404 { throw GitHubError.noRelease }
         guard http.statusCode == 200 else { throw GitHubError.http(http.statusCode) }
         return try JSONDecoder().decode(ReleaseInfo.self, from: data)
+    }
+
+    /// Fetches all (non-draft) releases, newest first — used for the version picker.
+    func releases(owner: String, repo: String) async throws -> [ReleaseInfo] {
+        let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases?per_page=50")!
+        let req = apiRequest(url, accept: "application/vnd.github+json")
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw GitHubError.badResponse }
+        if http.statusCode == 404 { throw GitHubError.noRelease }
+        guard http.statusCode == 200 else { throw GitHubError.http(http.statusCode) }
+        return try JSONDecoder().decode([ReleaseInfo].self, from: data).filter { !$0.draft }
     }
 
     /// Downloads a release asset by id to `dest`, reporting fractional progress (0…1).
