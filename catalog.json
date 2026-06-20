@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64. macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check.",
+  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64. macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. NOTE: NetworkPortMap / ProjectorControl / ShowDashboard / ShowHandbook asset names are PROVISIONAL until each ships its first release — the launcher shows 'No release' until then, and the controller reconciles the exact names at release time.",
   "self": {
     "owner": "JAMEZJB",
     "repo": "JBTheatreTools",
@@ -21,18 +21,6 @@
         "macos": "HeloControl-macOS.zip",
         "windows-x64": "HeloControl-Windows-x64.exe",
         "windows-arm64": "HeloControl-Windows-arm64.exe"
-      }
-    },
-    {
-      "id": "machineinventory",
-      "name": "Machine Inventory",
-      "blurb": "Collect hardware / software inventory from show machines.",
-      "owner": "JAMEZJB",
-      "repo": "ShowMachinesInventory",
-      "assets": {
-        "macos": "MachineInventory-macOS.zip",
-        "windows-x64": "MachineInventory-Windows-x64.exe",
-        "windows-arm64": "MachineInventory-Windows-arm64.exe"
       }
     },
     {
@@ -57,6 +45,66 @@
         "macos": "CiscoBrotherLabels-macOS.zip",
         "windows-x64": "CiscoBrotherLabels-Windows-x64.exe",
         "windows-arm64": "CiscoBrotherLabels-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "machineinventory",
+      "name": "Machine Inventory",
+      "blurb": "Collect hardware / software inventory from show machines.",
+      "owner": "JAMEZJB",
+      "repo": "ShowMachinesInventory",
+      "assets": {
+        "macos": "MachineInventory-macOS.zip",
+        "windows-x64": "MachineInventory-Windows-x64.exe",
+        "windows-arm64": "MachineInventory-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "networkportmap",
+      "name": "Network Port Map",
+      "blurb": "Map network switch ports to the devices plugged into them.",
+      "owner": "JAMEZJB",
+      "repo": "NetworkPortMap",
+      "assets": {
+        "macos": "NetworkPortMap-macOS.zip",
+        "windows-x64": "NetworkPortMap-Windows-x64.exe",
+        "windows-arm64": "NetworkPortMap-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "projectorcontrol",
+      "name": "Projector Control",
+      "blurb": "Control theatre projectors over PJLink (Panasonic / Epson).",
+      "owner": "JAMEZJB",
+      "repo": "ProjectorControl",
+      "assets": {
+        "macos": "ProjectorControl-macOS.zip",
+        "windows-x64": "ProjectorControl-Windows-x64.exe",
+        "windows-arm64": "ProjectorControl-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "showdashboard",
+      "name": "Show Dashboard",
+      "blurb": "Generate a Node-RED show-control dashboard for a production.",
+      "owner": "JAMEZJB",
+      "repo": "ShowDashboard",
+      "assets": {
+        "macos": "ShowDashboard-macOS.zip",
+        "windows-x64": "ShowDashboard-Windows-x64.exe",
+        "windows-arm64": "ShowDashboard-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "showhandbook",
+      "name": "Show Handbook",
+      "blurb": "Generate a per-show video handbook document.",
+      "owner": "JAMEZJB",
+      "repo": "ShowHandbook",
+      "assets": {
+        "macos": "ShowHandbook-macOS.zip",
+        "windows-x64": "ShowHandbook-Windows-x64.exe",
+        "windows-arm64": "ShowHandbook-Windows-arm64.exe"
       }
     }
   ]
