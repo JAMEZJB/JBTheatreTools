@@ -20,6 +20,10 @@ struct ReleaseInfo: Decodable, Identifiable {
 
 enum GitHubError: LocalizedError {
     case noRelease
+    /// The token can't see this repository (private + not in the token's scope, or nonexistent).
+    case notAccessible
+    /// The token itself is invalid or expired (HTTP 401).
+    case unauthorized
     case http(Int)
     case assetNotFound(String)
     case badResponse
@@ -27,6 +31,8 @@ enum GitHubError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noRelease: return "No published release found."
+        case .notAccessible: return "This token can’t access that repository."
+        case .unauthorized: return "GitHub token is invalid or expired."
         case .http(let c): return "GitHub returned HTTP \(c)."
         case .assetNotFound(let n): return "Release has no asset named “\(n)”."
         case .badResponse: return "Unexpected response from GitHub."
@@ -80,13 +86,17 @@ final class GitHubClient: NSObject {
         return try JSONDecoder().decode(ReleaseInfo.self, from: data)
     }
 
-    /// Fetches all (non-draft) releases, newest first — used for the version picker.
+    /// Fetches all (non-draft) releases, newest first — used for the version picker and to gate
+    /// which apps are shown. The list endpoint returns `200 []` for an accessible repo with no
+    /// releases and `404` only when the token can't see the repo, so a 404 here means **no access**
+    /// (not "no release") and a 401 means the token itself is bad.
     func releases(owner: String, repo: String) async throws -> [ReleaseInfo] {
         let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases?per_page=50")!
         let req = apiRequest(url, accept: "application/vnd.github+json")
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw GitHubError.badResponse }
-        if http.statusCode == 404 { throw GitHubError.noRelease }
+        if http.statusCode == 401 { throw GitHubError.unauthorized }
+        if http.statusCode == 404 { throw GitHubError.notAccessible }
         guard http.statusCode == 200 else { throw GitHubError.http(http.statusCode) }
         return try JSONDecoder().decode([ReleaseInfo].self, from: data).filter { !$0.draft }
     }

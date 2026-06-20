@@ -15,7 +15,7 @@
     <!-- File description shown in Task Manager / file properties; window title is set in code. -->
     <AssemblyTitle>JB Theatre Tools</AssemblyTitle>
     <Product>JB Theatre Tools</Product>
-    <Version>1.1.2</Version>
+    <Version>1.2.0</Version>
     <Company>James Breedon</Company>
     <RootNamespace>JBTheatreTools</RootNamespace>
     <ApplicationIcon>app.ico</ApplicationIcon>

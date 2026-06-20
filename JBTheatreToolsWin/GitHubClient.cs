@@ -19,7 +19,7 @@ public sealed class ReleaseInfo
     [JsonPropertyName("draft")] public bool Draft { get; set; }
 }
 
-public enum GitHubErrorKind { NoRelease, Http, AssetNotFound, Bad }
+public enum GitHubErrorKind { NoRelease, NotAccessible, Unauthorized, Http, AssetNotFound, Bad }
 
 public sealed class GitHubException : Exception
 {
@@ -76,14 +76,21 @@ public sealed class GitHubClient : IDisposable
             ?? throw new GitHubException(GitHubErrorKind.Bad, "Unexpected response from GitHub.");
     }
 
-    /// <summary>Fetches all (non-draft) releases, newest first — used for the version picker.</summary>
+    /// <summary>
+    /// Fetches all (non-draft) releases, newest first — used for the version picker and to gate
+    /// which apps are shown. The list endpoint returns <c>200 []</c> for an accessible repo with no
+    /// releases and <c>404</c> only when the token can't see the repo, so a 404 here means
+    /// <b>no access</b> (not "no release") and a 401 means the token itself is bad.
+    /// </summary>
     public async Task<List<ReleaseInfo>> ReleasesAsync(string owner, string repo)
     {
         var url = $"https://api.github.com/repos/{owner}/{repo}/releases?per_page=50";
         using var req = NewRequest(url, "application/vnd.github+json");
         using var resp = await _http.SendAsync(req);
+        if (resp.StatusCode == HttpStatusCode.Unauthorized)
+            throw new GitHubException(GitHubErrorKind.Unauthorized, "GitHub token is invalid or expired.");
         if (resp.StatusCode == HttpStatusCode.NotFound)
-            throw new GitHubException(GitHubErrorKind.NoRelease, "No published release found.");
+            throw new GitHubException(GitHubErrorKind.NotAccessible, "This token can’t access that repository.");
         if (!resp.IsSuccessStatusCode)
             throw new GitHubException(GitHubErrorKind.Http, $"GitHub returned HTTP {(int)resp.StatusCode}.");
         var json = await resp.Content.ReadAsStringAsync();

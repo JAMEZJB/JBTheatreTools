@@ -42,7 +42,7 @@ struct SettingsView: View {
                     Link("Create a fine-grained token on GitHub →",
                          destination: URL(string: "https://github.com/settings/personal-access-tokens/new")!)
                         .font(.caption)
-                    Text("Give it Contents: Read-only on your tool repos.")
+                    Text("Give it Contents: Read-only. Only the repos this token can access appear in the list.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

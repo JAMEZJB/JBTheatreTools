@@ -10,6 +10,8 @@ final class AppState: ObservableObject {
     enum Status: Equatable {
         case unknown
         case checking
+        /// The saved token can't see this app's repo — the row is hidden from the list.
+        case noAccess
         case noRelease
         case missingAsset
         case notInstalled
@@ -137,10 +139,18 @@ final class AppState: ObservableObject {
     func refreshAll() async {
         await ensureKeychainExplained()
         guard let token = currentToken() else { return }
+        // Clear a stale network/token error from a previous run (but keep a catalog-load error,
+        // which leaves `rows` empty).
+        if !rows.isEmpty { globalError = nil }
         let client = GitHubClient(token: token)
         for i in rows.indices {
             await refresh(index: i, client: client)
         }
+    }
+
+    /// True once a refresh has run and the token turned out to reach none of the catalog apps.
+    var noAppsAccessible: Bool {
+        !rows.isEmpty && rows.allSatisfy { $0.status == .noAccess }
     }
 
     private func refresh(index: Int, client: GitHubClient) async {
@@ -161,6 +171,16 @@ final class AppState: ObservableObject {
             rows[index].latest = latest.tagName
             rows[index].latestAssetId = assetId
             rows[index].status = Self.status(installed: rows[index].installed, latest: latest.tagName, hasAsset: assetId != nil)
+        } catch GitHubError.notAccessible {
+            // Token can't see this repo → hide the row from the list.
+            rows[index].latest = nil
+            rows[index].latestAssetId = nil
+            rows[index].releases = []
+            rows[index].status = .noAccess
+        } catch GitHubError.unauthorized {
+            // The token itself is bad — surface one clear message instead of 4 broken rows.
+            rows[index].status = .noAccess
+            globalError = "Your GitHub token is invalid or expired. Open Settings to paste a new one."
         } catch GitHubError.noRelease {
             rows[index].latest = nil
             rows[index].releases = []

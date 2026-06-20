@@ -67,7 +67,7 @@ public sealed class SettingsDialog : Form
 
         var help = new Label
         {
-            Text = "Give it Contents: Read-only on your tool repos.",
+            Text = "Contents: Read-only. Only repos it can access appear here.",
             AutoSize = false,
             Location = new Point(16, 154),
             Size = new Size(428, 20),

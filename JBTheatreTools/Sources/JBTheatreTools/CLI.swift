@@ -75,15 +75,23 @@ enum CLI {
                 var latest = "?", note = ""
                 if let client = client {
                     do {
-                        let info = try await client.latestRelease(owner: app.owner, repo: app.repo)
-                        latest = info.tagName
-                        if let a = info.assets.first(where: { $0.name == app.macAssetName }) {
-                            note = "\(a.name) (\(byteString(a.size)))"
+                        // Use the releases LIST endpoint so we can tell "no access" (404 → hidden in
+                        // the GUI) apart from "accessible but no release yet" (200 []).
+                        let all = try await client.releases(owner: app.owner, repo: app.repo)
+                        if let rel = all.first(where: { !$0.prerelease }) ?? all.first {
+                            latest = rel.tagName
+                            if let a = rel.assets.first(where: { $0.name == app.macAssetName }) {
+                                note = "\(a.name) (\(byteString(a.size)))"
+                            } else {
+                                note = "⚠︎ no macOS asset (\(app.macAssetName ?? "?"))"
+                            }
                         } else {
-                            note = "⚠︎ no macOS asset (\(app.macAssetName ?? "?"))"
+                            latest = "none"; note = "accessible, no release yet"
                         }
-                    } catch GitHubError.noRelease {
-                        latest = "none"; note = "no published release"
+                    } catch GitHubError.notAccessible {
+                        latest = "—"; note = "HIDDEN — token has no access to this repo"
+                    } catch GitHubError.unauthorized {
+                        latest = "—"; note = "token invalid or expired"
                     } catch {
                         latest = "error"; note = error.localizedDescription
                     }

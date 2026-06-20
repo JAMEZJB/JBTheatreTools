@@ -19,6 +19,11 @@ public sealed class MainForm : Form
     private readonly Label _subtitle = new();
     private readonly Label _credit = new();
 
+    // Notice-banner messages (the banner doubles as the no-token / bad-token / no-access notice).
+    private const string NoTokenMsg = "Add a GitHub token to enable downloads  —  Settings → paste a fine-grained PAT.";
+    private const string BadTokenMsg = "Your GitHub token is invalid or expired  —  open Settings to paste a new one.";
+    private const string NoAccessMsg = "This token can’t access any apps  —  check its repository access, or ask James.";
+
     public MainForm()
     {
         Text = "JB Theatre Tools";
@@ -58,7 +63,7 @@ public sealed class MainForm : Form
         ApplyTheme();
         Shown += async (_, _) =>
         {
-            _tokenBanner.Visible = TokenStore.Load() == null;
+            ShowNotice(TokenStore.Load() == null ? NoTokenMsg : null);
             if (_settings.UpdateMode == "everyLaunch")
             {
                 await RefreshAllAsync();
@@ -148,7 +153,7 @@ public sealed class MainForm : Form
         _tokenBanner.BackColor = Color.FromArgb(255, 244, 214);
         _tokenBanner.Visible = false;
 
-        _tokenBannerText.Text = "Add a GitHub token to enable downloads  —  Settings → paste a fine-grained PAT.";
+        _tokenBannerText.Text = NoTokenMsg;
         _tokenBannerText.AutoSize = true;
         _tokenBannerText.Location = new Point(14, 13);
         _tokenBannerText.ForeColor = Color.FromArgb(120, 80, 0);
@@ -230,15 +235,17 @@ public sealed class MainForm : Form
     private async Task RefreshAllAsync()
     {
         var token = TokenStore.Load();
-        _tokenBanner.Visible = token == null;
-        if (token == null) return;
+        if (token == null) { ShowNotice(NoTokenMsg); return; }
+        ShowNotice(null);
 
         _refresh.Enabled = false;
+        bool unauthorized = false;
         try
         {
             using var client = new GitHubClient(token);
             foreach (var row in _rows)
             {
+                row.Visible = true;
                 row.SetChecking();
                 var installed = InstallManager.Shared.InstalledVersion(row.App.Id);
                 row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.Id));
@@ -255,6 +262,15 @@ public sealed class MainForm : Form
                     var asset = latest.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAssetName);
                     row.SetState(installed, latest.TagName, asset?.Id, ComputeStatus(installed, latest.TagName, asset != null));
                 }
+                catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.NotAccessible)
+                {
+                    row.Visible = false;   // token can't see this repo → hide the row
+                }
+                catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.Unauthorized)
+                {
+                    unauthorized = true;
+                    row.Visible = false;
+                }
                 catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.NoRelease)
                 {
                     row.SetReleases(new List<ReleaseInfo>());
@@ -265,11 +281,23 @@ public sealed class MainForm : Form
                     row.SetState(installed, null, null, RowStatus.Error);
                 }
             }
+
+            // One clear notice for the whole-token states instead of rows full of errors.
+            if (unauthorized) ShowNotice(BadTokenMsg);
+            else if (_rows.All(r => !r.Visible)) ShowNotice(NoAccessMsg);
+            else ShowNotice(null);
         }
         finally
         {
             _refresh.Enabled = true;
         }
+    }
+
+    /// <summary>Shows the notice banner with <paramref name="text"/>, or hides it when null.</summary>
+    private void ShowNotice(string? text)
+    {
+        if (text != null) _tokenBannerText.Text = text;
+        _tokenBanner.Visible = text != null;
     }
 
     private Task InstallAsync(AppRowControl row) => InstallVersionAsync(row, null);

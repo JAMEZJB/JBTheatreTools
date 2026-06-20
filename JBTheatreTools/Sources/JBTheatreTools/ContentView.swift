@@ -96,14 +96,28 @@ struct ContentView: View {
         } else {
             if let v = state.launcherUpdateAvailable { launcherBanner(v) }
             if !state.hasToken { tokenBanner }
-            List {
-                ForEach($state.rows) { $row in
-                    AppRowView(row: $row)
-                    if row.id != state.rows.last?.id { Divider() }
+            if state.hasToken, state.noAppsAccessible {
+                banner("This token can’t access any apps. Check the token’s repository access in Settings, or ask James.",
+                       systemImage: "lock.fill", tint: .orange)
+                Spacer()
+            } else {
+                List {
+                    // Apps the token can't see are hidden (status == .noAccess).
+                    ForEach($state.rows) { $row in
+                        if row.status != .noAccess {
+                            AppRowView(row: $row)
+                            if row.id != lastVisibleRowID { Divider() }
+                        }
+                    }
                 }
+                .listStyle(.plain)
             }
-            .listStyle(.plain)
         }
+    }
+
+    /// id of the last *visible* row, so the inter-row divider isn't drawn after the final one.
+    private var lastVisibleRowID: String? {
+        state.rows.last { $0.status != .noAccess }?.id
     }
 
     private func launcherBanner(_ version: String) -> some View {
@@ -226,6 +240,9 @@ struct AppRowView: View {
             badge("No macOS build", color: .orange)
         case .error(let msg):
             badge("Error", color: .red).help(msg)
+        case .noAccess:
+            // Row is filtered out of the list; nothing to show.
+            EmptyView()
         case .unknown:
             EmptyView()
         }
