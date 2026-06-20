@@ -17,7 +17,7 @@ import Foundation
 enum CLI {
     static let commands: Set<String> = [
         "--list", "--installed", "--releases", "--install", "--uninstall",
-        "--launch", "--self-check", "--self-download", "--help", "-h",
+        "--launch", "--self-check", "--self-download", "--code-id", "--help", "-h",
     ]
 
     static func run(args: [String]) {
@@ -58,6 +58,7 @@ enum CLI {
         case "--launch":     launch(catalog: catalog, id: positional.first)
         case "--self-check": selfCheck(catalog: catalog, token: token)
         case "--self-download": selfDownload(catalog: catalog, token: token, dir: positional.first)
+        case "--code-id":    print(CodeIdentity.current())
         default:             printHelp()
         }
     }

@@ -42,15 +42,19 @@ final class AppState: ObservableObject {
     }
 
     @Published var rows: [Row] = []
-    @Published var hasToken: Bool = TokenStore.load() != nil
+    @Published var hasToken: Bool = TokenStore.exists()
     @Published var globalError: String?
     /// Set to the latest tag when a newer launcher release exists (drives the in-app banner).
     @Published var launcherUpdateAvailable: String?
     @Published var launcherDownloading = false
     /// Set after a self-update download (e.g. "Saved to Downloads — quit & replace.").
     @Published var launcherDownloadMessage: String?
+    /// Drives the "after an update, macOS will ask for your password" explainer sheet.
+    @Published var showKeychainExplainer = false
 
     private var selfInfo: SelfInfo?
+    private var explainerContinuation: CheckedContinuation<Void, Never>?
+    private static let codeIDKey = "theatre.lastKeychainCodeID"
 
     var currentVersion: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
@@ -77,6 +81,9 @@ final class AppState: ObservableObject {
         guard !trimmed.isEmpty else { return }
         TokenStore.save(trimmed)
         hasToken = true
+        // The current build just created the Keychain item, so it can read it without prompting —
+        // record this identity so the explainer doesn't fire until the next update.
+        stampCodeIdentity()
     }
 
     func clearToken() {
@@ -90,10 +97,46 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Keychain access explainer (macOS only)
+
+    /// Reads the token, recording the current code identity on success so the explainer won't
+    /// re-fire for this build. Returns nil if absent or the user denied the Keychain prompt.
+    private func currentToken() -> String? {
+        let token = TokenStore.load()
+        if token != nil { stampCodeIdentity() }
+        return token
+    }
+
+    private func stampCodeIdentity() {
+        UserDefaults.standard.set(CodeIdentity.current(), forKey: Self.codeIDKey)
+    }
+
+    /// Call before the first token read of a flow. If a token is saved and the running build differs
+    /// from the one that last accessed it (i.e. an update — so macOS WILL prompt), shows the
+    /// explainer first and waits for the user to acknowledge it.
+    func ensureKeychainExplained() async {
+        guard TokenStore.cachedToken == nil else { return }   // already read this session → no prompt coming
+        guard TokenStore.exists() else { return }             // nothing saved → no read → no prompt
+        let last = UserDefaults.standard.string(forKey: Self.codeIDKey)
+        guard last != CodeIdentity.current() else { return }  // same build → OS won't prompt
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            explainerContinuation = cont
+            showKeychainExplainer = true
+        }
+    }
+
+    /// Invoked when the user dismisses/acknowledges the explainer — resumes the waiting flow.
+    func acknowledgeKeychainExplainer() {
+        showKeychainExplainer = false
+        explainerContinuation?.resume()
+        explainerContinuation = nil
+    }
+
     // MARK: - Refresh
 
     func refreshAll() async {
-        guard let token = TokenStore.load() else { return }
+        await ensureKeychainExplained()
+        guard let token = currentToken() else { return }
         let client = GitHubClient(token: token)
         for i in rows.indices {
             await refresh(index: i, client: client)
@@ -161,7 +204,9 @@ final class AppState: ObservableObject {
 
     /// Installs an app — the latest release, or a specific `tag` (for installing older versions).
     func install(_ id: String, tag: String? = nil) async {
-        guard let token = TokenStore.load(), let i = rows.firstIndex(where: { $0.id == id }) else { return }
+        guard let i = rows.firstIndex(where: { $0.id == id }) else { return }
+        await ensureKeychainExplained()
+        guard let token = currentToken() else { return }
         let app = rows[i].app
         rows[i].busy = true
         rows[i].progress = 0
@@ -234,7 +279,9 @@ final class AppState: ObservableObject {
     @discardableResult
     func checkLauncherUpdate() async -> LauncherCheck {
         guard let s = selfInfo else { return .unavailable("No self-update info in catalog.") }
-        let client = GitHubClient(token: TokenStore.load())   // the launcher repo is public; token optional
+        // The launcher repo is public — use the token only if already in memory; never force a
+        // Keychain read here (would trigger the prompt for a check that doesn't need auth).
+        let client = GitHubClient(token: TokenStore.cachedToken)
         do {
             let info = try await client.latestRelease(owner: s.owner, repo: s.repo)
             let newer = Self.versionIsNewer(info.tagName, than: currentVersion)
@@ -255,7 +302,7 @@ final class AppState: ObservableObject {
         launcherDownloadMessage = nil
         defer { launcherDownloading = false }
 
-        let client = GitHubClient(token: TokenStore.load())
+        let client = GitHubClient(token: TokenStore.cachedToken)   // public repo; no forced Keychain read
         do {
             let info = try await client.latestRelease(owner: s.owner, repo: s.repo)
             guard let asset = info.assets.first(where: { $0.name == s.macAssetName }) else {

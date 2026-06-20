@@ -56,6 +56,9 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView(appearance: $appearance, updateMode: $updateMode).environmentObject(state)
         }
+        .sheet(isPresented: $state.showKeychainExplainer, onDismiss: { state.acknowledgeKeychainExplainer() }) {
+            KeychainExplainerView { state.acknowledgeKeychainExplainer() }
+        }
         .task { await firstRefresh() }
     }
 
