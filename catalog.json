@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64. macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. NOTE: NetworkPortMap / ProjectorControl / ShowDashboard / ShowHandbook asset names are PROVISIONAL until each ships its first release — the launcher shows 'No release' until then, and the controller reconciles the exact names at release time.",
+  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64. macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. All eight apps ship installable releases; asset names verified against the live releases 2026-06-20.",
   "self": {
     "owner": "JAMEZJB",
     "repo": "JBTheatreTools",
