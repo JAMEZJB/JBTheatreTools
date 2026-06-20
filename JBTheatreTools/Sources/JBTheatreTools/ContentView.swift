@@ -179,7 +179,7 @@ struct AppRowView: View {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(row.app.name).font(.body).bold()
+                Text(row.displayName).font(.body).bold()
                 Text(row.app.blurb).font(.caption).foregroundStyle(.secondary)
                 versionLine
                 if row.busy {
@@ -271,7 +271,7 @@ struct AppRowView: View {
             }
             if row.installed != nil {
                 Divider()
-                Button("Uninstall \(row.app.name)", role: .destructive) {
+                Button("Uninstall \(row.displayName)", role: .destructive) {
                     state.uninstall(row.id)
                 }
             }

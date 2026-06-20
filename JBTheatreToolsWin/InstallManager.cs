@@ -71,6 +71,20 @@ public sealed class InstallManager
         return m.TryGetValue(id, out var r) && File.Exists(r.Path) ? r.Path : null;
     }
 
+    /// <summary>The installed app's own display name, read live from the exe's version info
+    /// (ProductName) — the authoritative "what this app calls itself", so an installed row is never wrong.</summary>
+    public string? InstalledDisplayName(string id)
+    {
+        var path = InstalledPath(id);
+        if (path == null) return null;
+        try
+        {
+            var name = System.Diagnostics.FileVersionInfo.GetVersionInfo(path).ProductName;
+            return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+        }
+        catch { return null; }
+    }
+
     /// <summary>Installs a downloaded self-contained .exe and records its version.</summary>
     public string Install(CatalogApp app, string version, string downloadedExe, string assetName)
     {

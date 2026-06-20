@@ -71,6 +71,19 @@ final class InstallManager {
         return fm.fileExists(atPath: url.path) ? url : nil
     }
 
+    /// The installed app's own display name, read live from its bundle `Info.plist`.
+    /// This is the authoritative "what this app calls itself" — so an installed row is never wrong.
+    func installedDisplayName(_ appId: String) -> String? {
+        guard let appURL = installedPath(appId) else { return nil }
+        let plistURL = appURL.appendingPathComponent("Contents/Info.plist")
+        guard let data = try? Data(contentsOf: plistURL),
+              let obj = try? PropertyListSerialization.propertyList(from: data, format: nil),
+              let dict = obj as? [String: Any] else { return nil }
+        let name = (dict["CFBundleDisplayName"] as? String) ?? (dict["CFBundleName"] as? String)
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty == false) ? trimmed : nil
+    }
+
     // MARK: - Install / launch
 
     /// Extracts `downloadedZip` (a macOS app archive) and installs the contained `.app`.

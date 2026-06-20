@@ -215,6 +215,7 @@ public sealed class MainForm : Form
             row.UninstallRequested += Uninstall;
             row.LaunchRequested += Launch;
             row.SetState(InstallManager.Shared.InstalledVersion(app.Id), null, null, RowStatus.Unknown);
+            row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(app.Id));
             _rows.Add(row);
             _list.Controls.Add(row);
         }
@@ -240,6 +241,7 @@ public sealed class MainForm : Form
             {
                 row.SetChecking();
                 var installed = InstallManager.Shared.InstalledVersion(row.App.Id);
+                row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.Id));
                 try
                 {
                     var all = await client.ReleasesAsync(row.App.Owner, row.App.Repo);
@@ -299,6 +301,7 @@ public sealed class MainForm : Form
             InstallManager.Shared.Install(row.App, rel.TagName, cache, assetName);
             var latest = row.Latest ?? rel.TagName;
             row.SetState(rel.TagName, row.Latest, row.LatestAssetId, ComputeStatus(rel.TagName, latest, true));
+            row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.Id));
         }
         catch (Exception ex)
         {
@@ -313,7 +316,7 @@ public sealed class MainForm : Form
 
     private void Uninstall(AppRowControl row)
     {
-        if (MessageBox.Show(this, $"Uninstall {row.App.Name}?", "Uninstall",
+        if (MessageBox.Show(this, $"Uninstall {row.DisplayName}?", "Uninstall",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         try
         {
@@ -322,6 +325,7 @@ public sealed class MainForm : Form
                 ? RowStatus.NotInstalled
                 : (row.Latest == null ? RowStatus.Unknown : RowStatus.MissingAsset);
             row.SetState(null, row.Latest, row.LatestAssetId, status);
+            row.SetResolvedName(null);
         }
         catch (Exception ex)
         {

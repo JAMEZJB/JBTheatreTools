@@ -35,6 +35,10 @@ final class AppState: ObservableObject {
         var status: Status = .unknown
         var busy: Bool = false
         var progress: Double = 0
+        /// The installed app's self-declared name (read from its bundle); overrides the catalog name.
+        var resolvedName: String?
+        /// Name to show: the installed app's own name when available, else the catalog name.
+        var displayName: String { resolvedName ?? app.name }
     }
 
     @Published var rows: [Row] = []
@@ -57,7 +61,9 @@ final class AppState: ObservableObject {
             let catalog = try Catalog.load()
             selfInfo = catalog.selfInfo
             rows = catalog.apps.map {
-                Row(app: $0, installed: InstallManager.shared.installedVersion($0.id))
+                Row(app: $0,
+                    installed: InstallManager.shared.installedVersion($0.id),
+                    resolvedName: InstallManager.shared.installedDisplayName($0.id))
             }
         } catch {
             globalError = "Could not load app catalog: \(error.localizedDescription)"
@@ -98,6 +104,7 @@ final class AppState: ObservableObject {
         let app = rows[index].app
         rows[index].status = .checking
         rows[index].installed = InstallManager.shared.installedVersion(app.id)
+        rows[index].resolvedName = InstallManager.shared.installedDisplayName(app.id)
         do {
             let all = try await client.releases(owner: app.owner, repo: app.repo)
             rows[index].releases = all
@@ -187,6 +194,7 @@ final class AppState: ObservableObject {
             try InstallManager.shared.install(app: app, version: rel.tagName, downloadedZip: zipDest)
             try? FileManager.default.removeItem(at: zipDest)
             rows[i].installed = rel.tagName
+            rows[i].resolvedName = InstallManager.shared.installedDisplayName(app.id)
             rows[i].status = Self.status(installed: rel.tagName, latest: rows[i].latest ?? rel.tagName, hasAsset: true)
         } catch {
             rows[i].status = .error(error.localizedDescription)
@@ -198,6 +206,7 @@ final class AppState: ObservableObject {
         do {
             try InstallManager.shared.uninstall(id)
             rows[i].installed = nil
+            rows[i].resolvedName = nil
             if rows[i].latestAssetId != nil {
                 rows[i].status = .notInstalled
             } else if rows[i].latest == nil {

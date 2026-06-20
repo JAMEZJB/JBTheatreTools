@@ -11,6 +11,10 @@ public sealed class AppRowControl : UserControl
     public string? Installed { get; private set; }
     public RowStatus Status { get; private set; } = RowStatus.Unknown;
     public List<ReleaseInfo> Releases { get; private set; } = new();
+    /// <summary>The installed app's self-declared name (from its exe); overrides the catalog name.</summary>
+    public string? ResolvedName { get; private set; }
+    /// <summary>Name to show: the installed app's own name when available, else the catalog name.</summary>
+    public string DisplayName => string.IsNullOrEmpty(ResolvedName) ? App.Name : ResolvedName!;
 
     private readonly Label _name = new();
     private readonly Label _blurb = new();
@@ -96,7 +100,7 @@ public sealed class AppRowControl : UserControl
         if (Installed != null)
         {
             if (menu.Items.Count > 0) menu.Items.Add(new ToolStripSeparator());
-            var uninstall = new ToolStripMenuItem($"Uninstall {App.Name}");
+            var uninstall = new ToolStripMenuItem($"Uninstall {DisplayName}");
             uninstall.Click += (_, _) => UninstallRequested?.Invoke(this);
             menu.Items.Add(uninstall);
         }
@@ -123,6 +127,13 @@ public sealed class AppRowControl : UserControl
     {
         Releases = releases;
         UpdateVisual();
+    }
+
+    public void SetResolvedName(string? name)
+    {
+        ResolvedName = name;
+        _name.Text = DisplayName;
+        LayoutControls();
     }
 
     public void SetState(string? installed, string? latest, long? assetId, RowStatus status)

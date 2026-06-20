@@ -13,7 +13,7 @@
   "apps": [
     {
       "id": "helocontrol",
-      "name": "HeloControl",
+      "name": "HELO Control",
       "blurb": "Control AJA HELO stream / record encoders.",
       "owner": "JAMEZJB",
       "repo": "HeloControl",
@@ -49,7 +49,7 @@
     },
     {
       "id": "ciscobrotherlabels",
-      "name": "CiscoBrotherLabels",
+      "name": "Cisco Brother Labels",
       "blurb": "Generate Brother P-touch port labels from Cisco switch configs.",
       "owner": "JAMEZJB",
       "repo": "CiscoBrotherLabels",
