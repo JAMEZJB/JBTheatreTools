@@ -167,7 +167,7 @@ public sealed class AppRowControl : UserControl
         (string text, Color color) = Status switch
         {
             RowStatus.UpToDate => ("Up to date", Color.SeaGreen),
-            RowStatus.UpdateAvailable => ("Update", Color.RoyalBlue),
+            RowStatus.UpdateAvailable => ("Update", Theme.Accent),
             RowStatus.NotInstalled => ("Not installed", Color.Gray),
             RowStatus.Installed => ("Installed", Color.Gray),
             RowStatus.NoRelease => ("No release", Color.Gray),

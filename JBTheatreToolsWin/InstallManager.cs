@@ -149,4 +149,38 @@ public sealed class InstallManager
         try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
         if (m.Remove(appId)) WriteManifest(m);
     }
+
+    // MARK: - Reconcile install location (Windows: the exe never moves, only its shortcuts)
+
+    /// <summary>True if the app's shortcuts don't match the setting (need creating, or removing).</summary>
+    public bool NeedsShortcutSync(string appId, bool toApplications)
+    {
+        var m = Manifest();
+        if (!m.TryGetValue(appId, out var r) || !File.Exists(r.Path)) return false;
+        bool has = !string.IsNullOrEmpty(r.ShortcutName);
+        return toApplications ? !has : has;
+    }
+
+    /// <summary>Adds or removes an installed app's Start Menu/Desktop shortcuts to match the setting.</summary>
+    public void SyncShortcuts(CatalogApp app, bool toApplications)
+    {
+        var m = Manifest();
+        if (!m.TryGetValue(app.Id, out var r) || !File.Exists(r.Path)) return;
+        if (toApplications)
+        {
+            if (string.IsNullOrEmpty(r.ShortcutName))
+            {
+                var name = Shortcuts.SafeName(TryProductName(r.Path) ?? app.Name);
+                Shortcuts.Create(name, r.Path);
+                r.ShortcutName = name;
+                WriteManifest(m);
+            }
+        }
+        else if (!string.IsNullOrEmpty(r.ShortcutName))
+        {
+            Shortcuts.Remove(r.ShortcutName!);
+            r.ShortcutName = null;
+            WriteManifest(m);
+        }
+    }
 }

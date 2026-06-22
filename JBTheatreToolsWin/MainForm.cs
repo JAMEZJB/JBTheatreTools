@@ -116,12 +116,12 @@ public sealed class MainForm : Form
     {
         _updateBanner.Dock = DockStyle.Fill;
         _updateBanner.Height = 44;
-        _updateBanner.BackColor = Color.FromArgb(219, 234, 254);
+        _updateBanner.BackColor = Color.FromArgb(243, 232, 252);   // light tint of the suite accent #AF52DE
         _updateBanner.Visible = false;
 
         _updateBannerText.AutoSize = true;
         _updateBannerText.Location = new Point(14, 13);
-        _updateBannerText.ForeColor = Color.FromArgb(30, 64, 120);
+        _updateBannerText.ForeColor = Color.FromArgb(96, 40, 140);   // deep purple, readable on the tint
 
         var download = new Button { Text = "Download Update", AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right };
         download.Click += async (_, _) =>
@@ -454,14 +454,38 @@ public sealed class MainForm : Form
 
     private void OpenSettings()
     {
+        bool prevInstallLoc = _settings.InstallToApplications;
         using var dlg = new SettingsDialog(_settings, _catalog.Self, CurrentVersion());
         dlg.ApplyTheme(Theme.IsDark(_settings.Appearance));
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _settings.Save();
             ApplyTheme();
+            if (_settings.InstallToApplications != prevInstallLoc)
+                ReconcileInstallLocation(_settings.InstallToApplications);
             _ = RefreshAllAsync();
         }
+    }
+
+    /// <summary>When the install-location setting changes, offer to add/remove shortcuts for ALL
+    /// installed apps so they don't end up split. (Windows: the exe never moves — only its shortcuts.)</summary>
+    private void ReconcileInstallLocation(bool toApplications)
+    {
+        var affected = _rows.Where(r =>
+            InstallManager.Shared.InstalledVersion(r.App.Id) != null &&
+            InstallManager.Shared.NeedsShortcutSync(r.App.Id, toApplications)).ToList();
+        if (affected.Count == 0) return;
+
+        var verb = toApplications
+            ? "add Start menu & Desktop shortcuts for"
+            : "remove the Start menu & Desktop shortcuts for";
+        if (MessageBox.Show(this,
+                $"Do you want to {verb} your {affected.Count} installed app(s)?",
+                "Install location changed", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return;
+
+        foreach (var r in affected)
+            InstallManager.Shared.SyncShortcuts(r.App, toApplications);
     }
 
     // MARK: - Helpers

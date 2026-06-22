@@ -55,6 +55,13 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Drives the "move your installed apps?" confirmation when the install-location setting changes.
+    struct RelocationPrompt: Identifiable {
+        let id = UUID()
+        let toApplications: Bool
+        let count: Int
+    }
+
     @Published var rows: [Row] = []
     @Published var hasToken: Bool = TokenStore.exists()
     @Published var globalError: String?
@@ -67,6 +74,10 @@ final class AppState: ObservableObject {
     @Published var showKeychainExplainer = false
     /// True once at least one full refresh has completed (gates the "no apps for this token" state).
     @Published var hasRefreshed = false
+    /// Set when the install-location setting changes and some installed apps need moving → shows a
+    /// confirmation. A short note is shown afterwards if any app couldn't be moved (e.g. it was open).
+    @Published var relocationPrompt: RelocationPrompt?
+    @Published var relocationNote: String?
 
     private var selfInfo: SelfInfo?
     private var explainerContinuation: CheckedContinuation<Void, Never>?
@@ -313,6 +324,41 @@ final class AppState: ObservableObject {
             rows[i].status = .error(error.localizedDescription)
         }
     }
+
+    // MARK: - Install-location relocation
+
+    /// Called when the "install to Applications" setting changes. If some installed apps are still in
+    /// the other location, raises a confirmation to move them all so the setting stays truthful.
+    func installLocationChanged(toApplications: Bool) {
+        let count = rows.filter {
+            $0.installed != nil && InstallManager.shared.needsRelocation($0.id, toApplications: toApplications)
+        }.count
+        relocationPrompt = count > 0 ? RelocationPrompt(toApplications: toApplications, count: count) : nil
+    }
+
+    /// Moves every installed app to match the chosen location, collecting any that couldn't move
+    /// (e.g. because they're currently open) to report back to the user.
+    func performRelocation() async {
+        guard let prompt = relocationPrompt else { return }
+        relocationPrompt = nil
+        var failed: [String] = []
+        for i in rows.indices where rows[i].installed != nil {
+            do {
+                try InstallManager.shared.relocate(rows[i].id, toApplications: prompt.toApplications)
+            } catch {
+                failed.append(rows[i].displayName)
+            }
+            rows[i].installed = InstallManager.shared.installedVersion(rows[i].id)
+            rows[i].resolvedName = InstallManager.shared.installedDisplayName(rows[i].id)
+        }
+        if !failed.isEmpty {
+            let target = prompt.toApplications ? "the Applications folder" : "the launcher"
+            let them = failed.count == 1 ? "it" : "them"
+            relocationNote = "Couldn't move \(failed.joined(separator: ", ")) to \(target) — \(failed.count == 1 ? "it may be" : "they may be") open. Close \(them) and toggle the setting again."
+        }
+    }
+
+    func cancelRelocation() { relocationPrompt = nil }
 
     // MARK: - Launcher self-update
 

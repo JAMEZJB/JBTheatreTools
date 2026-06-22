@@ -57,7 +57,14 @@ public sealed class SettingsDialog : Form
 
         _remove.Text = "Remove";
         _remove.Location = new Point(_save.Right + 8, 98);
-        _remove.Click += (_, _) => { TokenStore.Clear(); UpdateTokenState(); };
+        _remove.Click += (_, _) =>
+        {
+            if (MessageBox.Show(this,
+                    "Remove the saved token? You'll need to paste one again before you can install or update apps.",
+                    "Remove token", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            TokenStore.Clear();
+            UpdateTokenState();
+        };
 
         var tokenLink = new LinkLabel
         {

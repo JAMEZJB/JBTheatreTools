@@ -1,5 +1,11 @@
 import SwiftUI
 
+extension Color {
+    /// JB Theatre Tools suite accent (signed-off palette): purple #AF52DE.
+    /// Applied via `.tint(...)` (this SwiftPM app has no asset catalog for an AccentColor asset).
+    static let jbAccent = Color(red: 175 / 255, green: 82 / 255, blue: 222 / 255)
+}
+
 /// User-selectable window appearance. `.system` follows macOS.
 enum AppAppearance: String, CaseIterable, Identifiable {
     case system, light, dark
@@ -68,6 +74,7 @@ struct ContentView: View {
             credit
         }
         .frame(minWidth: 600, minHeight: 440)
+        .tint(.jbAccent)
         // Intercept the window's close button so "keep running" can hide instead of quit.
         // The closure reads the live setting from UserDefaults at close time.
         .background(WindowCloseConfigurator(shouldKeepRunning: {
@@ -146,7 +153,7 @@ struct ContentView: View {
 
     private func launcherBanner(_ version: String) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: "arrow.down.circle.fill").foregroundStyle(.blue)
+            Image(systemName: "arrow.down.circle.fill").foregroundStyle(Color.jbAccent)
             VStack(alignment: .leading, spacing: 1) {
                 Text("JB Theatre Tools \(version) is available").font(.callout).bold()
                 Text(state.launcherDownloadMessage ?? "You're running v\(state.currentVersion).")
@@ -163,7 +170,7 @@ struct ContentView: View {
             .disabled(state.launcherDownloading)
         }
         .padding(12)
-        .background(Color.blue.opacity(0.12))
+        .background(Color.jbAccent.opacity(0.12))
     }
 
     private var tokenBanner: some View {
@@ -216,6 +223,7 @@ struct ContentView: View {
 struct AppRowView: View {
     @EnvironmentObject var state: AppState
     @Binding var row: AppState.Row
+    @State private var confirmingUninstall = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -235,6 +243,13 @@ struct AppRowView: View {
         }
         .padding(.vertical, 10)
         .padding(.horizontal, 4)
+        .confirmationDialog("Uninstall \(row.displayName)?",
+                            isPresented: $confirmingUninstall, titleVisibility: .visible) {
+            Button("Uninstall", role: .destructive) { state.uninstall(row.id) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the installed app from your Mac. You can reinstall it anytime.")
+        }
     }
 
     private var versionLine: some View {
@@ -255,7 +270,7 @@ struct AppRowView: View {
         case .upToDate:
             badge("Up to date", color: .green)
         case .updateAvailable:
-            badge("Update", color: .blue)
+            badge("Update", color: .jbAccent)
         case .notInstalled:
             badge("Not installed", color: .secondary)
         case .installed:
@@ -317,7 +332,7 @@ struct AppRowView: View {
             if row.installed != nil {
                 Divider()
                 Button("Uninstall \(row.displayName)", role: .destructive) {
-                    state.uninstall(row.id)
+                    confirmingUninstall = true
                 }
             }
         } label: {

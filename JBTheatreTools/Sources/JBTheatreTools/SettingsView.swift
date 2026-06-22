@@ -10,6 +10,7 @@ struct SettingsView: View {
     @State private var tokenField = ""
     @State private var checkingLauncher = false
     @State private var launcherResult: AppState.LauncherCheck?
+    @State private var confirmingTokenRemove = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -36,7 +37,7 @@ struct SettingsView: View {
                         .disabled(tokenField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                         if state.hasToken {
-                            Button("Remove", role: .destructive) { state.clearToken() }
+                            Button("Remove", role: .destructive) { confirmingTokenRemove = true }
                         }
                         Spacer()
                     }
@@ -124,6 +125,37 @@ struct SettingsView: View {
         }
         .padding(22)
         .frame(width: 470)
+        .tint(.jbAccent)
+        // When the setting changes, offer to move already-installed apps so they don't end up split
+        // across both locations. (single-param onChange for macOS 13 compatibility)
+        .onChange(of: installToApplications) { newValue in
+            state.installLocationChanged(toApplications: newValue)
+        }
+        .alert("Move installed apps?", isPresented: Binding(
+            get: { state.relocationPrompt != nil },
+            set: { if !$0 { state.cancelRelocation() } }
+        )) {
+            Button("Move") { Task { await state.performRelocation() } }
+            Button("Not now", role: .cancel) { state.cancelRelocation() }
+        } message: {
+            if let p = state.relocationPrompt {
+                Text("You have \(p.count) installed app\(p.count == 1 ? "" : "s") in \(p.toApplications ? "the launcher" : "the Applications folder"). Move \(p.count == 1 ? "it" : "them") to \(p.toApplications ? "the Applications folder" : "the launcher") now? (New installs already go there.)")
+            }
+        }
+        .alert("Some apps couldn’t move", isPresented: Binding(
+            get: { state.relocationNote != nil },
+            set: { if !$0 { state.relocationNote = nil } }
+        )) {
+            Button("OK", role: .cancel) { state.relocationNote = nil }
+        } message: {
+            Text(state.relocationNote ?? "")
+        }
+        .confirmationDialog("Remove saved token?", isPresented: $confirmingTokenRemove, titleVisibility: .visible) {
+            Button("Remove", role: .destructive) { state.clearToken() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You'll need to paste a token again before you can install or update apps.")
+        }
     }
 
     private var updateModeHint: String {

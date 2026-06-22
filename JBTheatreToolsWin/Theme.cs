@@ -29,6 +29,9 @@ public static class Theme
     public static Color Fg(bool dark) => dark ? Color.FromArgb(235, 235, 235) : Color.FromArgb(20, 20, 20);
     public static Color Sub(bool dark) => dark ? Color.FromArgb(165, 165, 165) : Color.FromArgb(110, 110, 110);
 
+    /// <summary>Suite accent (signed-off palette): purple #AF52DE, constant across light/dark.</summary>
+    public static Color Accent => Color.FromArgb(175, 82, 222);
+
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 

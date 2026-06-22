@@ -124,6 +124,38 @@ final class InstallManager {
         return fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)
     }
 
+    // MARK: - Relocation (keep all installs in the location the user picked)
+
+    /// True if the installed app's bundle is NOT where the current `toApplications` setting wants it.
+    func needsRelocation(_ appId: String, toApplications: Bool) -> Bool {
+        guard let rec = manifest()[appId], fm.fileExists(atPath: rec.path) else { return false }
+        let parent = URL(fileURLWithPath: rec.path).deletingLastPathComponent().standardizedFileURL.path
+        return toApplications ? !isApplicationsParent(parent)
+                              : parent != appsDir.standardizedFileURL.path
+    }
+
+    /// Moves an installed app's `.app` bundle to match the `toApplications` setting and updates the
+    /// manifest path. No-op if it's already in the right place. Throws if the move fails (e.g. the app
+    /// is running) so the caller can report it.
+    func relocate(_ appId: String, toApplications: Bool) throws {
+        guard needsRelocation(appId, toApplications: toApplications) else { return }
+        var m = manifest()
+        guard let rec = m[appId] else { return }
+        let current = URL(fileURLWithPath: rec.path)
+        let targetDir = toApplications ? applicationsInstallDir() : appsDir
+        try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        let dest = targetDir.appendingPathComponent(current.lastPathComponent)
+        if dest.standardizedFileURL.path != current.standardizedFileURL.path { try? fm.removeItem(at: dest) }
+        try fm.moveItem(at: current, to: dest)
+        m[appId]?.path = dest.path
+        writeManifest(m)
+    }
+
+    private func isApplicationsParent(_ path: String) -> Bool {
+        let user = fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications").standardizedFileURL.path
+        return path == "/Applications" || path == user
+    }
+
     func launch(app: CatalogApp) throws {
         guard let path = installedPath(app.id) else { throw InstallError.notInstalled }
         let proc = Process()

@@ -82,7 +82,7 @@ func drawTile(center: NSPoint, color: NSColor, s: CGFloat) {
 let green = NSColor(red: 0.27, green: 0.85, blue: 0.42, alpha: 1)
 let blue = NSColor(red: 0.30, green: 0.62, blue: 0.95, alpha: 1)
 let amber = NSColor(red: 0.98, green: 0.72, blue: 0.20, alpha: 1)
-let violet = NSColor(red: 0.62, green: 0.46, blue: 0.96, alpha: 1)
+let violet = NSColor(red: 0.686, green: 0.322, blue: 0.871, alpha: 1)   // suite accent #AF52DE
 
 let gc = NSPoint(x: r.midX, y: 560)
 let off: CGFloat = 96
