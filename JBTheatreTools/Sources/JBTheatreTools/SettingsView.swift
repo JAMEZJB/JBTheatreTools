@@ -54,10 +54,11 @@ struct SettingsView: View {
 
             GroupBox(label: Label("Updates", systemImage: "arrow.triangle.2.circlepath")) {
                 VStack(alignment: .leading, spacing: 10) {
+                    // House convention: "mode" selectors use the native dropdown (default style),
+                    // not a segmented control — segmented is reserved for Light/Dark/System-style switches.
                     Picker("Check for updates", selection: $updateMode) {
                         ForEach(UpdateCheckMode.allCases) { Text($0.label).tag($0) }
                     }
-                    .pickerStyle(.segmented)
                     .labelsHidden()
                     Text(updateModeHint)
                         .font(.caption).foregroundStyle(.secondary)
@@ -96,7 +97,6 @@ struct SettingsView: View {
                     Picker("Close behaviour", selection: $closeBehavior) {
                         ForEach(CloseBehavior.allCases) { Text($0.label).tag($0) }
                     }
-                    .pickerStyle(.segmented)
                     .labelsHidden()
                     Text(closeBehavior == .quit
                          ? "Closing the window quits JB Theatre Tools."
