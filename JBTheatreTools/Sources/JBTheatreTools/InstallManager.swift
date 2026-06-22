@@ -87,8 +87,10 @@ final class InstallManager {
     // MARK: - Install / launch
 
     /// Extracts `downloadedZip` (a macOS app archive) and installs the contained `.app`.
+    /// When `toApplications` is true the bundle is placed in the Applications folder (so it shows in
+    /// Launchpad/Spotlight and launches without this launcher); otherwise in the managed apps dir.
     @discardableResult
-    func install(app: CatalogApp, version: String, downloadedZip: URL) throws -> URL {
+    func install(app: CatalogApp, version: String, downloadedZip: URL, toApplications: Bool) throws -> URL {
         let extractDir = cacheDir.appendingPathComponent("extract-\(app.id)", isDirectory: true)
         try? fm.removeItem(at: extractDir)
         try fm.createDirectory(at: extractDir, withIntermediateDirectories: true)
@@ -97,7 +99,13 @@ final class InstallManager {
         try ditto(extract: downloadedZip, to: extractDir)
 
         guard let bundle = firstAppBundle(in: extractDir) else { throw InstallError.noAppInZip }
-        let dest = appsDir.appendingPathComponent(bundle.lastPathComponent)
+
+        // Remove any previous install first — it may be in a different location if the setting changed.
+        if let old = manifest()[app.id] { try? fm.removeItem(at: URL(fileURLWithPath: old.path)) }
+
+        let destDir = toApplications ? applicationsInstallDir() : appsDir
+        try? fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+        let dest = destDir.appendingPathComponent(bundle.lastPathComponent)
         try? fm.removeItem(at: dest)
         try fm.moveItem(at: bundle, to: dest)
 
@@ -105,6 +113,15 @@ final class InstallManager {
         m[app.id] = InstalledRecord(version: version, path: dest.path, installedAt: Self.isoNow())
         writeManifest(m)
         return dest
+    }
+
+    /// Where "install to the Applications folder" puts apps: `/Applications` when it's writable (admin
+    /// users), otherwise `~/Applications`. Both appear in Launchpad & Spotlight, and neither needs an
+    /// admin password — so non-admin users get a working install without a prompt.
+    private func applicationsInstallDir() -> URL {
+        let system = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        if fm.isWritableFile(atPath: system.path) { return system }
+        return fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)
     }
 
     func launch(app: CatalogApp) throws {

@@ -8,6 +8,9 @@ public sealed class InstalledRecord
     public string Version { get; set; } = "";
     public string Path { get; set; } = "";
     public string InstalledAt { get; set; } = "";
+    /// <summary>Name of the Start Menu/Desktop shortcuts created for this app, if any — so uninstall
+    /// (and reinstall) can remove them. Null when the app was installed without shortcuts.</summary>
+    public string? ShortcutName { get; set; }
 }
 
 /// <summary>
@@ -85,8 +88,10 @@ public sealed class InstallManager
         catch { return null; }
     }
 
-    /// <summary>Installs a downloaded self-contained .exe and records its version.</summary>
-    public string Install(CatalogApp app, string version, string downloadedExe, string assetName)
+    /// <summary>Installs a downloaded self-contained .exe and records its version. When
+    /// <paramref name="toApplications"/> is true, also creates Start Menu + Desktop shortcuts so the
+    /// app is launchable without this launcher (the Windows equivalent of macOS's Applications folder).</summary>
+    public string Install(CatalogApp app, string version, string downloadedExe, string assetName, bool toApplications)
     {
         var dir = Path.Combine(AppsDir, app.Id);
         Directory.CreateDirectory(dir);
@@ -95,14 +100,37 @@ public sealed class InstallManager
         File.Move(downloadedExe, dest);
 
         var m = Manifest();
+        // Remove shortcuts from any previous install (the name or the setting may have changed).
+        if (m.TryGetValue(app.Id, out var prev) && !string.IsNullOrEmpty(prev.ShortcutName))
+            Shortcuts.Remove(prev.ShortcutName!);
+
+        string? shortcutName = null;
+        if (toApplications)
+        {
+            // Name the shortcut after the app's own ProductName, falling back to the catalog name.
+            shortcutName = Shortcuts.SafeName(TryProductName(dest) ?? app.Name);
+            Shortcuts.Create(shortcutName, dest);
+        }
+
         m[app.Id] = new InstalledRecord
         {
             Version = version,
             Path = dest,
-            InstalledAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            InstalledAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            ShortcutName = shortcutName
         };
         WriteManifest(m);
         return dest;
+    }
+
+    private static string? TryProductName(string exe)
+    {
+        try
+        {
+            var n = System.Diagnostics.FileVersionInfo.GetVersionInfo(exe).ProductName;
+            return string.IsNullOrWhiteSpace(n) ? null : n.Trim();
+        }
+        catch { return null; }
     }
 
     public void Launch(CatalogApp app)
@@ -114,9 +142,11 @@ public sealed class InstallManager
     /// <summary>Removes the installed app's folder and its manifest entry.</summary>
     public void Uninstall(string appId)
     {
+        var m = Manifest();
+        if (m.TryGetValue(appId, out var rec) && !string.IsNullOrEmpty(rec.ShortcutName))
+            Shortcuts.Remove(rec.ShortcutName!);
         var dir = Path.Combine(AppsDir, appId);
         try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
-        var m = Manifest();
         if (m.Remove(appId)) WriteManifest(m);
     }
 }

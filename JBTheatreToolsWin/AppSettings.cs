@@ -7,6 +7,8 @@ public sealed class AppSettings
 {
     public string Appearance { get; set; } = "system";   // "system" | "light" | "dark"
     public string UpdateMode { get; set; } = "everyLaunch"; // "everyLaunch" | "manual" | "never"
+    public string CloseBehavior { get; set; } = "quit";   // "quit" | "keepRunning" (X = quit, or minimise to tray)
+    public bool InstallToApplications { get; set; }       // true: also add Start menu + Desktop shortcuts on install
 
     private static string Dir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JBTheatreTools");

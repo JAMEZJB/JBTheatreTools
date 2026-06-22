@@ -4,6 +4,8 @@ struct SettingsView: View {
     @EnvironmentObject var state: AppState
     @Binding var appearance: AppAppearance
     @Binding var updateMode: UpdateCheckMode
+    @Binding var closeBehavior: CloseBehavior
+    @Binding var installToApplications: Bool
     @Environment(\.dismiss) private var dismiss
     @State private var tokenField = ""
     @State private var checkingLauncher = false
@@ -86,6 +88,32 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .padding(8)
+            }
+
+            GroupBox(label: Label("When I close the window", systemImage: "xmark.circle")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("Close behaviour", selection: $closeBehavior) {
+                        ForEach(CloseBehavior.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text(closeBehavior == .quit
+                         ? "Closing the window quits JB Theatre Tools."
+                         : "Closing the window keeps it running in the Dock — click the Dock icon to reopen it.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(8)
+            }
+
+            GroupBox(label: Label("Install location", systemImage: "folder")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Install apps to the Applications folder", isOn: $installToApplications)
+                    Text("Off: apps stay inside the launcher. On: each installed app is placed in your Applications folder, so you can also open it from Launchpad or Spotlight without this launcher.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 .padding(8)
             }
 

@@ -12,6 +12,8 @@ final class AppState: ObservableObject {
         case checking
         /// The saved token can't see this app's repo — the row is hidden from the list.
         case noAccess
+        /// Installed locally but not yet checked for updates (e.g. before the first refresh).
+        case installed
         case noRelease
         case missingAsset
         case notInstalled
@@ -41,6 +43,16 @@ final class AppState: ObservableObject {
         var resolvedName: String?
         /// Name to show: the installed app's own name when available, else the catalog name.
         var displayName: String { resolvedName ?? app.name }
+        /// Shown once we know a row is relevant: anything installed locally, or any app whose repo
+        /// the token is confirmed to reach. Not-yet-checked / inaccessible not-installed rows stay
+        /// hidden, so inaccessible apps never flash into view and back out during a refresh.
+        var isVisible: Bool {
+            if installed != nil { return true }
+            switch status {
+            case .unknown, .checking, .noAccess: return false
+            default: return true
+            }
+        }
     }
 
     @Published var rows: [Row] = []
@@ -53,6 +65,8 @@ final class AppState: ObservableObject {
     @Published var launcherDownloadMessage: String?
     /// Drives the "after an update, macOS will ask for your password" explainer sheet.
     @Published var showKeychainExplainer = false
+    /// True once at least one full refresh has completed (gates the "no apps for this token" state).
+    @Published var hasRefreshed = false
 
     private var selfInfo: SelfInfo?
     private var explainerContinuation: CheckedContinuation<Void, Never>?
@@ -67,9 +81,11 @@ final class AppState: ObservableObject {
             let catalog = try Catalog.load()
             selfInfo = catalog.selfInfo
             rows = catalog.apps.map {
-                Row(app: $0,
-                    installed: InstallManager.shared.installedVersion($0.id),
-                    resolvedName: InstallManager.shared.installedDisplayName($0.id))
+                let installed = InstallManager.shared.installedVersion($0.id)
+                return Row(app: $0,
+                           installed: installed,
+                           status: installed != nil ? .installed : .unknown,
+                           resolvedName: InstallManager.shared.installedDisplayName($0.id))
             }
         } catch {
             globalError = "Could not load app catalog: \(error.localizedDescription)"
@@ -91,8 +107,10 @@ final class AppState: ObservableObject {
     func clearToken() {
         TokenStore.clear()
         hasToken = false
+        hasRefreshed = false
         for i in rows.indices {
-            rows[i].status = .unknown
+            // Keep installed apps visible & launchable; everything else reverts to "unchecked".
+            rows[i].status = rows[i].installed != nil ? .installed : .unknown
             rows[i].latest = nil
             rows[i].latestAssetId = nil
             rows[i].releases = []
@@ -146,11 +164,13 @@ final class AppState: ObservableObject {
         for i in rows.indices {
             await refresh(index: i, client: client)
         }
+        hasRefreshed = true
     }
 
-    /// True once a refresh has run and the token turned out to reach none of the catalog apps.
+    /// True once a refresh has run and the token reached no apps (and nothing is installed locally) —
+    /// drives the "this token can't access any apps" empty state.
     var noAppsAccessible: Bool {
-        !rows.isEmpty && rows.allSatisfy { $0.status == .noAccess }
+        hasRefreshed && !rows.isEmpty && rows.allSatisfy { !$0.isVisible }
     }
 
     private func refresh(index: Int, client: GitHubClient) async {
@@ -256,7 +276,8 @@ final class AppState: ObservableObject {
                     self.rows[j].progress = p
                 }
             }
-            try InstallManager.shared.install(app: app, version: rel.tagName, downloadedZip: zipDest)
+            let toApps = UserDefaults.standard.bool(forKey: "theatre.installToApplications")
+            try InstallManager.shared.install(app: app, version: rel.tagName, downloadedZip: zipDest, toApplications: toApps)
             try? FileManager.default.removeItem(at: zipDest)
             rows[i].installed = rel.tagName
             rows[i].resolvedName = InstallManager.shared.installedDisplayName(app.id)

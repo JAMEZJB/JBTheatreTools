@@ -19,6 +19,10 @@ public sealed class MainForm : Form
     private readonly Label _subtitle = new();
     private readonly Label _credit = new();
 
+    // Tray support for the "keep running" close behaviour.
+    private readonly NotifyIcon _tray = new();
+    private bool _reallyQuit;
+
     // Notice-banner messages (the banner doubles as the no-token / bad-token / no-access notice).
     private const string NoTokenMsg = "Add a GitHub token to enable downloads  —  Settings → paste a fine-grained PAT.";
     private const string BadTokenMsg = "Your GitHub token is invalid or expired  —  open Settings to paste a new one.";
@@ -61,6 +65,8 @@ public sealed class MainForm : Form
 
         LoadCatalog();
         ApplyTheme();
+        SetupTray();
+        FormClosing += OnFormClosing;
         Shown += async (_, _) =>
         {
             ShowNotice(TokenStore.Load() == null ? NoTokenMsg : null);
@@ -219,8 +225,12 @@ public sealed class MainForm : Form
             row.InstallVersionRequested += InstallVersionAsync;
             row.UninstallRequested += Uninstall;
             row.LaunchRequested += Launch;
-            row.SetState(InstallManager.Shared.InstalledVersion(app.Id), null, null, RowStatus.Unknown);
+            var installed = InstallManager.Shared.InstalledVersion(app.Id);
+            row.SetState(installed, null, null, installed != null ? RowStatus.Installed : RowStatus.Unknown);
             row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(app.Id));
+            // Installed apps show immediately (launchable pre-refresh); not-installed rows stay hidden
+            // until a refresh confirms the token can reach them, so inaccessible apps never flash in.
+            row.Visible = installed != null;
             _rows.Add(row);
             _list.Controls.Add(row);
         }
@@ -245,41 +255,51 @@ public sealed class MainForm : Form
             using var client = new GitHubClient(token);
             foreach (var row in _rows)
             {
-                row.Visible = true;
+                // Don't force the row visible here — leave it as-is during the check so a not-installed
+                // row that turns out inaccessible never flashes into view. We set visibility from the
+                // outcome at the end of the iteration.
                 row.SetChecking();
                 var installed = InstallManager.Shared.InstalledVersion(row.App.Id);
                 row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.Id));
+                bool accessible = false;
                 try
                 {
                     var all = await client.ReleasesAsync(row.App.Owner, row.App.Repo);
+                    accessible = true;
                     row.SetReleases(all);
                     var latest = all.FirstOrDefault(r => !r.Prerelease) ?? all.FirstOrDefault();
                     if (latest == null)
                     {
                         row.SetState(installed, null, null, RowStatus.NoRelease);
-                        continue;
                     }
-                    var asset = latest.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAssetName);
-                    row.SetState(installed, latest.TagName, asset?.Id, ComputeStatus(installed, latest.TagName, asset != null));
+                    else
+                    {
+                        var asset = latest.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAssetName);
+                        row.SetState(installed, latest.TagName, asset?.Id, ComputeStatus(installed, latest.TagName, asset != null));
+                    }
                 }
                 catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.NotAccessible)
                 {
-                    row.Visible = false;   // token can't see this repo → hide the row
+                    accessible = false;   // token can't see this repo
                 }
                 catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.Unauthorized)
                 {
                     unauthorized = true;
-                    row.Visible = false;
+                    accessible = false;
                 }
                 catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.NoRelease)
                 {
+                    accessible = true;
                     row.SetReleases(new List<ReleaseInfo>());
                     row.SetState(installed, null, null, RowStatus.NoRelease);
                 }
                 catch
                 {
+                    accessible = true;   // transient error — show it so the user can Retry
                     row.SetState(installed, null, null, RowStatus.Error);
                 }
+                // Visible iff installed locally OR the token reached the repo.
+                row.Visible = installed != null || accessible;
             }
 
             // One clear notice for the whole-token states instead of rows full of errors.
@@ -298,6 +318,44 @@ public sealed class MainForm : Form
     {
         if (text != null) _tokenBannerText.Text = text;
         _tokenBanner.Visible = text != null;
+    }
+
+    // MARK: - Close behaviour (quit vs. keep running in the system tray)
+
+    private void SetupTray()
+    {
+        _tray.Text = "JB Theatre Tools";
+        _tray.Icon = Icon ?? SystemIcons.Application;
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Open JB Theatre Tools", null, (_, _) => RestoreFromTray());
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Quit", null, (_, _) => { _reallyQuit = true; Close(); });
+        _tray.ContextMenuStrip = menu;
+        _tray.DoubleClick += (_, _) => RestoreFromTray();
+        _tray.Visible = false;
+    }
+
+    private void RestoreFromTray()
+    {
+        Show();
+        WindowState = FormWindowState.Normal;
+        Activate();
+        _tray.Visible = false;
+    }
+
+    private void OnFormClosing(object? sender, FormClosingEventArgs e)
+    {
+        // House convention: X quits by default. If the user opted into "keep running", minimise to the
+        // tray instead — unless we're genuinely quitting (tray "Quit" item, or a real OS shutdown).
+        if (!_reallyQuit && e.CloseReason == CloseReason.UserClosing && _settings.CloseBehavior == "keepRunning")
+        {
+            e.Cancel = true;
+            Hide();
+            _tray.Visible = true;
+            return;
+        }
+        _tray.Visible = false;
+        _tray.Dispose();
     }
 
     private Task InstallAsync(AppRowControl row) => InstallVersionAsync(row, null);
@@ -326,7 +384,7 @@ public sealed class MainForm : Form
             var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{row.App.Id}-{rel.TagName}-{assetName}");
             var progress = new Progress<double>(p => row.SetProgress(p));
             await client.DownloadAssetAsync(row.App.Owner, row.App.Repo, asset.Id, cache, progress);
-            InstallManager.Shared.Install(row.App, rel.TagName, cache, assetName);
+            InstallManager.Shared.Install(row.App, rel.TagName, cache, assetName, _settings.InstallToApplications);
             var latest = row.Latest ?? rel.TagName;
             row.SetState(rel.TagName, row.Latest, row.LatestAssetId, ComputeStatus(rel.TagName, latest, true));
             row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.Id));

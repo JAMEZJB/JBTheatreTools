@@ -28,14 +28,16 @@ enum CLI {
         var token = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
         var catalogPath: String?
         var tag: String?
+        var toApplications = false
         var positional: [String] = []
         var i = 0
         while i < args.count {
             switch args[i] {
-            case "--token":   i += 1; token = i < args.count ? args[i] : nil
-            case "--catalog": i += 1; catalogPath = i < args.count ? args[i] : nil
-            case "--tag":     i += 1; tag = i < args.count ? args[i] : nil
-            default:          positional.append(args[i])
+            case "--token":            i += 1; token = i < args.count ? args[i] : nil
+            case "--catalog":          i += 1; catalogPath = i < args.count ? args[i] : nil
+            case "--tag":              i += 1; tag = i < args.count ? args[i] : nil
+            case "--to-applications":  toApplications = true
+            default:                   positional.append(args[i])
             }
             i += 1
         }
@@ -53,7 +55,7 @@ enum CLI {
         case "--list":       list(catalog: catalog, token: token)
         case "--installed":  installed(catalog: catalog)
         case "--releases":   releases(catalog: catalog, token: token, id: positional.first)
-        case "--install":    install(catalog: catalog, token: token, id: positional.first, tag: tag)
+        case "--install":    install(catalog: catalog, token: token, id: positional.first, tag: tag, toApplications: toApplications)
         case "--uninstall":  uninstall(catalog: catalog, id: positional.first)
         case "--launch":     launch(catalog: catalog, id: positional.first)
         case "--self-check": selfCheck(catalog: catalog, token: token)
@@ -134,7 +136,7 @@ enum CLI {
         }
     }
 
-    private static func install(catalog: Catalog, token: String?, id: String?, tag: String?) {
+    private static func install(catalog: Catalog, token: String?, id: String?, tag: String?, toApplications: Bool) {
         guard let app = appFor(id, catalog) else {
             fputs("error: pass an app id. Known ids: \(catalog.apps.map { $0.id }.joined(separator: ", "))\n", stderr)
             exit(1)
@@ -163,7 +165,7 @@ enum CLI {
                     let pct = Int(p * 100)
                     if pct != pctBox.last, pct % 10 == 0 { pctBox.last = pct; print("  \(pct)%") }
                 }
-                let dest = try im.install(app: app, version: rel.tagName, downloadedZip: zip)
+                let dest = try im.install(app: app, version: rel.tagName, downloadedZip: zip, toApplications: toApplications)
                 try? FileManager.default.removeItem(at: zip)
                 print("Installed \(app.name) \(rel.tagName) → \(dest.path)")
             } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
@@ -254,9 +256,10 @@ enum CLI {
           --self-check           Check whether a newer launcher release exists
           --help                 This help
 
-        Options: --token <pat>    GitHub PAT (else $GITHUB_TOKEN, else Keychain)
-                 --tag <vX.Y.Z>   Install a specific release (with --install)
-                 --catalog <path> Use a specific catalog.json
+        Options: --token <pat>       GitHub PAT (else $GITHUB_TOKEN, else Keychain)
+                 --tag <vX.Y.Z>      Install a specific release (with --install)
+                 --to-applications   Install into the Applications folder (with --install)
+                 --catalog <path>    Use a specific catalog.json
         """)
     }
 

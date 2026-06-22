@@ -1,6 +1,6 @@
 namespace JBTheatreTools;
 
-public enum RowStatus { Unknown, Checking, NoRelease, MissingAsset, NotInstalled, UpToDate, UpdateAvailable, Error }
+public enum RowStatus { Unknown, Checking, NoRelease, MissingAsset, NotInstalled, Installed, UpToDate, UpdateAvailable, Error }
 
 /// <summary>A single catalog row: name, blurb, version line, status badge, and action buttons.</summary>
 public sealed class AppRowControl : UserControl
@@ -169,6 +169,7 @@ public sealed class AppRowControl : UserControl
             RowStatus.UpToDate => ("Up to date", Color.SeaGreen),
             RowStatus.UpdateAvailable => ("Update", Color.RoyalBlue),
             RowStatus.NotInstalled => ("Not installed", Color.Gray),
+            RowStatus.Installed => ("Installed", Color.Gray),
             RowStatus.NoRelease => ("No release", Color.Gray),
             RowStatus.MissingAsset => ("No Windows build", Color.DarkOrange),
             RowStatus.Error => ("Error", Color.Firebrick),
@@ -182,7 +183,8 @@ public sealed class AppRowControl : UserControl
         _install.Visible = Status is RowStatus.NotInstalled or RowStatus.UpdateAvailable or RowStatus.Error;
         _install.Text = Status == RowStatus.UpdateAvailable ? "Update" : (installed ? "Retry" : "Install");
         _install.Enabled = LatestAssetId != null;
-        _launch.Visible = installed && Status is RowStatus.UpToDate or RowStatus.UpdateAvailable or RowStatus.Error;
+        // Launch is available whenever something is installed, even before a refresh has run.
+        _launch.Visible = installed;
         _more.Visible = Releases.Count > 0 || installed;
 
         LayoutControls();

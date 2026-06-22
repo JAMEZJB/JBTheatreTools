@@ -36,10 +36,26 @@ enum UpdateCheckMode: String, CaseIterable, Identifiable {
     }
 }
 
+/// What the window's close (X) button does. Default = quit, on both platforms (house convention).
+/// `keepRunning` leaves the app alive — in the Dock on macOS, in the system tray on Windows.
+enum CloseBehavior: String, CaseIterable, Identifiable {
+    case quit, keepRunning
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .quit: return "Quit"
+        case .keepRunning: return "Keep running"
+        }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var state: AppState
     @AppStorage("theatre.appearance") private var appearance: AppAppearance = .system
     @AppStorage("theatre.updateMode") private var updateMode: UpdateCheckMode = .everyLaunch
+    @AppStorage("theatre.closeBehavior") private var closeBehavior: CloseBehavior = .quit
+    @AppStorage("theatre.installToApplications") private var installToApplications = false
     @State private var showSettings = false
     @State private var refreshing = false
 
@@ -52,9 +68,16 @@ struct ContentView: View {
             credit
         }
         .frame(minWidth: 600, minHeight: 440)
+        // Intercept the window's close button so "keep running" can hide instead of quit.
+        // The closure reads the live setting from UserDefaults at close time.
+        .background(WindowCloseConfigurator(shouldKeepRunning: {
+            UserDefaults.standard.string(forKey: "theatre.closeBehavior") == CloseBehavior.keepRunning.rawValue
+        }))
         .preferredColorScheme(appearance.colorScheme)
         .sheet(isPresented: $showSettings) {
-            SettingsView(appearance: $appearance, updateMode: $updateMode).environmentObject(state)
+            SettingsView(appearance: $appearance, updateMode: $updateMode, closeBehavior: $closeBehavior,
+                         installToApplications: $installToApplications)
+                .environmentObject(state)
         }
         .sheet(isPresented: $state.showKeychainExplainer, onDismiss: { state.acknowledgeKeychainExplainer() }) {
             KeychainExplainerView { state.acknowledgeKeychainExplainer() }
@@ -102,9 +125,10 @@ struct ContentView: View {
                 Spacer()
             } else {
                 List {
-                    // Apps the token can't see are hidden (status == .noAccess).
+                    // Only show installed apps + apps whose repo the token is confirmed to reach;
+                    // not-yet-checked / inaccessible not-installed rows stay hidden (no flicker).
                     ForEach($state.rows) { $row in
-                        if row.status != .noAccess {
+                        if row.isVisible {
                             AppRowView(row: $row)
                             if row.id != lastVisibleRowID { Divider() }
                         }
@@ -117,7 +141,7 @@ struct ContentView: View {
 
     /// id of the last *visible* row, so the inter-row divider isn't drawn after the final one.
     private var lastVisibleRowID: String? {
-        state.rows.last { $0.status != .noAccess }?.id
+        state.rows.last { $0.isVisible }?.id
     }
 
     private func launcherBanner(_ version: String) -> some View {
@@ -234,6 +258,8 @@ struct AppRowView: View {
             badge("Update", color: .blue)
         case .notInstalled:
             badge("Not installed", color: .secondary)
+        case .installed:
+            badge("Installed", color: .secondary)
         case .noRelease:
             badge("No release", color: .secondary)
         case .missingAsset:
@@ -260,20 +286,19 @@ struct AppRowView: View {
     @ViewBuilder
     private var actions: some View {
         HStack(spacing: 8) {
+            // Install / Update / Retry — depends on the checked status.
             switch row.status {
             case .notInstalled:
                 installButton(title: "Install")
             case .updateAvailable:
                 installButton(title: "Update")
-                launchButton
-            case .upToDate:
-                launchButton
             case .error:
                 installButton(title: row.installed == nil ? "Install" : "Retry")
-                if row.installed != nil { launchButton }
             default:
                 EmptyView()
             }
+            // Launch — available whenever something is installed, even before a refresh has run.
+            if row.installed != nil { launchButton }
             if !row.releases.isEmpty || row.installed != nil { rowMenu }
         }
     }

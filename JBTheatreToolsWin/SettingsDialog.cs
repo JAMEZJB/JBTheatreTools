@@ -16,6 +16,8 @@ public sealed class SettingsDialog : Form
     private readonly Button _viewRelease = new();
     private readonly Label _checkResult = new();
     private readonly ComboBox _appearance = new();
+    private readonly ComboBox _closeBehavior = new();
+    private readonly CheckBox _installToApps = new();
 
     public SettingsDialog(AppSettings settings, SelfInfo? selfInfo, string currentVersion)
     {
@@ -28,7 +30,7 @@ public sealed class SettingsDialog : Form
         StartPosition = FormStartPosition.CenterParent;
         MaximizeBox = false;
         MinimizeBox = false;
-        ClientSize = new Size(460, 450);
+        ClientSize = new Size(460, 528);
 
         // --- GitHub token ---
         var tokenHeading = Bold("GitHub access token", new Point(16, 16));
@@ -145,11 +147,32 @@ public sealed class SettingsDialog : Form
         _appearance.SelectedIndexChanged += (_, _) =>
             _settings.Appearance = _appearance.SelectedIndex switch { 1 => "light", 2 => "dark", _ => "system" };
 
+        // --- Close behaviour ---
+        var closeHeading = Bold("When I close the window", new Point(16, 392));
+
+        _closeBehavior.DropDownStyle = ComboBoxStyle.DropDownList;
+        _closeBehavior.Items.AddRange(new object[] { "Quit the app", "Keep running in the tray" });
+        _closeBehavior.SelectedIndex = _settings.CloseBehavior == "keepRunning" ? 1 : 0;
+        _closeBehavior.Location = new Point(16, 416);
+        _closeBehavior.Width = 240;
+        _closeBehavior.SelectedIndexChanged += (_, _) =>
+            _settings.CloseBehavior = _closeBehavior.SelectedIndex == 1 ? "keepRunning" : "quit";
+
+        // --- Install location ---
+        // UseMnemonic=false so the literal "&" renders (otherwise "& D" is eaten as an Alt-shortcut).
+        _installToApps.UseMnemonic = false;
+        _installToApps.Text = "Install apps to the Start menu & Desktop (launch them without this launcher)";
+        _installToApps.AutoSize = false;
+        _installToApps.Location = new Point(16, 452);
+        _installToApps.Size = new Size(428, 34);
+        _installToApps.Checked = _settings.InstallToApplications;
+        _installToApps.CheckedChanged += (_, _) => _settings.InstallToApplications = _installToApps.Checked;
+
         var done = new Button
         {
             Text = "Done",
             DialogResult = DialogResult.OK,
-            Location = new Point(ClientSize.Width - 100, 408),
+            Location = new Point(ClientSize.Width - 100, 492),
             Width = 84,
         };
         AcceptButton = done;
@@ -158,7 +181,7 @@ public sealed class SettingsDialog : Form
         {
             tokenHeading, _tokenState, _token, _save, _remove, tokenLink, help,
             updatesHeading, _updateMode, _updateHint, versionLabel, _check, _viewRelease, _checkResult,
-            appearanceHeading, _appearance, done
+            appearanceHeading, _appearance, closeHeading, _closeBehavior, _installToApps, done
         });
     }
 

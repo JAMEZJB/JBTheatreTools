@@ -27,6 +27,7 @@ public static class Cli
         string? token = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
         string? catalogPath = null;
         string? tag = null;
+        bool toApplications = false;
         var positional = new List<string>();
         for (int i = 1; i < args.Length; i++)
         {
@@ -35,6 +36,7 @@ public static class Cli
                 case "--token": if (++i < args.Length) token = args[i]; break;
                 case "--catalog": if (++i < args.Length) catalogPath = args[i]; break;
                 case "--tag": if (++i < args.Length) tag = args[i]; break;
+                case "--to-applications": toApplications = true; break;
                 default: positional.Add(args[i]); break;
             }
         }
@@ -49,7 +51,7 @@ public static class Cli
             "--list"       => await ListAsync(catalog, token),
             "--installed"  => Installed(catalog),
             "--releases"   => await ReleasesAsync(catalog, token, positional.FirstOrDefault()),
-            "--install"    => await InstallAsync(catalog, token, positional.FirstOrDefault(), tag),
+            "--install"    => await InstallAsync(catalog, token, positional.FirstOrDefault(), tag, toApplications),
             "--uninstall"  => Uninstall(catalog, positional.FirstOrDefault()),
             "--launch"     => Launch(catalog, positional.FirstOrDefault()),
             "--self-check" => await SelfCheckAsync(catalog, token),
@@ -118,7 +120,7 @@ public static class Cli
         catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
     }
 
-    private static async Task<int> InstallAsync(Catalog catalog, string? token, string? id, string? tag)
+    private static async Task<int> InstallAsync(Catalog catalog, string? token, string? id, string? tag, bool toApplications)
     {
         var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
         if (app == null)
@@ -148,7 +150,7 @@ public static class Cli
                 if (pct != last && pct % 10 == 0) { last = pct; Console.WriteLine($"  {pct}%"); }
             });
             await client.DownloadAssetAsync(app.Owner, app.Repo, asset.Id, cache, progress);
-            var dest = InstallManager.Shared.Install(app, rel.TagName, cache, asset.Name);
+            var dest = InstallManager.Shared.Install(app, rel.TagName, cache, asset.Name, toApplications);
             Console.WriteLine($"Installed {app.Name} {rel.TagName} → {dest}");
             return 0;
         }
@@ -214,9 +216,10 @@ public static class Cli
           --self-check           Check whether a newer launcher release exists
           --help                 This help
 
-        Options: --token <pat>    GitHub PAT (else $GITHUB_TOKEN, else Credential Manager)
-                 --tag <vX.Y.Z>   Install a specific release (with --install)
-                 --catalog <path> Use a specific catalog.json
+        Options: --token <pat>       GitHub PAT (else $GITHUB_TOKEN, else Credential Manager)
+                 --tag <vX.Y.Z>      Install a specific release (with --install)
+                 --to-applications   Also create Start Menu + Desktop shortcuts (with --install)
+                 --catalog <path>    Use a specific catalog.json
         """);
 
     private static int PrintHelpReturn() { PrintHelp(); return 0; }

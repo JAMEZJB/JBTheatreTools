@@ -1,11 +1,11 @@
 import SwiftUI
 import AppKit
 
-/// House convention (2026-06-20): the window's close (X) button QUITS the app on both platforms by
-/// default. WinForms already exits when its main form closes; macOS otherwise keeps the process alive
-/// with no window, so we opt into terminate-on-last-window-closed here. JBTheatreTools is a one-shot
-/// launcher (open → install/update/launch → close), so there's no "keep running in the tray" option —
-/// per the convention, when keep-running adds nothing you just quit-on-close and skip the toggle.
+/// House convention (2026-06-20): the window's close (X) button QUITS the app by default on both
+/// platforms. The user can opt into "keep running" in Settings — on macOS that means staying in the
+/// Dock (handled by `WindowCloseProxy`, which intercepts the close and hides instead). In the default
+/// quit mode the window closes normally and, with no windows left, this terminates the app (macOS
+/// otherwise keeps the process alive window-less).
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
