@@ -355,21 +355,29 @@ final class AppState: ObservableObject {
 
     /// Moves every installed app to match the chosen location, collecting any that couldn't move
     /// (e.g. because they're currently open) to report back to the user.
-    func performRelocation() async {
-        guard let prompt = relocationPrompt else { return }
+    ///
+    /// `toApplications` is passed in explicitly rather than read from `relocationPrompt`: dismissing the
+    /// confirmation alert clears `relocationPrompt` (via its `isPresented` binding) on the same tap that
+    /// fires this async task, so reading it here would race and usually find nil — which is exactly why
+    /// "Move" appeared to do nothing.
+    func performRelocation(toApplications: Bool) async {
         relocationPrompt = nil
+        var moved = 0
         var failed: [String] = []
         for i in rows.indices where rows[i].installed != nil {
+            let needed = InstallManager.shared.needsRelocation(rows[i].id, toApplications: toApplications)
             do {
-                try InstallManager.shared.relocate(rows[i].id, toApplications: prompt.toApplications)
+                try InstallManager.shared.relocate(rows[i].id, toApplications: toApplications)
+                if needed { moved += 1 }
             } catch {
                 failed.append(rows[i].displayName)
             }
             rows[i].installed = InstallManager.shared.installedVersion(rows[i].id)
             rows[i].resolvedName = InstallManager.shared.installedDisplayName(rows[i].id)
         }
+        AppLog.shared.log("relocate → \(toApplications ? "Applications" : "launcher"): moved \(moved), failed \(failed.count)")
         if !failed.isEmpty {
-            let target = prompt.toApplications ? "the Applications folder" : "the launcher"
+            let target = toApplications ? "the Applications folder" : "the launcher"
             let them = failed.count == 1 ? "it" : "them"
             relocationNote = "Couldn't move \(failed.joined(separator: ", ")) to \(target) — \(failed.count == 1 ? "it may be" : "they may be") open. Close \(them) and toggle the setting again."
         }

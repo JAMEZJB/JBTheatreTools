@@ -139,7 +139,7 @@ struct SettingsView: View {
             get: { state.relocationPrompt != nil },
             set: { if !$0 { state.cancelRelocation() } }
         )) {
-            Button("Move") { Task { await state.performRelocation() } }
+            Button("Move") { Task { await state.performRelocation(toApplications: installToApplications) } }
             Button("Not now", role: .cancel) { state.cancelRelocation() }
         } message: {
             if let p = state.relocationPrompt {
