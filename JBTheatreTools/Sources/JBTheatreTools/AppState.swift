@@ -101,6 +101,7 @@ final class AppState: ObservableObject {
         } catch {
             globalError = "Could not load app catalog: \(error.localizedDescription)"
         }
+        AppLog.shared.log("launched v\(currentVersion)")
     }
 
     // MARK: - Token
@@ -184,6 +185,16 @@ final class AppState: ObservableObject {
         hasRefreshed && !rows.isEmpty && rows.allSatisfy { !$0.isVisible }
     }
 
+    /// Number of installed apps with an update available — drives the header "Update All" button.
+    var updatesAvailable: Int { rows.filter { $0.status == .updateAvailable }.count }
+
+    /// Updates every app that currently has an update available, one at a time.
+    func updateAll() async {
+        let ids = rows.filter { $0.status == .updateAvailable }.map(\.id)
+        AppLog.shared.log("update all: \(ids.count) app(s)")
+        for id in ids { await install(id) }
+    }
+
     private func refresh(index: Int, client: GitHubClient) async {
         let app = rows[index].app
         rows[index].status = .checking
@@ -212,12 +223,14 @@ final class AppState: ObservableObject {
             // The token itself is bad — surface one clear message instead of 4 broken rows.
             rows[index].status = .noAccess
             globalError = "Your GitHub token is invalid or expired. Open Settings to paste a new one."
+            AppLog.shared.log("refresh: token invalid or expired")
         } catch GitHubError.noRelease {
             rows[index].latest = nil
             rows[index].releases = []
             rows[index].status = .noRelease
         } catch {
             rows[index].status = .error(error.localizedDescription)
+            AppLog.shared.log("refresh \(app.id) error: \(error.localizedDescription)")
         }
     }
 
@@ -293,8 +306,10 @@ final class AppState: ObservableObject {
             rows[i].installed = rel.tagName
             rows[i].resolvedName = InstallManager.shared.installedDisplayName(app.id)
             rows[i].status = Self.status(installed: rel.tagName, latest: rows[i].latest ?? rel.tagName, hasAsset: true)
+            AppLog.shared.log("installed \(app.id) \(rel.tagName)\(toApps ? " (Applications)" : "")")
         } catch {
             rows[i].status = .error(error.localizedDescription)
+            AppLog.shared.log("install \(app.id) FAILED: \(error.localizedDescription)")
         }
     }
 
@@ -311,8 +326,10 @@ final class AppState: ObservableObject {
             } else {
                 rows[i].status = .missingAsset
             }
+            AppLog.shared.log("uninstalled \(id)")
         } catch {
             rows[i].status = .error(error.localizedDescription)
+            AppLog.shared.log("uninstall \(id) FAILED: \(error.localizedDescription)")
         }
     }
 

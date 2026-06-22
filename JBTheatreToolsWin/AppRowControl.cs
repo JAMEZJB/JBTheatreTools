@@ -1,3 +1,5 @@
+using System.Drawing.Drawing2D;
+
 namespace JBTheatreTools;
 
 public enum RowStatus { Unknown, Checking, NoRelease, MissingAsset, NotInstalled, Installed, UpToDate, UpdateAvailable, Error }
@@ -16,6 +18,7 @@ public sealed class AppRowControl : UserControl
     /// <summary>Name to show: the installed app's own name when available, else the catalog name.</summary>
     public string DisplayName => string.IsNullOrEmpty(ResolvedName) ? App.Name : ResolvedName!;
 
+    private readonly PictureBox _icon = new();
     private readonly Label _name = new();
     private readonly Label _blurb = new();
     private readonly Label _version = new();
@@ -36,17 +39,22 @@ public sealed class AppRowControl : UserControl
         Height = 82;
         Margin = new Padding(0);
 
+        _icon.Size = new Size(40, 40);
+        _icon.Location = new Point(14, 21);
+        _icon.SizeMode = PictureBoxSizeMode.Zoom;
+        _icon.BackColor = Color.Transparent;
+
         _name.Text = app.Name;
         _name.Font = new Font(Font.FontFamily, 10f, FontStyle.Bold);
         _name.AutoSize = true;
-        _name.Location = new Point(14, 10);
+        _name.Location = new Point(64, 10);
 
         _blurb.Text = app.Blurb;
         _blurb.AutoSize = true;
-        _blurb.Location = new Point(14, 31);
+        _blurb.Location = new Point(64, 31);
 
         _version.AutoSize = true;
-        _version.Location = new Point(14, 52);
+        _version.Location = new Point(64, 52);
 
         _badge.AutoSize = true;
         _badge.Font = new Font(Font.FontFamily, 8.5f, FontStyle.Bold);
@@ -70,10 +78,11 @@ public sealed class AppRowControl : UserControl
         _progress.Visible = false;
         _progress.Size = new Size(220, 6);
 
-        Controls.AddRange(new Control[] { _name, _blurb, _version, _badge, _install, _launch, _more, _progress });
+        Controls.AddRange(new Control[] { _icon, _name, _blurb, _version, _badge, _install, _launch, _more, _progress });
         Resize += (_, _) => LayoutControls();
         LayoutControls();
         UpdateVisual();
+        UpdateIcon();
     }
 
     private void ShowMoreMenu()
@@ -134,6 +143,7 @@ public sealed class AppRowControl : UserControl
         ResolvedName = name;
         _name.Text = DisplayName;
         LayoutControls();
+        UpdateIcon();
     }
 
     public void SetState(string? installed, string? latest, long? assetId, RowStatus status)
@@ -143,6 +153,58 @@ public sealed class AppRowControl : UserControl
         LatestAssetId = assetId;
         Status = status;
         UpdateVisual();
+        UpdateIcon();
+    }
+
+    /// <summary>Leading icon: the installed app's REAL icon (extracted from its exe) once installed,
+    /// else a tinted monogram tile — so the list reads as a row of apps, not plain text.</summary>
+    private void UpdateIcon()
+    {
+        Image? img = null;
+        try
+        {
+            var path = InstallManager.Shared.InstalledPath(App.Id);
+            if (path != null && File.Exists(path))
+            {
+                using var ico = Icon.ExtractAssociatedIcon(path);
+                img = ico?.ToBitmap();
+            }
+        }
+        catch { /* fall through to the monogram */ }
+        img ??= MonogramIcon(DisplayName);
+        var old = _icon.Image;
+        _icon.Image = img;
+        old?.Dispose();
+    }
+
+    private static Image MonogramIcon(string name)
+    {
+        var bmp = new Bitmap(40, 40);
+        using var g = Graphics.FromImage(bmp);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+        var accent = Theme.Accent;
+        using (var fill = new SolidBrush(Color.FromArgb(38, accent)))   // ~15% tint of the suite accent
+        using (var path = RoundedRect(new Rectangle(0, 0, 39, 39), 9))
+            g.FillPath(fill, path);
+        var letter = string.IsNullOrWhiteSpace(name) ? "•" : name.Substring(0, 1).ToUpperInvariant();
+        using var font = new Font("Segoe UI", 16f, FontStyle.Bold);
+        using var txt = new SolidBrush(accent);
+        var sz = g.MeasureString(letter, font);
+        g.DrawString(letter, font, txt, (40 - sz.Width) / 2f, (40 - sz.Height) / 2f);
+        return bmp;
+    }
+
+    private static GraphicsPath RoundedRect(Rectangle r, int radius)
+    {
+        int d = radius * 2;
+        var p = new GraphicsPath();
+        p.AddArc(r.X, r.Y, d, d, 180, 90);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
     }
 
     public void SetProgress(double p)

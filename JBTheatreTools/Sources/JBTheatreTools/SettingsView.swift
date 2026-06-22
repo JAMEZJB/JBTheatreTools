@@ -61,6 +61,7 @@ struct SettingsView: View {
                         ForEach(UpdateCheckMode.allCases) { Text($0.label).tag($0) }
                     }
                     .labelsHidden()
+                    .tint(.selectorBlue)   // house rule 21: dropdowns are slate-blue, not the purple accent
                     Text(updateModeHint)
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -99,6 +100,7 @@ struct SettingsView: View {
                         ForEach(CloseBehavior.allCases) { Text($0.label).tag($0) }
                     }
                     .labelsHidden()
+                    .tint(.selectorBlue)   // house rule 21: dropdowns are slate-blue, not the purple accent
                     Text(closeBehavior == .quit
                          ? "Closing the window quits JB Theatre Tools."
                          : "Closing the window keeps it running in the Dock — click the Dock icon to reopen it.")
@@ -119,6 +121,8 @@ struct SettingsView: View {
             }
 
             HStack {
+                Button("Open Log") { AppLog.shared.open() }
+                    .tint(.selectorBlue)
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }

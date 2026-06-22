@@ -14,6 +14,7 @@ public sealed class MainForm : Form
     private readonly Panel _updateBanner = new();
     private readonly Label _updateBannerText = new();
     private readonly Button _refresh = new();
+    private readonly Button _updateAll = new();
     private readonly Button _settingsBtn = new();
     private readonly Label _title = new();
     private readonly Label _subtitle = new();
@@ -69,6 +70,7 @@ public sealed class MainForm : Form
         FormClosing += OnFormClosing;
         Shown += async (_, _) =>
         {
+            Log.Write($"launched v{CurrentVersion()}");
             ShowNotice(TokenStore.Load() == null ? NoTokenMsg : null);
             if (_settings.UpdateMode == "everyLaunch")
             {
@@ -98,16 +100,23 @@ public sealed class MainForm : Form
         _refresh.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _refresh.Click += async (_, _) => await RefreshAllAsync();
 
+        _updateAll.Text = "Update All";
+        _updateAll.AutoSize = true;
+        _updateAll.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _updateAll.Visible = false;
+        _updateAll.Click += async (_, _) => await UpdateAllAsync();
+
         _settingsBtn.Text = "Settings";
         _settingsBtn.AutoSize = true;
         _settingsBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _settingsBtn.Click += (_, _) => OpenSettings();
 
-        header.Controls.AddRange(new Control[] { _title, _subtitle, _refresh, _settingsBtn });
+        header.Controls.AddRange(new Control[] { _title, _subtitle, _updateAll, _refresh, _settingsBtn });
         header.Resize += (_, _) =>
         {
             _settingsBtn.Location = new Point(header.Width - _settingsBtn.Width - 14, 16);
             _refresh.Location = new Point(_settingsBtn.Left - _refresh.Width - 8, 16);
+            _updateAll.Location = new Point(_refresh.Left - _updateAll.Width - 8, 16);
         };
         return header;
     }
@@ -293,24 +302,44 @@ public sealed class MainForm : Form
                     row.SetReleases(new List<ReleaseInfo>());
                     row.SetState(installed, null, null, RowStatus.NoRelease);
                 }
-                catch
+                catch (Exception ex)
                 {
                     accessible = true;   // transient error — show it so the user can Retry
                     row.SetState(installed, null, null, RowStatus.Error);
+                    Log.Write($"refresh {row.App.Id} error: {ex.Message}");
                 }
                 // Visible iff installed locally OR the token reached the repo.
                 row.Visible = installed != null || accessible;
             }
 
             // One clear notice for the whole-token states instead of rows full of errors.
-            if (unauthorized) ShowNotice(BadTokenMsg);
+            if (unauthorized) { ShowNotice(BadTokenMsg); Log.Write("refresh: token invalid or expired"); }
             else if (_rows.All(r => !r.Visible)) ShowNotice(NoAccessMsg);
             else ShowNotice(null);
         }
         finally
         {
             _refresh.Enabled = true;
+            RefreshUpdateAllButton();
         }
+    }
+
+    private void RefreshUpdateAllButton()
+    {
+        int n = _rows.Count(r => r.Status == RowStatus.UpdateAvailable);
+        _updateAll.Text = n > 0 ? $"Update All ({n})" : "Update All";
+        _updateAll.Visible = n > 0;
+        _updateAll.Location = new Point(_refresh.Left - _updateAll.Width - 8, 16);
+    }
+
+    private async Task UpdateAllAsync()
+    {
+        var targets = _rows.Where(r => r.Status == RowStatus.UpdateAvailable).ToList();
+        if (targets.Count == 0) return;
+        Log.Write($"update all: {targets.Count} app(s)");
+        _updateAll.Enabled = false;
+        try { foreach (var r in targets) await InstallVersionAsync(r, null); }
+        finally { _updateAll.Enabled = true; RefreshUpdateAllButton(); }
     }
 
     /// <summary>Shows the notice banner with <paramref name="text"/>, or hides it when null.</summary>
@@ -388,15 +417,18 @@ public sealed class MainForm : Form
             var latest = row.Latest ?? rel.TagName;
             row.SetState(rel.TagName, row.Latest, row.LatestAssetId, ComputeStatus(rel.TagName, latest, true));
             row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.Id));
+            Log.Write($"installed {row.App.Id} {rel.TagName}{(_settings.InstallToApplications ? " (+shortcuts)" : "")}");
         }
         catch (Exception ex)
         {
             MessageBox.Show(this, ex.Message, "Install failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
             row.SetState(row.Installed, row.Latest, row.LatestAssetId, RowStatus.Error);
+            Log.Write($"install {row.App.Id} FAILED: {ex.Message}");
         }
         finally
         {
             row.SetBusy(false);
+            RefreshUpdateAllButton();
         }
     }
 
@@ -412,10 +444,13 @@ public sealed class MainForm : Form
                 : (row.Latest == null ? RowStatus.Unknown : RowStatus.MissingAsset);
             row.SetState(null, row.Latest, row.LatestAssetId, status);
             row.SetResolvedName(null);
+            Log.Write($"uninstalled {row.App.Id}");
+            RefreshUpdateAllButton();
         }
         catch (Exception ex)
         {
             MessageBox.Show(this, ex.Message, "Uninstall failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Log.Write($"uninstall {row.App.Id} FAILED: {ex.Message}");
         }
     }
 

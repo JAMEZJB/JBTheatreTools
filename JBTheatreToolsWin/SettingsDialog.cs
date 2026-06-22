@@ -175,6 +175,14 @@ public sealed class SettingsDialog : Form
         _installToApps.Checked = _settings.InstallToApplications;
         _installToApps.CheckedChanged += (_, _) => _settings.InstallToApplications = _installToApps.Checked;
 
+        var openLog = new Button
+        {
+            Text = "Open Log",
+            Location = new Point(16, 492),
+            AutoSize = true,
+        };
+        openLog.Click += (_, _) => Log.Open();
+
         var done = new Button
         {
             Text = "Done",
@@ -188,7 +196,7 @@ public sealed class SettingsDialog : Form
         {
             tokenHeading, _tokenState, _token, _save, _remove, tokenLink, help,
             updatesHeading, _updateMode, _updateHint, versionLabel, _check, _viewRelease, _checkResult,
-            appearanceHeading, _appearance, closeHeading, _closeBehavior, _installToApps, done
+            appearanceHeading, _appearance, closeHeading, _closeBehavior, _installToApps, openLog, done
         });
     }
 

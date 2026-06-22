@@ -1,9 +1,13 @@
 import SwiftUI
+import AppKit
 
 extension Color {
     /// JB Theatre Tools suite accent (signed-off palette): purple #AF52DE.
     /// Applied via `.tint(...)` (this SwiftPM app has no asset catalog for an AccentColor asset).
     static let jbAccent = Color(red: 175 / 255, green: 82 / 255, blue: 222 / 255)
+    /// Shared house "selector" colour (slate-blue #6E8299) for pop-up dropdowns & overflow menus, so the
+    /// purple accent stays reserved for primary actions / header / icon (house-style rule 21).
+    static let selectorBlue = Color(red: 110 / 255, green: 130 / 255, blue: 153 / 255)
 }
 
 /// User-selectable window appearance. `.system` follows macOS.
@@ -64,6 +68,7 @@ struct ContentView: View {
     @AppStorage("theatre.installToApplications") private var installToApplications = false
     @State private var showSettings = false
     @State private var refreshing = false
+    @State private var updatingAll = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -103,13 +108,23 @@ struct ContentView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
+            if state.updatesAvailable > 0 {
+                Button {
+                    Task { await updateAllAction() }
+                } label: {
+                    if updatingAll { ProgressView().controlSize(.small) }
+                    else { Label("Update All (\(state.updatesAvailable))", systemImage: "arrow.down.circle.fill") }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(updatingAll || refreshing)
+            }
             Button {
                 Task { await refreshAll() }
             } label: {
                 if refreshing { ProgressView().controlSize(.small) }
                 else { Label("Refresh", systemImage: "arrow.clockwise") }
             }
-            .disabled(refreshing || !state.hasToken)
+            .disabled(refreshing || updatingAll || !state.hasToken)
             Button { showSettings = true } label: {
                 Label("Settings", systemImage: "gearshape")
             }
@@ -217,6 +232,12 @@ struct ContentView: View {
         await state.refreshAll()
         refreshing = false
     }
+
+    private func updateAllAction() async {
+        updatingAll = true
+        await state.updateAll()
+        updatingAll = false
+    }
 }
 
 /// A single catalog row: name, blurb, version line, status badge, and action buttons.
@@ -227,6 +248,7 @@ struct AppRowView: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
+            iconView
             VStack(alignment: .leading, spacing: 3) {
                 Text(row.displayName).font(.body).bold()
                 Text(row.app.blurb).font(.caption).foregroundStyle(.secondary)
@@ -250,6 +272,30 @@ struct AppRowView: View {
         } message: {
             Text("This removes the installed app from your Mac. You can reinstall it anytime.")
         }
+    }
+
+    /// Leading icon: the installed app's REAL icon once installed; otherwise a tinted monogram tile,
+    /// so the list reads as a row of apps rather than plain text.
+    @ViewBuilder
+    private var iconView: some View {
+        if let path = InstallManager.shared.installedPath(row.id)?.path {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                .resizable().interpolation(.high)
+                .frame(width: 40, height: 40)
+        } else {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.jbAccent.opacity(0.15))
+                .frame(width: 40, height: 40)
+                .overlay(
+                    Text(appInitial)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Color.jbAccent)
+                )
+        }
+    }
+
+    private var appInitial: String {
+        row.displayName.first.map { String($0).uppercased() } ?? "•"
     }
 
     private var versionLine: some View {
@@ -339,6 +385,7 @@ struct AppRowView: View {
             Image(systemName: "ellipsis.circle")
         }
         .menuStyle(.borderlessButton)
+        .tint(.selectorBlue)   // house rule 21: selectors/menus are slate-blue, not the purple accent
         .fixedSize()
         .disabled(row.busy)
         .help("More versions & uninstall")
