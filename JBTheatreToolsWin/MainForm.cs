@@ -80,7 +80,7 @@ public sealed class MainForm : Form
         };
     }
 
-    // MARK: - UI construction
+    // --- UI construction ---
 
     private Control BuildHeader()
     {
@@ -249,12 +249,14 @@ public sealed class MainForm : Form
         };
     }
 
-    // MARK: - Actions
+    // --- Actions ---
 
     private async Task RefreshAllAsync()
     {
         var token = TokenStore.Load();
-        if (token == null) { ShowNotice(NoTokenMsg); return; }
+        // No token (e.g. just removed in Settings): reset every row to its installed/unknown state and
+        // clear stale latest/releases, so no row keeps a live — but silently no-op — Install/Update button.
+        if (token == null) { ResetRowsNoToken(); ShowNotice(NoTokenMsg); RefreshUpdateAllButton(); return; }
         ShowNotice(null);
 
         _refresh.Enabled = false;
@@ -276,7 +278,7 @@ public sealed class MainForm : Form
                     var all = await client.ReleasesAsync(row.App.Owner, row.App.Repo);
                     accessible = true;
                     row.SetReleases(all);
-                    var latest = all.FirstOrDefault(r => !r.Prerelease) ?? all.FirstOrDefault();
+                    var latest = Versions.Latest(all);
                     if (latest == null)
                     {
                         row.SetState(installed, null, null, RowStatus.NoRelease);
@@ -332,6 +334,21 @@ public sealed class MainForm : Form
         _updateAll.Location = new Point(_refresh.Left - _updateAll.Width - 8, 16);
     }
 
+    /// <summary>Reverts every row to its pre-refresh state (installed → Installed, else Unknown) and
+    /// clears any cached latest/releases — used when there's no token, so no row is left showing a live
+    /// Install/Update button that would silently do nothing.</summary>
+    private void ResetRowsNoToken()
+    {
+        foreach (var row in _rows)
+        {
+            var installed = InstallManager.Shared.InstalledVersion(row.App.Id);
+            row.SetReleases(new List<ReleaseInfo>());
+            row.SetState(installed, null, null, installed != null ? RowStatus.Installed : RowStatus.Unknown);
+            row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.Id));
+            row.Visible = installed != null;
+        }
+    }
+
     private async Task UpdateAllAsync()
     {
         var targets = _rows.Where(r => r.Status == RowStatus.UpdateAvailable).ToList();
@@ -349,7 +366,7 @@ public sealed class MainForm : Form
         _tokenBanner.Visible = text != null;
     }
 
-    // MARK: - Close behaviour (quit vs. keep running in the system tray)
+    // --- Close behaviour (quit vs. keep running in the system tray) ---
 
     private void SetupTray()
     {
@@ -405,7 +422,7 @@ public sealed class MainForm : Form
                 : await client.ReleasesAsync(row.App.Owner, row.App.Repo);
             var rel = tag != null
                 ? releases.FirstOrDefault(r => r.TagName == tag)
-                : (releases.FirstOrDefault(r => !r.Prerelease) ?? releases.FirstOrDefault());
+                : Versions.Latest(releases);
             if (rel == null) throw new Exception($"Version {tag ?? "latest"} not found.");
             var asset = rel.Assets.FirstOrDefault(a => a.Name == assetName)
                 ?? throw new Exception($"No Windows asset in {rel.TagName}.");
@@ -413,10 +430,15 @@ public sealed class MainForm : Form
             var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{row.App.Id}-{rel.TagName}-{assetName}");
             var progress = new Progress<double>(p => row.SetProgress(p));
             await client.DownloadAssetAsync(row.App.Owner, row.App.Repo, asset.Id, cache, progress);
+            bool verified = await InstallManager.VerifyDownloadAsync(cache, asset, rel, row.App.Owner, row.App.Repo, client);
             InstallManager.Shared.Install(row.App, rel.TagName, cache, assetName, _settings.InstallToApplications);
+            InstallManager.TryDelete(cache);   // verified copy is now installed; mirror the macOS zip cleanup
             var latest = row.Latest ?? rel.TagName;
             row.SetState(rel.TagName, row.Latest, row.LatestAssetId, ComputeStatus(rel.TagName, latest, true));
             row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.Id));
+            Log.Write(verified
+                ? $"verified {row.App.Id} {rel.TagName} (sha256)"
+                : $"install {row.App.Id} {rel.TagName}: unverified (no SHA256SUMS for this asset)");
             Log.Write($"installed {row.App.Id} {rel.TagName}{(_settings.InstallToApplications ? " (+shortcuts)" : "")}");
         }
         catch (Exception ex)
@@ -484,7 +506,7 @@ public sealed class MainForm : Form
                 _updateBanner.Visible = false;
             }
         }
-        catch { /* ignore — self-update check is best-effort */ }
+        catch (Exception ex) { Log.Write($"self-update check failed: {ex.Message}"); }
     }
 
     private void OpenSettings()
@@ -523,7 +545,7 @@ public sealed class MainForm : Form
             InstallManager.Shared.SyncShortcuts(r.App, toApplications);
     }
 
-    // MARK: - Helpers
+    // --- Helpers ---
 
     private static string CurrentVersion()
     {
@@ -535,7 +557,11 @@ public sealed class MainForm : Form
     {
         if (!hasAsset) return RowStatus.MissingAsset;
         if (installed == null) return RowStatus.NotInstalled;
-        return Versions.Equal(installed, latest) ? RowStatus.UpToDate : RowStatus.UpdateAvailable;
+        // Up-to-date ⇔ the latest release is NOT strictly newer than what's installed. Using the numeric
+        // comparator (not string equality) fixes two defects: 1.2 vs 1.2.0 (any differing segment count)
+        // no longer reads as a perpetual "Update available", and a republished OLDER release is never
+        // offered as an "update" that would silently downgrade.
+        return Versions.IsNewer(latest, installed) ? RowStatus.UpdateAvailable : RowStatus.UpToDate;
     }
 
     private void ApplyTheme()

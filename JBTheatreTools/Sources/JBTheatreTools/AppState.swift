@@ -203,7 +203,7 @@ final class AppState: ObservableObject {
         do {
             let all = try await client.releases(owner: app.owner, repo: app.repo)
             rows[index].releases = all
-            guard let latest = all.first(where: { !$0.prerelease }) ?? all.first else {
+            guard let latest = Self.latest(from: all) else {
                 rows[index].latest = nil
                 rows[index].latestAssetId = nil
                 rows[index].status = .noRelease
@@ -237,21 +237,32 @@ final class AppState: ObservableObject {
     private static func status(installed: String?, latest: String, hasAsset: Bool) -> Status {
         guard hasAsset else { return .missingAsset }
         guard let installed = installed else { return .notInstalled }
-        return versionsEqual(installed, latest) ? .upToDate : .updateAvailable
+        // Up-to-date ⇔ the latest release is NOT strictly newer than what's installed. Using the numeric
+        // comparator (`versionIsNewer`) rather than string equality fixes two defects: `1.2` vs `1.2.0`
+        // (and any differing segment count) no longer reads as a perpetual "Update available", and a
+        // republished OLDER release is never offered as an "update" that would silently downgrade.
+        return versionIsNewer(latest, than: installed) ? .updateAvailable : .upToDate
     }
 
-    private static func versionsEqual(_ a: String, _ b: String) -> Bool {
-        norm(a) == norm(b)
+    /// Picks the release to treat as "latest": the highest **semver** among non-prereleases (falling
+    /// back to the highest among all releases if every one is a prerelease). GitHub's list endpoint is
+    /// ordered by creation date, so a backport/hotfix published *after* a newer release would otherwise
+    /// be mis-selected as "latest" (and then offered as a downgrade) — we sort by version instead. This
+    /// also matches GitHub's own semver-aware `releases/latest`, which the self-update check uses.
+    nonisolated static func latest(from releases: [ReleaseInfo]) -> ReleaseInfo? {
+        let stable = releases.filter { !$0.prerelease }
+        let pool = stable.isEmpty ? releases : stable
+        return pool.max { versionIsNewer($1.tagName, than: $0.tagName) }
     }
 
-    private static func norm(_ s: String) -> String {
+    nonisolated private static func norm(_ s: String) -> String {
         var t = s.trimmingCharacters(in: .whitespaces)
         if t.hasPrefix("v") || t.hasPrefix("V") { t.removeFirst() }
         return t
     }
 
     /// True if `a` is a strictly newer version string than `b` (component-wise numeric compare).
-    static func versionIsNewer(_ a: String, than b: String) -> Bool {
+    nonisolated static func versionIsNewer(_ a: String, than b: String) -> Bool {
         func parts(_ s: String) -> [Int] {
             norm(s).split(separator: ".").map { Int($0.prefix { $0.isNumber }) ?? 0 }
         }
@@ -262,6 +273,35 @@ final class AppState: ObservableObject {
             if x != y { return x > y }
         }
         return false
+    }
+
+    // MARK: - Download integrity
+
+    /// Integrity-checks a freshly downloaded asset before it's installed/launched. The file size must
+    /// match the release's declared size, and — when the release publishes a `SHA256SUMS` manifest —
+    /// its SHA-256 must match the listed value. A mismatch deletes the file and throws. Returns `true`
+    /// when checksum-verified, `false` when no checksum is published for the asset (some tools don't
+    /// ship `SHA256SUMS` yet): the caller proceeds but should report it as unverified. (verify-if-present)
+    nonisolated static func verifyDownload(_ file: URL, asset: ReleaseAsset, release: ReleaseInfo,
+                                           app: CatalogApp, client: GitHubClient) async throws -> Bool {
+        let fm = FileManager.default
+        if asset.size > 0,
+           let attrs = try? fm.attributesOfItem(atPath: file.path),
+           let size = (attrs[.size] as? NSNumber)?.intValue, size != asset.size {
+            try? fm.removeItem(at: file)
+            throw InstallError.sizeMismatch(expected: asset.size, got: size)
+        }
+        guard let sumsAsset = release.assets.first(where: { $0.name == "SHA256SUMS" }) else { return false }
+        let sumsURL = InstallManager.shared.cacheDir.appendingPathComponent("\(app.id)-\(release.tagName)-SHA256SUMS")
+        try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: sumsAsset.id, to: sumsURL)
+        let text = (try? String(contentsOf: sumsURL, encoding: .utf8)) ?? ""
+        try? fm.removeItem(at: sumsURL)
+        do {
+            return try InstallManager.verify(file: file, assetName: asset.name, sums: text)
+        } catch {
+            try? fm.removeItem(at: file)
+            throw error
+        }
     }
 
     // MARK: - Install / update / uninstall / launch
@@ -284,7 +324,7 @@ final class AppState: ObservableObject {
 
         let release = tag != nil
             ? rows[i].releases.first { $0.tagName == tag }
-            : (rows[i].releases.first { !$0.prerelease } ?? rows[i].releases.first)
+            : Self.latest(from: rows[i].releases)
         guard let rel = release else { rows[i].status = .error("Version \(tag ?? "latest") not found."); return }
         guard let asset = rel.assets.first(where: { $0.name == app.macAssetName }) else {
             rows[i].status = .error("No macOS asset in \(rel.tagName)."); return
@@ -300,6 +340,10 @@ final class AppState: ObservableObject {
                     self.rows[j].progress = p
                 }
             }
+            let verified = try await Self.verifyDownload(zipDest, asset: asset, release: rel, app: app, client: client)
+            AppLog.shared.log(verified
+                ? "verified \(app.id) \(rel.tagName) (sha256)"
+                : "install \(app.id) \(rel.tagName): unverified (no SHA256SUMS for this asset)")
             let toApps = UserDefaults.standard.bool(forKey: "theatre.installToApplications")
             try InstallManager.shared.install(app: app, version: rel.tagName, downloadedZip: zipDest, toApplications: toApps)
             try? FileManager.default.removeItem(at: zipDest)
@@ -424,6 +468,15 @@ final class AppState: ObservableObject {
             let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
             let dest = downloads.appendingPathComponent(asset.name)
             try await client.downloadAsset(owner: s.owner, repo: s.repo, assetId: asset.id, to: dest)
+            // Integrity-check the launcher download too (the launcher repo publishes SHA256SUMS).
+            if let sumsAsset = info.assets.first(where: { $0.name == "SHA256SUMS" }) {
+                let sumsURL = dest.deletingLastPathComponent().appendingPathComponent("JBTheatreTools-SHA256SUMS.txt")
+                try await client.downloadAsset(owner: s.owner, repo: s.repo, assetId: sumsAsset.id, to: sumsURL)
+                let text = (try? String(contentsOf: sumsURL, encoding: .utf8)) ?? ""
+                try? FileManager.default.removeItem(at: sumsURL)
+                do { _ = try InstallManager.verify(file: dest, assetName: asset.name, sums: text) }
+                catch { try? FileManager.default.removeItem(at: dest); throw error }
+            }
             NSWorkspace.shared.activateFileViewerSelecting([dest])
             launcherDownloadMessage = "Saved \(asset.name) to your Downloads folder — quit JB Theatre Tools and replace it."
         } catch {

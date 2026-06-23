@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace JBTheatreTools;
@@ -59,7 +60,7 @@ public sealed class InstallManager
             File.WriteAllText(ManifestPath,
                 JsonSerializer.Serialize(m, new JsonSerializerOptions { WriteIndented = true }));
         }
-        catch { /* non-fatal */ }
+        catch (Exception ex) { Log.Write($"manifest write failed: {ex.Message}"); }
     }
 
     public string? InstalledVersion(string id)
@@ -96,8 +97,10 @@ public sealed class InstallManager
         var dir = Path.Combine(AppsDir, app.Id);
         Directory.CreateDirectory(dir);
         var dest = Path.Combine(dir, assetName);
-        if (File.Exists(dest)) File.Delete(dest);
-        File.Move(downloadedExe, dest);
+        // Copy (not move) so the verified download stays in the cache; the caller removes it after a
+        // successful install (mirroring the macOS zip cleanup). Moving would destroy the only copy, so a
+        // mid-install failure would leave nothing to recover from.
+        File.Copy(downloadedExe, dest, overwrite: true);
 
         var m = Manifest();
         // Remove shortcuts from any previous install (the name or the setting may have changed).
@@ -108,8 +111,17 @@ public sealed class InstallManager
         if (toApplications)
         {
             // Name the shortcut after the app's own ProductName, falling back to the catalog name.
-            shortcutName = Shortcuts.SafeName(TryProductName(dest) ?? app.Name);
-            Shortcuts.Create(shortcutName, dest);
+            // Best-effort: a shortcut failure must not abort the install — the exe + manifest still record it.
+            try
+            {
+                shortcutName = Shortcuts.SafeName(TryProductName(dest) ?? app.Name);
+                Shortcuts.Create(shortcutName, dest);
+            }
+            catch (Exception ex)
+            {
+                shortcutName = null;
+                Log.Write($"install {app.Id}: shortcut creation failed: {ex.Message}");
+            }
         }
 
         m[app.Id] = new InstalledRecord
@@ -146,11 +158,12 @@ public sealed class InstallManager
         if (m.TryGetValue(appId, out var rec) && !string.IsNullOrEmpty(rec.ShortcutName))
             Shortcuts.Remove(rec.ShortcutName!);
         var dir = Path.Combine(AppsDir, appId);
-        try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
+        catch (Exception ex) { Log.Write($"uninstall {appId}: could not delete {dir}: {ex.Message}"); }
         if (m.Remove(appId)) WriteManifest(m);
     }
 
-    // MARK: - Reconcile install location (Windows: the exe never moves, only its shortcuts)
+    // --- Reconcile install location (Windows: the exe never moves, only its shortcuts) ---
 
     /// <summary>True if the app's shortcuts don't match the setting (need creating, or removing).</summary>
     public bool NeedsShortcutSync(string appId, bool toApplications)
@@ -182,5 +195,74 @@ public sealed class InstallManager
             r.ShortcutName = null;
             WriteManifest(m);
         }
+    }
+
+    // --- Download integrity (SHA-256) ---
+
+    /// <summary>
+    /// Integrity-checks a freshly downloaded asset before install. The file size must match the
+    /// release's declared size, and — when the release publishes a <c>SHA256SUMS</c> manifest — its
+    /// SHA-256 must match. A mismatch deletes the file and throws. Returns <c>true</c> when
+    /// checksum-verified, <c>false</c> when no checksum is published for the asset (some tools don't
+    /// ship <c>SHA256SUMS</c> yet): the caller proceeds but should report it as unverified.
+    /// (verify-if-present policy)
+    /// </summary>
+    public static async Task<bool> VerifyDownloadAsync(string file, ReleaseAsset asset, ReleaseInfo release,
+                                                       string owner, string repo, GitHubClient client)
+    {
+        var fi = new FileInfo(file);
+        if (asset.Size > 0 && fi.Exists && fi.Length != asset.Size)
+        {
+            TryDelete(file);
+            throw new Exception($"Download is {fi.Length} bytes but the release lists {asset.Size}. Aborting install.");
+        }
+        var sumsAsset = release.Assets.FirstOrDefault(a => a.Name == "SHA256SUMS");
+        if (sumsAsset == null) return false;
+
+        var sumsPath = file + ".SHA256SUMS";
+        await client.DownloadAssetAsync(owner, repo, sumsAsset.Id, sumsPath, null);
+        string text;
+        try { text = File.ReadAllText(sumsPath); }
+        finally { TryDelete(sumsPath); }
+
+        var expected = ExpectedSha256(asset.Name, text);
+        if (expected == null) return false;
+        var actual = Sha256Hex(file);
+        if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
+        {
+            TryDelete(file);
+            throw new Exception($"Checksum mismatch for {asset.Name} — the download does not match the release's SHA256SUMS. Aborting install.");
+        }
+        return true;
+    }
+
+    /// <summary>Returns the expected hex SHA-256 for <paramref name="assetName"/> from a SHA256SUMS body
+    /// (standard <c>&lt;hex&gt;␠␠&lt;filename&gt;</c> lines), or null if the asset isn't listed.</summary>
+    public static string? ExpectedSha256(string assetName, string sumsText)
+    {
+        foreach (var raw in sumsText.Split('\n'))
+        {
+            var line = raw.Trim();
+            int sep = line.IndexOfAny(new[] { ' ', '\t' });
+            if (sep <= 0) continue;
+            var hash = line[..sep];
+            var name = line[(sep + 1)..].Trim();
+            if (name.StartsWith('*')) name = name[1..];   // sha256sum "binary mode" marker
+            if (name == assetName) return hash;
+        }
+        return null;
+    }
+
+    /// <summary>Streams <paramref name="path"/> through SHA-256 and returns the lowercase hex digest.</summary>
+    public static string Sha256Hex(string path)
+    {
+        using var sha = SHA256.Create();
+        using var fs = File.OpenRead(path);
+        return Convert.ToHexString(sha.ComputeHash(fs)).ToLowerInvariant();
+    }
+
+    public static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { /* best effort */ }
     }
 }

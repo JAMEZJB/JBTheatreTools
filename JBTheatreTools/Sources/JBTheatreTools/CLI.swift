@@ -80,7 +80,7 @@ enum CLI {
                         // Use the releases LIST endpoint so we can tell "no access" (404 → hidden in
                         // the GUI) apart from "accessible but no release yet" (200 []).
                         let all = try await client.releases(owner: app.owner, repo: app.repo)
-                        if let rel = all.first(where: { !$0.prerelease }) ?? all.first {
+                        if let rel = AppState.latest(from: all) {
                             latest = rel.tagName
                             if let a = rel.assets.first(where: { $0.name == app.macAssetName }) {
                                 note = "\(a.name) (\(byteString(a.size)))"
@@ -152,7 +152,7 @@ enum CLI {
                 let all = try await client.releases(owner: app.owner, repo: app.repo)
                 let release = tag != nil
                     ? all.first { $0.tagName == tag }
-                    : (all.first { !$0.prerelease } ?? all.first)
+                    : AppState.latest(from: all)
                 guard let rel = release else { fputs("error: version \(tag ?? "latest") not found.\n", stderr); exit(1) }
                 guard let asset = rel.assets.first(where: { $0.name == app.macAssetName }) else {
                     fputs("error: release \(rel.tagName) has no macOS asset.\n", stderr); exit(1)
@@ -165,6 +165,8 @@ enum CLI {
                     let pct = Int(p * 100)
                     if pct != pctBox.last, pct % 10 == 0 { pctBox.last = pct; print("  \(pct)%") }
                 }
+                let verified = try await AppState.verifyDownload(zip, asset: asset, release: rel, app: app, client: client)
+                print(verified ? "Verified \(asset.name) (sha256)." : "⚠︎ \(asset.name) is unverified (release has no SHA256SUMS for it).")
                 let dest = try im.install(app: app, version: rel.tagName, downloadedZip: zip, toApplications: toApplications)
                 try? FileManager.default.removeItem(at: zip)
                 print("Installed \(app.name) \(rel.tagName) → \(dest.path)")
@@ -260,6 +262,9 @@ enum CLI {
                  --tag <vX.Y.Z>      Install a specific release (with --install)
                  --to-applications   Install into the Applications folder (with --install)
                  --catalog <path>    Use a specific catalog.json
+
+        Note: a token passed via --token is visible to other local users (process list / shell
+              history). Prefer $GITHUB_TOKEN or the saved Keychain token where possible.
         """)
     }
 

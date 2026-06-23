@@ -71,14 +71,22 @@ public static class Cli
             {
                 try
                 {
-                    var info = await client.LatestReleaseAsync(app.Owner, app.Repo);
-                    latest = info.TagName;
-                    var asset = info.Assets.FirstOrDefault(a => a.Name == app.WindowsAssetName);
-                    note = asset != null
-                        ? $"{asset.Name} ({ByteString(asset.Size)})"
-                        : $"⚠ no {Platform.AssetKey} asset ({app.WindowsAssetName})";
+                    // Use the releases LIST endpoint (like the GUI and the macOS CLI) so we can tell
+                    // "no access" (404 → hidden) apart from "accessible but no release yet" (200 []).
+                    var all = await client.ReleasesAsync(app.Owner, app.Repo);
+                    var info = Versions.Latest(all);
+                    if (info == null) { latest = "none"; note = "accessible, no release yet"; }
+                    else
+                    {
+                        latest = info.TagName;
+                        var asset = info.Assets.FirstOrDefault(a => a.Name == app.WindowsAssetName);
+                        note = asset != null
+                            ? $"{asset.Name} ({ByteString(asset.Size)})"
+                            : $"⚠ no {Platform.AssetKey} asset ({app.WindowsAssetName})";
+                    }
                 }
-                catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.NoRelease) { latest = "none"; note = "no published release"; }
+                catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.NotAccessible) { latest = "—"; note = "HIDDEN — token has no access to this repo"; }
+                catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.Unauthorized) { latest = "—"; note = "token invalid or expired"; }
                 catch (Exception ex) { latest = "error"; note = ex.Message; }
             }
             else note = "no token — set $GITHUB_TOKEN or pass --token";
@@ -136,7 +144,7 @@ public static class Cli
             var all = await client.ReleasesAsync(app.Owner, app.Repo);
             var rel = tag != null
                 ? all.FirstOrDefault(r => r.TagName == tag)
-                : (all.FirstOrDefault(r => !r.Prerelease) ?? all.FirstOrDefault());
+                : Versions.Latest(all);
             if (rel == null) { Console.Error.WriteLine($"error: version {tag ?? "latest"} not found."); return 1; }
             var asset = rel.Assets.FirstOrDefault(a => a.Name == app.WindowsAssetName);
             if (asset == null) { Console.Error.WriteLine($"error: release {rel.TagName} has no {Platform.AssetKey} asset."); return 1; }
@@ -150,7 +158,10 @@ public static class Cli
                 if (pct != last && pct % 10 == 0) { last = pct; Console.WriteLine($"  {pct}%"); }
             });
             await client.DownloadAssetAsync(app.Owner, app.Repo, asset.Id, cache, progress);
+            bool verified = await InstallManager.VerifyDownloadAsync(cache, asset, rel, app.Owner, app.Repo, client);
+            Console.WriteLine(verified ? $"Verified {asset.Name} (sha256)." : $"⚠ {asset.Name} is unverified (release has no SHA256SUMS for it).");
             var dest = InstallManager.Shared.Install(app, rel.TagName, cache, asset.Name, toApplications);
+            InstallManager.TryDelete(cache);
             Console.WriteLine($"Installed {app.Name} {rel.TagName} → {dest}");
             return 0;
         }
@@ -220,6 +231,9 @@ public static class Cli
                  --tag <vX.Y.Z>      Install a specific release (with --install)
                  --to-applications   Also create Start Menu + Desktop shortcuts (with --install)
                  --catalog <path>    Use a specific catalog.json
+
+        Note: a token passed via --token is visible to other local users (process list / shell
+              history). Prefer $GITHUB_TOKEN or the saved Credential Manager token where possible.
         """);
 
     private static int PrintHelpReturn() { PrintHelp(); return 0; }

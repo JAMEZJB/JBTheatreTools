@@ -98,44 +98,68 @@ public sealed class GitHubClient : IDisposable
         return all.Where(r => !r.Draft).ToList();
     }
 
+    /// <summary>Sends a GET and follows GitHub's redirect(s) to S3 — bounded, resolving a relative
+    /// <c>Location</c> against the current URL, and WITHOUT forwarding the Authorization header (S3
+    /// rejects a request carrying both a Bearer header and its own signed query params).</summary>
+    private async Task<HttpResponseMessage> SendFollowingRedirectsAsync(string url, string accept,
+                                                                        HttpCompletionOption completion)
+    {
+        using var req = NewRequest(url, accept);
+        var resp = await _http.SendAsync(req, completion);
+        var current = new Uri(url);
+        for (int hop = 0; hop < 5 && (int)resp.StatusCode is >= 300 and < 400 && resp.Headers.Location != null; hop++)
+        {
+            var location = resp.Headers.Location.IsAbsoluteUri
+                ? resp.Headers.Location
+                : new Uri(current, resp.Headers.Location);
+            resp.Dispose();
+            current = location;
+            using var hopReq = new HttpRequestMessage(HttpMethod.Get, location);
+            hopReq.Headers.TryAddWithoutValidation("User-Agent", "JBTheatreTools");
+            resp = await _http.SendAsync(hopReq, completion);
+        }
+        return resp;
+    }
+
     public async Task DownloadAssetAsync(string owner, string repo, long assetId, string dest,
                                          IProgress<double>? progress = null)
     {
         var url = $"https://api.github.com/repos/{owner}/{repo}/releases/assets/{assetId}";
-        using var req = NewRequest(url, "application/octet-stream");
-        var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
+        using var resp = await SendFollowingRedirectsAsync(url, "application/octet-stream",
+                                                           HttpCompletionOption.ResponseHeadersRead);
+        if (!resp.IsSuccessStatusCode)
+            throw new GitHubException(GitHubErrorKind.Http, $"Download failed: HTTP {(int)resp.StatusCode}.");
+
+        var total = resp.Content.Headers.ContentLength ?? -1L;
+        Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+        // Stream into a temporary ".part" file and only move it into place on success, so an interrupted
+        // download (network drop, app close) never leaves a truncated file that later looks installable.
+        var part = dest + ".part";
+        long received = 0;
         try
         {
-            // Follow GitHub's 302 to S3 once, WITHOUT the Authorization header.
-            if ((int)resp.StatusCode is >= 300 and < 400 && resp.Headers.Location != null)
+            await using (var src = await resp.Content.ReadAsStreamAsync())
+            await using (var dst = File.Create(part))
             {
-                var location = resp.Headers.Location;
-                resp.Dispose();
-                using var s3req = new HttpRequestMessage(HttpMethod.Get, location);
-                s3req.Headers.TryAddWithoutValidation("User-Agent", "JBTheatreTools");
-                resp = await _http.SendAsync(s3req, HttpCompletionOption.ResponseHeadersRead);
+                var buffer = new byte[81920];
+                int n;
+                while ((n = await src.ReadAsync(buffer)) > 0)
+                {
+                    await dst.WriteAsync(buffer.AsMemory(0, n));
+                    received += n;
+                    if (total > 0) progress?.Report((double)received / total);
+                }
             }
-            if (!resp.IsSuccessStatusCode)
-                throw new GitHubException(GitHubErrorKind.Http, $"Download failed: HTTP {(int)resp.StatusCode}.");
-
-            var total = resp.Content.Headers.ContentLength ?? -1L;
-            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-            await using var src = await resp.Content.ReadAsStreamAsync();
-            await using var dst = File.Create(dest);
-            var buffer = new byte[81920];
-            long received = 0;
-            int n;
-            while ((n = await src.ReadAsync(buffer)) > 0)
-            {
-                await dst.WriteAsync(buffer.AsMemory(0, n));
-                received += n;
-                if (total > 0) progress?.Report((double)received / total);
-            }
+            if (total > 0 && received != total)
+                throw new GitHubException(GitHubErrorKind.Http, $"Download truncated ({received} of {total} bytes).");
+            if (File.Exists(dest)) File.Delete(dest);
+            File.Move(part, dest);
             progress?.Report(1.0);
         }
-        finally
+        catch
         {
-            resp.Dispose();
+            try { if (File.Exists(part)) File.Delete(part); } catch { /* best effort */ }
+            throw;
         }
     }
 

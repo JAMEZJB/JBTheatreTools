@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 struct InstalledRecord: Codable {
     var version: String
@@ -10,12 +11,18 @@ enum InstallError: LocalizedError {
     case noAppInZip
     case notInstalled
     case unzipFailed(Int32)
+    case sizeMismatch(expected: Int, got: Int)
+    case checksumMismatch(String)
 
     var errorDescription: String? {
         switch self {
         case .noAppInZip: return "Downloaded archive did not contain a .app bundle."
         case .notInstalled: return "App is not installed."
         case .unzipFailed(let code): return "Could not extract the archive (ditto exit \(code))."
+        case .sizeMismatch(let expected, let got):
+            return "Download is \(got) bytes but the release lists \(expected). Aborting install."
+        case .checksumMismatch(let name):
+            return "Checksum mismatch for \(name) — the download does not match the release's SHA256SUMS. Aborting install."
         }
     }
 }
@@ -98,7 +105,7 @@ final class InstallManager {
 
         try ditto(extract: downloadedZip, to: extractDir)
 
-        guard let bundle = firstAppBundle(in: extractDir) else { throw InstallError.noAppInZip }
+        guard let bundle = appBundle(in: extractDir, preferring: app.name) else { throw InstallError.noAppInZip }
 
         // Remove any previous install first — it may be in a different location if the setting changed.
         if let old = manifest()[app.id] { try? fm.removeItem(at: URL(fileURLWithPath: old.path)) }
@@ -185,10 +192,59 @@ final class InstallManager {
         if proc.terminationStatus != 0 { throw InstallError.unzipFailed(proc.terminationStatus) }
     }
 
-    /// Finds the first `.app` bundle in `dir`, ignoring the `__MACOSX` metadata folder.
-    private func firstAppBundle(in dir: URL) -> URL? {
+    /// Finds the `.app` bundle to install in `dir`, ignoring the `__MACOSX` metadata folder. When an
+    /// archive contains more than one bundle, prefer the one whose name matches the catalog name, then
+    /// fall back to alphabetical order so the choice is **deterministic** (rather than depending on the
+    /// unspecified order of `contentsOfDirectory`, which could install a helper bundle non-reproducibly).
+    private func appBundle(in dir: URL, preferring expectedName: String) -> URL? {
         guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return nil }
-        return items.first { $0.pathExtension == "app" && $0.lastPathComponent != "__MACOSX" }
+        let bundles = items
+            .filter { $0.pathExtension == "app" && $0.lastPathComponent != "__MACOSX" }
+            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+        let wanted = expectedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let match = bundles.first(where: {
+            $0.deletingPathExtension().lastPathComponent.compare(wanted, options: .caseInsensitive) == .orderedSame
+        }) { return match }
+        return bundles.first
+    }
+
+    // MARK: - Download integrity (SHA-256)
+
+    /// Returns the expected hex SHA-256 for `assetName` from a `SHA256SUMS` file body
+    /// (standard `<hex>␠␠<filename>` lines), or nil if the asset isn't listed.
+    static func expectedSHA256(forAsset assetName: String, inSums text: String) -> String? {
+        for raw in text.split(whereSeparator: \.isNewline) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard let sep = line.firstIndex(where: { $0 == " " || $0 == "\t" }) else { continue }
+            let hash = String(line[..<sep])
+            var name = String(line[line.index(after: sep)...]).trimmingCharacters(in: .whitespaces)
+            if name.hasPrefix("*") { name.removeFirst() }   // sha256sum "binary mode" marker
+            if name == assetName { return hash }
+        }
+        return nil
+    }
+
+    /// Streams `url` through SHA-256 and returns the lowercase hex digest.
+    static func sha256Hex(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Verifies `file` against a `SHA256SUMS` body. Returns true when checksum-verified, false when the
+    /// asset isn't listed (caller treats as "unverified, proceed"); throws `.checksumMismatch` on a real
+    /// mismatch.
+    static func verify(file: URL, assetName: String, sums: String) throws -> Bool {
+        guard let expected = expectedSHA256(forAsset: assetName, inSums: sums) else { return false }
+        let actual = try sha256Hex(of: file)
+        guard actual.caseInsensitiveCompare(expected) == .orderedSame else {
+            throw InstallError.checksumMismatch(assetName)
+        }
+        return true
     }
 
     private static func isoNow() -> String {

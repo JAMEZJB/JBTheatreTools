@@ -2,8 +2,11 @@ namespace JBTheatreTools;
 
 internal static class Program
 {
+    // Must mirror the commands routed in Cli.Run — otherwise an unlisted command (e.g. --uninstall)
+    // falls through and silently launches the GUI instead of running headless.
     private static readonly HashSet<string> CliCommands =
-        new() { "--list", "--installed", "--install", "--launch", "--help", "-h" };
+        new() { "--list", "--installed", "--releases", "--install", "--uninstall",
+                "--launch", "--self-check", "--help", "-h" };
 
     [STAThread]
     private static int Main(string[] args)
