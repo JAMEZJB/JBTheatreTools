@@ -2,17 +2,16 @@ namespace JBTheatreTools;
 
 internal static class Program
 {
-    // Must mirror the commands routed in Cli.Run — otherwise an unlisted command (e.g. --uninstall)
-    // falls through and silently launches the GUI instead of running headless.
-    private static readonly HashSet<string> CliCommands =
-        new() { "--list", "--installed", "--releases", "--install", "--uninstall",
-                "--launch", "--self-check", "--help", "-h" };
-
     [STAThread]
     private static int Main(string[] args)
     {
-        // A recognised `--…` command runs the headless CLI and exits; otherwise the GUI launches.
-        if (args.Length > 0 && CliCommands.Contains(args[0]))
+        // Route to the headless CLI when invoked with a recognised verb ANYWHERE in the args, or with
+        // any `-`/`--` option (so `--token X --install helo` and typo'd flags hit the CLI/usage error
+        // instead of silently opening the GUI on a headless box — THEATRE-01). A double-clicked GUI exe
+        // gets no args; OS restart-manager args use `/`, so they still fall through to the GUI.
+        bool cliInvocation = args.Any(a => Cli.Commands.Contains(a))
+                             || args.Any(a => a.StartsWith('-'));
+        if (cliInvocation)
             return Cli.Run(args).GetAwaiter().GetResult();
 
         ApplicationConfiguration.Initialize();

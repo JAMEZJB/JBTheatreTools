@@ -279,11 +279,11 @@ final class AppState: ObservableObject {
 
     /// Integrity-checks a freshly downloaded asset before it's installed/launched. The file size must
     /// match the release's declared size, and — when the release publishes a `SHA256SUMS` manifest —
-    /// its SHA-256 must match the listed value. A mismatch deletes the file and throws. Returns `true`
-    /// when checksum-verified, `false` when no checksum is published for the asset (some tools don't
-    /// ship `SHA256SUMS` yet): the caller proceeds but should report it as unverified. (verify-if-present)
+    /// its SHA-256 must match the listed value. A mismatch deletes the file and throws. Returns
+    /// `.verified` on a checksum match, or (verify-if-present) `.noManifest` / `.assetNotListed` when
+    /// there's nothing to check against — the caller proceeds but should report it as unverified.
     nonisolated static func verifyDownload(_ file: URL, asset: ReleaseAsset, release: ReleaseInfo,
-                                           app: CatalogApp, client: GitHubClient) async throws -> Bool {
+                                           app: CatalogApp, client: GitHubClient) async throws -> VerifyResult {
         let fm = FileManager.default
         if asset.size > 0,
            let attrs = try? fm.attributesOfItem(atPath: file.path),
@@ -291,13 +291,13 @@ final class AppState: ObservableObject {
             try? fm.removeItem(at: file)
             throw InstallError.sizeMismatch(expected: asset.size, got: size)
         }
-        guard let sumsAsset = release.assets.first(where: { $0.name == "SHA256SUMS" }) else { return false }
+        guard let sumsAsset = release.assets.first(where: { $0.name == "SHA256SUMS" }) else { return .noManifest }
         let sumsURL = InstallManager.shared.cacheDir.appendingPathComponent("\(app.id)-\(release.tagName)-SHA256SUMS")
         try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: sumsAsset.id, to: sumsURL)
         let text = (try? String(contentsOf: sumsURL, encoding: .utf8)) ?? ""
         try? fm.removeItem(at: sumsURL)
         do {
-            return try InstallManager.verify(file: file, assetName: asset.name, sums: text)
+            return try InstallManager.verify(file: file, assetName: asset.name, sums: text) ? .verified : .assetNotListed
         } catch {
             try? fm.removeItem(at: file)
             throw error
@@ -340,10 +340,12 @@ final class AppState: ObservableObject {
                     self.rows[j].progress = p
                 }
             }
-            let verified = try await Self.verifyDownload(zipDest, asset: asset, release: rel, app: app, client: client)
-            AppLog.shared.log(verified
-                ? "verified \(app.id) \(rel.tagName) (sha256)"
-                : "install \(app.id) \(rel.tagName): unverified (no SHA256SUMS for this asset)")
+            let verification = try await Self.verifyDownload(zipDest, asset: asset, release: rel, app: app, client: client)
+            switch verification {
+            case .verified:       AppLog.shared.log("verified \(app.id) \(rel.tagName) (sha256)")
+            case .noManifest:     AppLog.shared.log("install \(app.id) \(rel.tagName): unverified (release publishes no SHA256SUMS)")
+            case .assetNotListed: AppLog.shared.log("install \(app.id) \(rel.tagName): unverified (asset not listed in SHA256SUMS)")
+            }
             let toApps = UserDefaults.standard.bool(forKey: "theatre.installToApplications")
             try InstallManager.shared.install(app: app, version: rel.tagName, downloadedZip: zipDest, toApplications: toApps)
             try? FileManager.default.removeItem(at: zipDest)

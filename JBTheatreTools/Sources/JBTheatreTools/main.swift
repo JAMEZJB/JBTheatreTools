@@ -1,10 +1,12 @@
 import Foundation
 
-// Custom entry point: a recognised `--…` command runs the headless CLI and exits;
-// otherwise the SwiftUI app launches. (SwiftUI's `App` exposes a static `main()` we call.)
+// Custom entry point: if a recognised `--…` command appears ANYWHERE in the args, run the headless
+// CLI and exit; otherwise the SwiftUI app launches. (Checking only args[0] missed invocations like
+// `--token X --install helo`, which then wrongly opened the GUI — see THEATRE-01.) We match on a real
+// verb rather than "any dash-arg" so OS-supplied launch flags don't suppress the GUI.
 let arguments = Array(CommandLine.arguments.dropFirst())
 
-if let first = arguments.first, CLI.commands.contains(first) {
+if arguments.contains(where: { CLI.commands.contains($0) }) {
     CLI.run(args: arguments)
     exit(0)
 }

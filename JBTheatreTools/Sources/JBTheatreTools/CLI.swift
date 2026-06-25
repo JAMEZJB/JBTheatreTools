@@ -21,8 +21,10 @@ enum CLI {
     ]
 
     static func run(args: [String]) {
-        var args = args
-        let cmd = args.removeFirst()
+        // The command verb may appear anywhere (options like `--token X` can precede it), so find the
+        // first recognised verb rather than assuming it's args[0] — otherwise `--token X --install helo`
+        // would fall through and (in main.swift) launch the GUI instead of installing.
+        guard let cmd = args.first(where: { commands.contains($0) }) else { printHelp(); return }
         if cmd == "--help" || cmd == "-h" { printHelp(); return }
 
         var token = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
@@ -30,14 +32,17 @@ enum CLI {
         var tag: String?
         var toApplications = false
         var positional: [String] = []
+        var skippedCmd = false
         var i = 0
         while i < args.count {
-            switch args[i] {
+            let a = args[i]
+            if !skippedCmd && a == cmd { skippedCmd = true; i += 1; continue }
+            switch a {
             case "--token":            i += 1; token = i < args.count ? args[i] : nil
             case "--catalog":          i += 1; catalogPath = i < args.count ? args[i] : nil
             case "--tag":              i += 1; tag = i < args.count ? args[i] : nil
             case "--to-applications":  toApplications = true
-            default:                   positional.append(args[i])
+            default:                   positional.append(a)
             }
             i += 1
         }
@@ -165,10 +170,15 @@ enum CLI {
                     let pct = Int(p * 100)
                     if pct != pctBox.last, pct % 10 == 0 { pctBox.last = pct; print("  \(pct)%") }
                 }
-                let verified = try await AppState.verifyDownload(zip, asset: asset, release: rel, app: app, client: client)
-                print(verified ? "Verified \(asset.name) (sha256)." : "⚠︎ \(asset.name) is unverified (release has no SHA256SUMS for it).")
+                let verification = try await AppState.verifyDownload(zip, asset: asset, release: rel, app: app, client: client)
+                switch verification {
+                case .verified:       print("Verified \(asset.name) (sha256).")
+                case .noManifest:     print("⚠︎ \(asset.name) is unverified — the release publishes no SHA256SUMS.")
+                case .assetNotListed: print("⚠︎ \(asset.name) is unverified — it isn't listed in the release's SHA256SUMS.")
+                }
                 let dest = try im.install(app: app, version: rel.tagName, downloadedZip: zip, toApplications: toApplications)
                 try? FileManager.default.removeItem(at: zip)
+                AppLog.shared.log("cli: installed \(app.id) \(rel.tagName)\(toApplications ? " (Applications)" : "")\(verification == .verified ? " (sha256 ok)" : " (unverified)")")
                 print("Installed \(app.name) \(rel.tagName) → \(dest.path)")
             } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
         }
@@ -178,6 +188,7 @@ enum CLI {
         guard let app = appFor(id, catalog) else { fputs("error: pass an app id.\n", stderr); exit(1) }
         do {
             try InstallManager.shared.uninstall(app.id)
+            AppLog.shared.log("cli: uninstalled \(app.id)")
             print("Uninstalled \(app.name).")
         } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
     }
@@ -186,6 +197,7 @@ enum CLI {
         guard let app = appFor(id, catalog) else { fputs("error: pass an app id.\n", stderr); exit(1) }
         do {
             try InstallManager.shared.launch(app: app)
+            AppLog.shared.log("cli: launched \(app.id)")
             print("Launched \(app.name).")
         } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
     }

@@ -90,10 +90,13 @@ public sealed class MainForm : Form
         _title.Font = new Font(Font.FontFamily, 13f, FontStyle.Bold);
         _title.AutoSize = true;
         _title.Location = new Point(14, 10);
+        _title.UseMnemonic = false;   // render a literal "&" (none here today, but future-proof)
 
+        // UseMnemonic=false so the literal "&" shows (default true eats "& " as an Alt-mnemonic prefix).
         _subtitle.Text = "Install, update & launch the JB tool suite";
         _subtitle.AutoSize = true;
         _subtitle.Location = new Point(14, 36);
+        _subtitle.UseMnemonic = false;
 
         _refresh.Text = "Refresh";
         _refresh.AutoSize = true;
@@ -430,15 +433,18 @@ public sealed class MainForm : Form
             var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{row.App.Id}-{rel.TagName}-{assetName}");
             var progress = new Progress<double>(p => row.SetProgress(p));
             await client.DownloadAssetAsync(row.App.Owner, row.App.Repo, asset.Id, cache, progress);
-            bool verified = await InstallManager.VerifyDownloadAsync(cache, asset, rel, row.App.Owner, row.App.Repo, client);
+            var verification = await InstallManager.VerifyDownloadAsync(cache, asset, rel, row.App.Owner, row.App.Repo, client);
             InstallManager.Shared.Install(row.App, rel.TagName, cache, assetName, _settings.InstallToApplications);
             InstallManager.TryDelete(cache);   // verified copy is now installed; mirror the macOS zip cleanup
             var latest = row.Latest ?? rel.TagName;
             row.SetState(rel.TagName, row.Latest, row.LatestAssetId, ComputeStatus(rel.TagName, latest, true));
             row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.Id));
-            Log.Write(verified
-                ? $"verified {row.App.Id} {rel.TagName} (sha256)"
-                : $"install {row.App.Id} {rel.TagName}: unverified (no SHA256SUMS for this asset)");
+            Log.Write(verification switch
+            {
+                VerifyResult.Verified => $"verified {row.App.Id} {rel.TagName} (sha256)",
+                VerifyResult.NoManifest => $"install {row.App.Id} {rel.TagName}: unverified (release publishes no SHA256SUMS)",
+                _ => $"install {row.App.Id} {rel.TagName}: unverified (asset not listed in SHA256SUMS)",
+            });
             Log.Write($"installed {row.App.Id} {rel.TagName}{(_settings.InstallToApplications ? " (+shortcuts)" : "")}");
         }
         catch (Exception ex)

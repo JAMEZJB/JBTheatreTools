@@ -19,9 +19,20 @@ namespace JBTheatreTools;
 /// </summary>
 public static class Cli
 {
+    // Single source of truth for the recognised verbs — Program.cs reads this to decide CLI-vs-GUI, so
+    // the dispatch allowlist can't drift from what Run actually handles.
+    public static readonly HashSet<string> Commands = new()
+    {
+        "--list", "--installed", "--releases", "--install", "--uninstall",
+        "--launch", "--self-check", "--help", "-h",
+    };
+
     public static async Task<int> Run(string[] args)
     {
-        var cmd = args[0];
+        // The verb may appear anywhere (e.g. `--token X --install helo`); find the first recognised one
+        // rather than assuming args[0]. Args present but no verb → usage error (don't open the GUI).
+        var cmd = args.FirstOrDefault(a => Commands.Contains(a));
+        if (cmd == null) { PrintHelp(); return args.Length > 0 ? 2 : 0; }
         if (cmd is "--help" or "-h") { PrintHelp(); return 0; }
 
         string? token = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
@@ -29,15 +40,18 @@ public static class Cli
         string? tag = null;
         bool toApplications = false;
         var positional = new List<string>();
-        for (int i = 1; i < args.Length; i++)
+        bool cmdSkipped = false;
+        for (int i = 0; i < args.Length; i++)
         {
-            switch (args[i])
+            var a = args[i];
+            if (!cmdSkipped && a == cmd) { cmdSkipped = true; continue; }
+            switch (a)
             {
                 case "--token": if (++i < args.Length) token = args[i]; break;
                 case "--catalog": if (++i < args.Length) catalogPath = args[i]; break;
                 case "--tag": if (++i < args.Length) tag = args[i]; break;
                 case "--to-applications": toApplications = true; break;
-                default: positional.Add(args[i]); break;
+                default: positional.Add(a); break;
             }
         }
         token ??= SafeLoadToken();
@@ -158,10 +172,16 @@ public static class Cli
                 if (pct != last && pct % 10 == 0) { last = pct; Console.WriteLine($"  {pct}%"); }
             });
             await client.DownloadAssetAsync(app.Owner, app.Repo, asset.Id, cache, progress);
-            bool verified = await InstallManager.VerifyDownloadAsync(cache, asset, rel, app.Owner, app.Repo, client);
-            Console.WriteLine(verified ? $"Verified {asset.Name} (sha256)." : $"⚠ {asset.Name} is unverified (release has no SHA256SUMS for it).");
+            var verification = await InstallManager.VerifyDownloadAsync(cache, asset, rel, app.Owner, app.Repo, client);
+            Console.WriteLine(verification switch
+            {
+                VerifyResult.Verified => $"Verified {asset.Name} (sha256).",
+                VerifyResult.NoManifest => $"⚠ {asset.Name} is unverified — the release publishes no SHA256SUMS.",
+                _ => $"⚠ {asset.Name} is unverified — it isn't listed in the release's SHA256SUMS.",
+            });
             var dest = InstallManager.Shared.Install(app, rel.TagName, cache, asset.Name, toApplications);
             InstallManager.TryDelete(cache);
+            Log.Write($"cli: installed {app.Id} {rel.TagName}{(toApplications ? " (+shortcuts)" : "")}{(verification == VerifyResult.Verified ? " (sha256 ok)" : " (unverified)")}");
             Console.WriteLine($"Installed {app.Name} {rel.TagName} → {dest}");
             return 0;
         }
@@ -172,7 +192,7 @@ public static class Cli
     {
         var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
         if (app == null) { Console.Error.WriteLine("error: pass an app id."); return 1; }
-        try { InstallManager.Shared.Uninstall(app.Id); Console.WriteLine($"Uninstalled {app.Name}."); return 0; }
+        try { InstallManager.Shared.Uninstall(app.Id); Log.Write($"cli: uninstalled {app.Id}"); Console.WriteLine($"Uninstalled {app.Name}."); return 0; }
         catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
     }
 
@@ -180,7 +200,7 @@ public static class Cli
     {
         var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
         if (app == null) { Console.Error.WriteLine("error: pass an app id."); return 1; }
-        try { InstallManager.Shared.Launch(app); Console.WriteLine($"Launched {app.Name}."); return 0; }
+        try { InstallManager.Shared.Launch(app); Log.Write($"cli: launched {app.Id}"); Console.WriteLine($"Launched {app.Name}."); return 0; }
         catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
     }
 

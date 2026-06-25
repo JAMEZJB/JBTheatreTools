@@ -1,6 +1,16 @@
 import Foundation
 import CryptoKit
 
+/// Outcome of integrity-checking a downloaded asset (verify-if-present): the file passed the SHA-256
+/// check, the release published no `SHA256SUMS` manifest at all, or it published one but this asset
+/// isn't listed in it (e.g. a name mismatch). The two "unverified" cases are distinguished so the
+/// user/logs can tell "no checksums" from "checksums exist but don't cover this file".
+enum VerifyResult: Equatable {
+    case verified
+    case noManifest
+    case assetNotListed
+}
+
 struct InstalledRecord: Codable {
     var version: String
     var path: String

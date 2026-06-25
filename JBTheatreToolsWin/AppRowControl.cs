@@ -44,14 +44,18 @@ public sealed class AppRowControl : UserControl
         _icon.SizeMode = PictureBoxSizeMode.Zoom;
         _icon.BackColor = Color.Transparent;
 
+        // UseMnemonic=false on the catalog-text labels so a literal "&" renders (e.g. blurb
+        // "Back up & manage") instead of being eaten as an Alt-mnemonic prefix.
         _name.Text = app.Name;
         _name.Font = new Font(Font.FontFamily, 10f, FontStyle.Bold);
         _name.AutoSize = true;
         _name.Location = new Point(64, 10);
+        _name.UseMnemonic = false;
 
         _blurb.Text = app.Blurb;
         _blurb.AutoSize = true;
         _blurb.Location = new Point(64, 31);
+        _blurb.UseMnemonic = false;
 
         _version.AutoSize = true;
         _version.Location = new Point(64, 52);

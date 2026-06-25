@@ -4,6 +4,11 @@ using System.Text.Json;
 
 namespace JBTheatreTools;
 
+/// <summary>Outcome of integrity-checking a download (verify-if-present): the SHA-256 matched, the
+/// release published no SHA256SUMS at all, or it published one but this asset isn't listed in it (e.g.
+/// a name mismatch). The two "unverified" cases are distinguished so logs/messages can tell them apart.</summary>
+public enum VerifyResult { Verified, NoManifest, AssetNotListed }
+
 public sealed class InstalledRecord
 {
     public string Version { get; set; } = "";
@@ -202,13 +207,12 @@ public sealed class InstallManager
     /// <summary>
     /// Integrity-checks a freshly downloaded asset before install. The file size must match the
     /// release's declared size, and — when the release publishes a <c>SHA256SUMS</c> manifest — its
-    /// SHA-256 must match. A mismatch deletes the file and throws. Returns <c>true</c> when
-    /// checksum-verified, <c>false</c> when no checksum is published for the asset (some tools don't
-    /// ship <c>SHA256SUMS</c> yet): the caller proceeds but should report it as unverified.
-    /// (verify-if-present policy)
+    /// SHA-256 must match. A mismatch deletes the file and throws. Returns <c>Verified</c> on a match,
+    /// or (verify-if-present) <c>NoManifest</c> / <c>AssetNotListed</c> when there's nothing to check
+    /// against: the caller proceeds but should report it as unverified.
     /// </summary>
-    public static async Task<bool> VerifyDownloadAsync(string file, ReleaseAsset asset, ReleaseInfo release,
-                                                       string owner, string repo, GitHubClient client)
+    public static async Task<VerifyResult> VerifyDownloadAsync(string file, ReleaseAsset asset, ReleaseInfo release,
+                                                               string owner, string repo, GitHubClient client)
     {
         var fi = new FileInfo(file);
         if (asset.Size > 0 && fi.Exists && fi.Length != asset.Size)
@@ -217,7 +221,7 @@ public sealed class InstallManager
             throw new Exception($"Download is {fi.Length} bytes but the release lists {asset.Size}. Aborting install.");
         }
         var sumsAsset = release.Assets.FirstOrDefault(a => a.Name == "SHA256SUMS");
-        if (sumsAsset == null) return false;
+        if (sumsAsset == null) return VerifyResult.NoManifest;
 
         var sumsPath = file + ".SHA256SUMS";
         await client.DownloadAssetAsync(owner, repo, sumsAsset.Id, sumsPath, null);
@@ -226,14 +230,14 @@ public sealed class InstallManager
         finally { TryDelete(sumsPath); }
 
         var expected = ExpectedSha256(asset.Name, text);
-        if (expected == null) return false;
+        if (expected == null) return VerifyResult.AssetNotListed;
         var actual = Sha256Hex(file);
         if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
         {
             TryDelete(file);
             throw new Exception($"Checksum mismatch for {asset.Name} — the download does not match the release's SHA256SUMS. Aborting install.");
         }
-        return true;
+        return VerifyResult.Verified;
     }
 
     /// <summary>Returns the expected hex SHA-256 for <paramref name="assetName"/> from a SHA256SUMS body
