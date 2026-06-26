@@ -132,6 +132,7 @@ public sealed class MainForm : Form
         _updateBanner.Visible = false;
 
         _updateBannerText.AutoSize = true;
+        _updateBannerText.UseMnemonic = false; // render the literal "&" (e.g. "quit & replace") — default true eats it
         _updateBannerText.Location = new Point(14, 13);
         _updateBannerText.ForeColor = Color.FromArgb(96, 40, 140);   // deep purple, readable on the tint
 

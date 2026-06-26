@@ -30,6 +30,10 @@ Asset names differ per app, so the launcher resolves the right one for the curre
 
 The launcher itself ships on **its own** Releases page: macOS `.app` (zipped) and Windows `.exe`.
 
+**First launch on macOS:** if you downloaded JB Theatre Tools from the browser, Gatekeeper may block it
+the first time (it's ad-hoc signed, not notarized). Right-click the app → **Open** → **Open** once; after
+that it launches normally. Apps you install **through** JB Theatre Tools are unaffected.
+
 ## Auth
 
 The catalog repos are **private**, so fetching their release assets needs GitHub authentication.
