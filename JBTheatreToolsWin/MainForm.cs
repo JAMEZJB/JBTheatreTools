@@ -435,6 +435,19 @@ public sealed class MainForm : Form
             var progress = new Progress<double>(p => row.SetProgress(p));
             await client.DownloadAssetAsync(row.App.Owner, row.App.Repo, asset.Id, cache, progress);
             var verification = await InstallManager.VerifyDownloadAsync(cache, asset, rel, row.App.Owner, row.App.Repo, client);
+            // Strict for current releases: a latest install (tag == null) MUST checksum-verify — every
+            // current release ships a correct SHA256SUMS, so a missing/incomplete manifest here is
+            // anomalous → abort. Explicit older-tag installs (version picker) stay verify-if-present. A
+            // hash MISMATCH always aborts (it throws from VerifyDownloadAsync) regardless of tag.
+            if (tag == null && verification != VerifyResult.Verified)
+            {
+                InstallManager.TryDelete(cache);
+                var reason = verification == VerifyResult.NoManifest
+                    ? "this release publishes no SHA256SUMS checksums"
+                    : $"“{assetName}” isn't listed in this release's SHA256SUMS";
+                Log.Write($"install {row.App.Id} {rel.TagName}: BLOCKED (strict) — {reason}");
+                throw new Exception($"Couldn't verify the download — {reason}. Install aborted for safety.");
+            }
             InstallManager.Shared.Install(row.App, rel.TagName, cache, assetName, _settings.InstallToApplications);
             InstallManager.TryDelete(cache);   // verified copy is now installed; mirror the macOS zip cleanup
             var latest = row.Latest ?? rel.TagName;
@@ -443,8 +456,8 @@ public sealed class MainForm : Form
             Log.Write(verification switch
             {
                 VerifyResult.Verified => $"verified {row.App.Id} {rel.TagName} (sha256)",
-                VerifyResult.NoManifest => $"install {row.App.Id} {rel.TagName}: unverified (release publishes no SHA256SUMS)",
-                _ => $"install {row.App.Id} {rel.TagName}: unverified (asset not listed in SHA256SUMS)",
+                VerifyResult.NoManifest => $"install {row.App.Id} {rel.TagName}: unverified older tag (no SHA256SUMS)",
+                _ => $"install {row.App.Id} {rel.TagName}: unverified older tag (asset not in SHA256SUMS)",
             });
             Log.Write($"installed {row.App.Id} {rel.TagName}{(_settings.InstallToApplications ? " (+shortcuts)" : "")}");
         }

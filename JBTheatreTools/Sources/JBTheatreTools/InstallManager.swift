@@ -23,6 +23,7 @@ enum InstallError: LocalizedError {
     case unzipFailed(Int32)
     case sizeMismatch(expected: Int, got: Int)
     case checksumMismatch(String)
+    case unverified(reason: String)
 
     var errorDescription: String? {
         switch self {
@@ -33,6 +34,8 @@ enum InstallError: LocalizedError {
             return "Download is \(got) bytes but the release lists \(expected). Aborting install."
         case .checksumMismatch(let name):
             return "Checksum mismatch for \(name) — the download does not match the release's SHA256SUMS. Aborting install."
+        case .unverified(let reason):
+            return "Couldn't verify this download — \(reason). Install aborted for safety."
         }
     }
 }

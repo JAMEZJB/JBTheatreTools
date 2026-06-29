@@ -173,11 +173,23 @@ public static class Cli
             });
             await client.DownloadAssetAsync(app.Owner, app.Repo, asset.Id, cache, progress);
             var verification = await InstallManager.VerifyDownloadAsync(cache, asset, rel, app.Owner, app.Repo, client);
+            // Strict for current releases (no --tag): must checksum-verify. An explicit --tag install
+            // (older build) stays verify-if-present. A hash mismatch always aborts (throws above).
+            if (tag == null && verification != VerifyResult.Verified)
+            {
+                InstallManager.TryDelete(cache);
+                var reason = verification == VerifyResult.NoManifest
+                    ? "the release publishes no SHA256SUMS"
+                    : $"{asset.Name} isn't listed in the release's SHA256SUMS";
+                Log.Write($"cli: install {app.Id} {rel.TagName} BLOCKED (strict) — {reason}");
+                Console.Error.WriteLine($"error: refusing to install {app.Name} {rel.TagName} — {reason}. (Re-run with --tag {rel.TagName} to install it anyway, unverified.)");
+                return 1;
+            }
             Console.WriteLine(verification switch
             {
                 VerifyResult.Verified => $"Verified {asset.Name} (sha256).",
-                VerifyResult.NoManifest => $"⚠ {asset.Name} is unverified — the release publishes no SHA256SUMS.",
-                _ => $"⚠ {asset.Name} is unverified — it isn't listed in the release's SHA256SUMS.",
+                VerifyResult.NoManifest => $"⚠ {asset.Name} installed unverified (older tag; no SHA256SUMS).",
+                _ => $"⚠ {asset.Name} installed unverified (older tag; not in SHA256SUMS).",
             });
             var dest = InstallManager.Shared.Install(app, rel.TagName, cache, asset.Name, toApplications);
             InstallManager.TryDelete(cache);

@@ -21,9 +21,15 @@ public static class LauncherUpdate
         Directory.CreateDirectory(downloads);
         var dest = Path.Combine(downloads, asset.Name);
         await client.DownloadAssetAsync(self.Owner, self.Repo, asset.Id, dest, null);
-        // Integrity-check the launcher download too (the launcher repo publishes SHA256SUMS); a size or
-        // checksum mismatch deletes the file and throws (surfaced to the user as a download failure).
-        await InstallManager.VerifyDownloadAsync(dest, asset, info, self.Owner, self.Repo, client);
+        // Strict verify: the launcher's own release always ships SHA256SUMS, so require a clean match
+        // before revealing the new build (a size/hash mismatch throws inside VerifyDownloadAsync; a
+        // missing manifest or unlisted asset is treated as a verification failure too — current release).
+        var verification = await InstallManager.VerifyDownloadAsync(dest, asset, info, self.Owner, self.Repo, client);
+        if (verification != VerifyResult.Verified)
+        {
+            InstallManager.TryDelete(dest);
+            throw new Exception("Couldn't verify the update against its SHA256SUMS — download discarded.");
+        }
 
         try { System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{dest}\""); } catch { /* non-fatal */ }
         return dest;

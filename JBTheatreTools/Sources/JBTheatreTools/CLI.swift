@@ -171,10 +171,21 @@ enum CLI {
                     if pct != pctBox.last, pct % 10 == 0 { pctBox.last = pct; print("  \(pct)%") }
                 }
                 let verification = try await AppState.verifyDownload(zip, asset: asset, release: rel, app: app, client: client)
+                // Strict for current releases (no --tag): must checksum-verify. An explicit --tag install
+                // (older build) stays verify-if-present. A hash mismatch always aborts (throws above).
+                if tag == nil, verification != .verified {
+                    try? FileManager.default.removeItem(at: zip)
+                    let reason = verification == .noManifest
+                        ? "the release publishes no SHA256SUMS"
+                        : "\(asset.name) isn't listed in the release's SHA256SUMS"
+                    AppLog.shared.log("cli: install \(app.id) \(rel.tagName) BLOCKED (strict) — \(reason)")
+                    fputs("error: refusing to install \(app.name) \(rel.tagName) — \(reason). (Re-run with --tag \(rel.tagName) to install it anyway, unverified.)\n", stderr)
+                    exit(1)
+                }
                 switch verification {
                 case .verified:       print("Verified \(asset.name) (sha256).")
-                case .noManifest:     print("⚠︎ \(asset.name) is unverified — the release publishes no SHA256SUMS.")
-                case .assetNotListed: print("⚠︎ \(asset.name) is unverified — it isn't listed in the release's SHA256SUMS.")
+                case .noManifest:     print("⚠︎ \(asset.name) installed unverified (older tag; no SHA256SUMS).")
+                case .assetNotListed: print("⚠︎ \(asset.name) installed unverified (older tag; not in SHA256SUMS).")
                 }
                 let dest = try im.install(app: app, version: rel.tagName, downloadedZip: zip, toApplications: toApplications)
                 try? FileManager.default.removeItem(at: zip)

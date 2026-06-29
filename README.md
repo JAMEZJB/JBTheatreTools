@@ -19,12 +19,18 @@ built by James Breedon & Claude Code.
 
 | App | Repo | Download assets |
 |-----|------|-----------------|
-| HeloControl | `JAMEZJB/HeloControl` | `HeloControl-macOS.zip`, `HeloControl-Windows-{x64,arm64}.exe` |
-| Machine Inventory | `JAMEZJB/ShowMachinesInventory` | `MachineInventory-macOS.zip`, `MachineInventory-Windows-{x64,arm64}.exe` |
+| HELO Control | `JAMEZJB/HeloControl` | `HeloControl-macOS.zip`, `HeloControl-Windows-{x64,arm64}.exe` |
 | Cisco Switch Tools | `JAMEZJB/CiscoSwitchTools` | `Cisco.Switch.Tools.macOS.universal2.zip`, `Cisco.Switch.Tools.{x64,arm64}.exe` |
-| CiscoBrotherLabels | `JAMEZJB/CiscoBrotherLabels` | `CiscoBrotherLabels-macOS.zip`, `CiscoBrotherLabels-Windows-{x64,arm64}.exe` |
+| Cisco Brother Labels | `JAMEZJB/CiscoBrotherLabels` | `CiscoBrotherLabels-macOS.zip`, `CiscoBrotherLabels-Windows-{x64,arm64}.exe` |
+| Machine Inventory | `JAMEZJB/ShowMachinesInventory` | `MachineInventory-macOS.zip`, `MachineInventory-Windows-{x64,arm64}.exe` |
+| Network Port Map | `JAMEZJB/NetworkPortMap` | `NetworkPortMap-macOS.zip`, `NetworkPortMap-Windows-{x64,arm64}.exe` |
+| Projector Control | `JAMEZJB/ProjectorControl` | `ProjectorControl-macOS.zip`, `ProjectorControl-Windows-{x64,arm64}.exe` |
+| Show Dashboard | `JAMEZJB/ShowDashboard` | `ShowDashboard-macOS.zip`, `ShowDashboard-Windows-{x64,arm64}.exe` |
+| Show Handbook | `JAMEZJB/ShowHandbook` | `ShowHandbook-macOS.zip`, `ShowHandbook-Windows-{x64,arm64}.exe` |
+| PSN Tools | `JAMEZJB/PSNTools` | `PSNTools-macOS.zip`, `PSNTools-Windows-{x64,arm64}.exe` |
 
-Asset names differ per app, so the launcher resolves the right one for the current OS/arch.
+Asset names differ per app, so the launcher resolves the right one for the current OS/arch. PSN Tools is
+listed ahead of its first release and appears as installable once a build ships.
 
 ## Downloads
 

@@ -341,10 +341,23 @@ final class AppState: ObservableObject {
                 }
             }
             let verification = try await Self.verifyDownload(zipDest, asset: asset, release: rel, app: app, client: client)
+            // Strict for current releases: a "latest" install (tag == nil) MUST checksum-verify — every
+            // current release ships a correct SHA256SUMS, so a missing/incomplete manifest here is
+            // anomalous (e.g. tampering) → abort. Explicit older-tag installs (the version picker) may
+            // predate the manifest, so they stay verify-if-present. A hash MISMATCH always aborts (it
+            // throws from verifyDownload) regardless of tag; size is always checked too.
+            if tag == nil, verification != .verified {
+                try? FileManager.default.removeItem(at: zipDest)
+                let reason = verification == .noManifest
+                    ? "this release publishes no SHA256SUMS checksums"
+                    : "“\(asset.name)” isn’t listed in this release’s SHA256SUMS"
+                AppLog.shared.log("install \(app.id) \(rel.tagName): BLOCKED (strict) — \(reason)")
+                throw InstallError.unverified(reason: reason)
+            }
             switch verification {
             case .verified:       AppLog.shared.log("verified \(app.id) \(rel.tagName) (sha256)")
-            case .noManifest:     AppLog.shared.log("install \(app.id) \(rel.tagName): unverified (release publishes no SHA256SUMS)")
-            case .assetNotListed: AppLog.shared.log("install \(app.id) \(rel.tagName): unverified (asset not listed in SHA256SUMS)")
+            case .noManifest:     AppLog.shared.log("install \(app.id) \(rel.tagName): unverified older tag (no SHA256SUMS)")
+            case .assetNotListed: AppLog.shared.log("install \(app.id) \(rel.tagName): unverified older tag (asset not in SHA256SUMS)")
             }
             let toApps = UserDefaults.standard.bool(forKey: "theatre.installToApplications")
             try InstallManager.shared.install(app: app, version: rel.tagName, downloadedZip: zipDest, toApplications: toApps)
@@ -470,14 +483,25 @@ final class AppState: ObservableObject {
             let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
             let dest = downloads.appendingPathComponent(asset.name)
             try await client.downloadAsset(owner: s.owner, repo: s.repo, assetId: asset.id, to: dest)
-            // Integrity-check the launcher download too (the launcher repo publishes SHA256SUMS).
-            if let sumsAsset = info.assets.first(where: { $0.name == "SHA256SUMS" }) {
-                let sumsURL = dest.deletingLastPathComponent().appendingPathComponent("JBTheatreTools-SHA256SUMS.txt")
-                try await client.downloadAsset(owner: s.owner, repo: s.repo, assetId: sumsAsset.id, to: sumsURL)
-                let text = (try? String(contentsOf: sumsURL, encoding: .utf8)) ?? ""
-                try? FileManager.default.removeItem(at: sumsURL)
-                do { _ = try InstallManager.verify(file: dest, assetName: asset.name, sums: text) }
-                catch { try? FileManager.default.removeItem(at: dest); throw error }
+            // Strict verify: the launcher's own release always ships SHA256SUMS, so require a clean match
+            // before telling the user to run the new build. (A hash mismatch throws; no-manifest /
+            // not-listed are treated as a verification failure too — this is a current release.)
+            guard let sumsAsset = info.assets.first(where: { $0.name == "SHA256SUMS" }) else {
+                try? FileManager.default.removeItem(at: dest)
+                launcherDownloadMessage = "Couldn't verify the update (no checksums published) — not saved."
+                return
+            }
+            let sumsURL = dest.deletingLastPathComponent().appendingPathComponent("JBTheatreTools-SHA256SUMS.txt")
+            try await client.downloadAsset(owner: s.owner, repo: s.repo, assetId: sumsAsset.id, to: sumsURL)
+            let text = (try? String(contentsOf: sumsURL, encoding: .utf8)) ?? ""
+            try? FileManager.default.removeItem(at: sumsURL)
+            let verified: Bool
+            do { verified = try InstallManager.verify(file: dest, assetName: asset.name, sums: text) }
+            catch { try? FileManager.default.removeItem(at: dest); throw error }   // hash mismatch
+            guard verified else {
+                try? FileManager.default.removeItem(at: dest)
+                launcherDownloadMessage = "Couldn't verify the update against its SHA256SUMS — not saved."
+                return
             }
             NSWorkspace.shared.activateFileViewerSelecting([dest])
             launcherDownloadMessage = "Saved \(asset.name) to your Downloads folder — quit JB Theatre Tools and replace it."
