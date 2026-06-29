@@ -30,6 +30,11 @@ cp "$CATALOG" "$APP/Contents/Resources/catalog.json"
 if [ -f "AppIcon.icns" ]; then
     cp "AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
+# Per-app row icons (shown in the list before an app is installed). Bundled flat in Resources, named
+# <catalog-id>.png; the launcher loads them by id and falls back to a monogram if one is missing.
+if ls ../icons/*.png >/dev/null 2>&1; then
+    cp ../icons/*.png "$APP/Contents/Resources/"
+fi
 
 echo "==> Ad-hoc code signing…"
 codesign --force --deep --sign - "$APP"

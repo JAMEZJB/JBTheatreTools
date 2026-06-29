@@ -15,7 +15,7 @@
     <!-- File description shown in Task Manager / file properties; window title is set in code. -->
     <AssemblyTitle>JB Theatre Tools</AssemblyTitle>
     <Product>JB Theatre Tools</Product>
-    <Version>1.8.0</Version>
+    <Version>1.9.0</Version>
     <Company>James Breedon</Company>
     <RootNamespace>JBTheatreTools</RootNamespace>
     <ApplicationIcon>app.ico</ApplicationIcon>
@@ -26,6 +26,17 @@
     <EmbeddedResource Include="../catalog.json" LogicalName="catalog.json" />
     <!-- Embedded so the window/taskbar icon shows at runtime too. -->
     <EmbeddedResource Include="app.ico" LogicalName="app.ico" />
+    <!-- Per-app row icons (shown in the list BEFORE an app is installed). Named rowicon-<catalog-id>.png;
+         AppRowControl loads them by id and falls back to a monogram if one is missing. -->
+    <EmbeddedResource Include="../icons/helocontrol.png" LogicalName="rowicon-helocontrol.png" />
+    <EmbeddedResource Include="../icons/ciscoswitchtools.png" LogicalName="rowicon-ciscoswitchtools.png" />
+    <EmbeddedResource Include="../icons/ciscobrotherlabels.png" LogicalName="rowicon-ciscobrotherlabels.png" />
+    <EmbeddedResource Include="../icons/machineinventory.png" LogicalName="rowicon-machineinventory.png" />
+    <EmbeddedResource Include="../icons/networkportmap.png" LogicalName="rowicon-networkportmap.png" />
+    <EmbeddedResource Include="../icons/projectorcontrol.png" LogicalName="rowicon-projectorcontrol.png" />
+    <EmbeddedResource Include="../icons/showdashboard.png" LogicalName="rowicon-showdashboard.png" />
+    <EmbeddedResource Include="../icons/showhandbook.png" LogicalName="rowicon-showhandbook.png" />
+    <EmbeddedResource Include="../icons/psntools.png" LogicalName="rowicon-psntools.png" />
   </ItemGroup>
 
 </Project>

@@ -274,12 +274,17 @@ struct AppRowView: View {
         }
     }
 
-    /// Leading icon: the installed app's REAL icon once installed; otherwise a tinted monogram tile,
-    /// so the list reads as a row of apps rather than plain text.
+    /// Leading icon: the installed app's REAL icon once installed; before install, a per-app icon
+    /// bundled in the launcher (so the row shows the actual app icon, not just a letter); and only if
+    /// neither is available, a tinted monogram tile.
     @ViewBuilder
     private var iconView: some View {
         if let path = InstallManager.shared.installedPath(row.id)?.path {
             Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                .resizable().interpolation(.high)
+                .frame(width: 40, height: 40)
+        } else if let bundled = Self.bundledIcon(row.id) {
+            Image(nsImage: bundled)
                 .resizable().interpolation(.high)
                 .frame(width: 40, height: 40)
         } else {
@@ -292,6 +297,13 @@ struct AppRowView: View {
                         .foregroundStyle(Color.jbAccent)
                 )
         }
+    }
+
+    /// A per-app icon shipped inside the launcher (Resources/<id>.png), shown before the app is
+    /// installed. Returns nil if this app has no bundled icon (→ monogram fallback).
+    private static func bundledIcon(_ id: String) -> NSImage? {
+        guard let url = Bundle.main.url(forResource: id, withExtension: "png") else { return nil }
+        return NSImage(contentsOf: url)
     }
 
     private var appInitial: String {

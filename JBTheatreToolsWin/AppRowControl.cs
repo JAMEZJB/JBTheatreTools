@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using System.Reflection;
 
 namespace JBTheatreTools;
 
@@ -160,8 +161,9 @@ public sealed class AppRowControl : UserControl
         UpdateIcon();
     }
 
-    /// <summary>Leading icon: the installed app's REAL icon (extracted from its exe) once installed,
-    /// else a tinted monogram tile — so the list reads as a row of apps, not plain text.</summary>
+    /// <summary>Leading icon: the installed app's REAL icon (extracted from its exe) once installed;
+    /// before install, a per-app icon shipped inside the launcher (so the row shows the actual app
+    /// icon, not just a letter); and only if neither is available, a tinted monogram tile.</summary>
     private void UpdateIcon()
     {
         Image? img = null;
@@ -174,11 +176,26 @@ public sealed class AppRowControl : UserControl
                 img = ico?.ToBitmap();
             }
         }
-        catch { /* fall through to the monogram */ }
+        catch { /* fall through to the bundled icon / monogram */ }
+        img ??= BundledIcon(App.Id);
         img ??= MonogramIcon(DisplayName);
         var old = _icon.Image;
         _icon.Image = img;
         old?.Dispose();
+    }
+
+    /// <summary>A per-app icon embedded in the launcher (rowicon-&lt;id&gt;.png), shown before the app is
+    /// installed. Returns null if this app has no bundled icon (→ monogram fallback).</summary>
+    private static Image? BundledIcon(string id)
+    {
+        try
+        {
+            using var s = Assembly.GetExecutingAssembly().GetManifestResourceStream($"rowicon-{id}.png");
+            if (s == null) return null;
+            using var tmp = Image.FromStream(s);
+            return new Bitmap(tmp);   // independent copy so the icon survives the stream being closed
+        }
+        catch { return null; }
     }
 
     private static Image MonogramIcon(string name)
