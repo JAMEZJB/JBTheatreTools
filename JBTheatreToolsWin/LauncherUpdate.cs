@@ -7,9 +7,11 @@ namespace JBTheatreTools;
 public static class LauncherUpdate
 {
     /// <returns>The path the new build was saved to.</returns>
-    public static async Task<string> DownloadAndRevealAsync(SelfInfo self)
+    /// <remarks>`client` comes from AuthClient.SelfUpdate so the download follows the active auth
+    /// mode (direct GitHub or the download-server relay); disposed here.</remarks>
+    public static async Task<string> DownloadAndRevealAsync(SelfInfo self, GitHubClient client)
     {
-        using var client = new GitHubClient(TokenStore.Load());   // launcher repo is public; token optional
+        using var _ = client;
         var info = await client.LatestReleaseAsync(self.Owner, self.Repo);
         if (!self.Assets.TryGetValue(Platform.AssetKey, out var assetName))
             throw new Exception("No Windows asset configured for this platform.");

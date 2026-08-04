@@ -24,10 +24,17 @@ public sealed class MainForm : Form
     private readonly NotifyIcon _tray = new();
     private bool _reallyQuit;
 
-    // Notice-banner messages (the banner doubles as the no-token / bad-token / no-access notice).
-    private const string NoTokenMsg = "Add a GitHub token to enable downloads  —  Settings → paste a fine-grained PAT.";
-    private const string BadTokenMsg = "Your GitHub token is invalid or expired  —  open Settings to paste a new one.";
-    private const string NoAccessMsg = "This token can’t access any apps  —  check its repository access, or ask James.";
+    // Notice-banner messages (the banner doubles as the no-creds / bad-creds / no-access notice).
+    // Worded per auth mode: "token" = GitHub PAT, "server" = download-server relay + suite passphrase.
+    private string NoCredsMsg => _settings.AuthMode == "server"
+        ? "Set the download server & passphrase to enable downloads  —  Settings → enter both (ask James)."
+        : "Add a GitHub token to enable downloads  —  Settings → paste a fine-grained PAT.";
+    private string BadCredsMsg => _settings.AuthMode == "server"
+        ? "The download server rejected the passphrase  —  check it in Settings."
+        : "Your GitHub token is invalid or expired  —  open Settings to paste a new one.";
+    private string NoAccessMsg => _settings.AuthMode == "server"
+        ? "No apps are reachable through the download server  —  check the URL & passphrase, or ask James."
+        : "This token can’t access any apps  —  check its repository access, or ask James.";
 
     public MainForm()
     {
@@ -71,7 +78,7 @@ public sealed class MainForm : Form
         Shown += async (_, _) =>
         {
             Log.Write($"launched v{CurrentVersion()}");
-            ShowNotice(TokenStore.Load() == null ? NoTokenMsg : null);
+            ShowNotice(AuthClient.HasCredentials(_settings) ? null : NoCredsMsg);
             if (_settings.UpdateMode == "everyLaunch")
             {
                 await RefreshAllAsync();
@@ -145,7 +152,7 @@ public sealed class MainForm : Form
             download.Text = "Downloading…";
             try
             {
-                var dest = await LauncherUpdate.DownloadAndRevealAsync(_catalog.Self);
+                var dest = await LauncherUpdate.DownloadAndRevealAsync(_catalog.Self, AuthClient.SelfUpdate(_settings));
                 _updateBannerText.Text = $"Saved {Path.GetFileName(dest)} to Downloads — quit & replace JB Theatre Tools.";
             }
             catch (Exception ex)
@@ -172,7 +179,7 @@ public sealed class MainForm : Form
         _tokenBanner.BackColor = Color.FromArgb(255, 244, 214);
         _tokenBanner.Visible = false;
 
-        _tokenBannerText.Text = NoTokenMsg;
+        _tokenBannerText.Text = NoCredsMsg;
         _tokenBannerText.AutoSize = true;
         _tokenBannerText.Location = new Point(14, 13);
         _tokenBannerText.ForeColor = Color.FromArgb(120, 80, 0);
@@ -257,17 +264,17 @@ public sealed class MainForm : Form
 
     private async Task RefreshAllAsync()
     {
-        var token = TokenStore.Load();
-        // No token (e.g. just removed in Settings): reset every row to its installed/unknown state and
-        // clear stale latest/releases, so no row keeps a live — but silently no-op — Install/Update button.
-        if (token == null) { ResetRowsNoToken(); ShowNotice(NoTokenMsg); RefreshUpdateAllButton(); return; }
+        var active = AuthClient.Active(_settings);
+        // No credentials (e.g. just removed in Settings): reset every row to its installed/unknown state
+        // and clear stale latest/releases, so no row keeps a live — but silently no-op — Install button.
+        if (active == null) { ResetRowsNoToken(); ShowNotice(NoCredsMsg); RefreshUpdateAllButton(); return; }
         ShowNotice(null);
 
         _refresh.Enabled = false;
         bool unauthorized = false;
         try
         {
-            using var client = new GitHubClient(token);
+            using var client = active;
             foreach (var row in _rows)
             {
                 // Don't force the row visible here — leave it as-is during the check so a not-installed
@@ -318,8 +325,8 @@ public sealed class MainForm : Form
                 row.Visible = installed != null || accessible;
             }
 
-            // One clear notice for the whole-token states instead of rows full of errors.
-            if (unauthorized) { ShowNotice(BadTokenMsg); Log.Write("refresh: token invalid or expired"); }
+            // One clear notice for the whole-credential states instead of rows full of errors.
+            if (unauthorized) { ShowNotice(BadCredsMsg); Log.Write($"refresh: credentials rejected ({_settings.AuthMode} mode)"); }
             else if (_rows.All(r => !r.Visible)) ShowNotice(NoAccessMsg);
             else ShowNotice(null);
         }
@@ -412,15 +419,15 @@ public sealed class MainForm : Form
 
     private async Task InstallVersionAsync(AppRowControl row, string? tag)
     {
-        var token = TokenStore.Load();
-        if (token == null) return;
+        var active = AuthClient.Active(_settings);
+        if (active == null) return;
         var assetName = row.App.WindowsAssetName;
         if (assetName == null) return;
 
         row.SetBusy(true);
         try
         {
-            using var client = new GitHubClient(token);
+            using var client = active;
             var releases = row.Releases.Count > 0
                 ? row.Releases
                 : await client.ReleasesAsync(row.App.Owner, row.App.Repo);
@@ -514,7 +521,7 @@ public sealed class MainForm : Form
         if (s == null) return;
         try
         {
-            using var client = new GitHubClient(TokenStore.Load());   // launcher repo is public; token optional
+            using var client = AuthClient.SelfUpdate(_settings);   // launcher repo is public; never blocks on creds
             var info = await client.LatestReleaseAsync(s.Owner, s.Repo);
             if (Versions.IsNewer(info.TagName, CurrentVersion()))
             {

@@ -28,9 +28,10 @@ built by James Breedon & Claude Code.
 | Show Dashboard | `JAMEZJB/ShowDashboard` | `ShowDashboard-macOS.zip`, `ShowDashboard-Windows-{x64,arm64}.exe` |
 | Show Handbook | `JAMEZJB/ShowHandbook` | `ShowHandbook-macOS.zip`, `ShowHandbook-Windows-{x64,arm64}.exe` |
 | PSN Tools | `JAMEZJB/PSNTools` | `PSNTools-macOS.zip`, `PSNTools-Windows-{x64,arm64}.exe` |
+| DMX Tools | `JAMEZJB/DMXTools` | `DMXTools-macOS.zip`, `DMXTools-Windows-{x64,arm64}.exe` |
 
-Asset names differ per app, so the launcher resolves the right one for the current OS/arch. PSN Tools is
-listed ahead of its first release and appears as installable once a build ships.
+Asset names differ per app, so the launcher resolves the right one for the current OS/arch. An app listed
+ahead of its first release shows "No release" and becomes installable once a build ships.
 
 ## Downloads
 
@@ -42,9 +43,15 @@ that it launches normally. Apps you install **through** JB Theatre Tools are una
 
 ## Auth
 
-The catalog repos are **private**, so fetching their release assets needs GitHub authentication.
-You paste a **fine-grained personal access token** (Contents: read) into the launcher once per
-machine; it's stored in the macOS **Keychain** / Windows **Credential Manager** and used for both
-the API and the asset downloads. Create one at github.com/settings/tokens. Built apps and any
-downloaded payloads are gitignored and never committed; the token is never written to disk in
-plaintext.
+The catalog repos are **private**, so downloads need authentication. The launcher supports two
+modes (Settings → Download access):
+
+- **GitHub token** — paste a **fine-grained personal access token** (Contents: read) once per
+  machine. Create one at github.com/settings/tokens.
+- **Download server** — enter a server address and suite passphrase (ask the suite owner for
+  both); downloads are relayed through that server and **no GitHub token is needed on the
+  machine**.
+
+Either secret is stored in the macOS **Keychain** / Windows **Credential Manager**, never written
+to disk in plaintext, and never logged. Built apps and any downloaded payloads are gitignored and
+never committed.

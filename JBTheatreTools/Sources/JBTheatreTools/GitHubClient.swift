@@ -48,7 +48,12 @@ enum GitHubError: LocalizedError {
 /// that carries both a Bearer header and its own signed query params. We do that in the
 /// `willPerformHTTPRedirection` delegate below.
 final class GitHubClient: NSObject {
-    private let token: String?
+    /// Base of the GitHub REST API — `https://api.github.com` for direct (PAT) access, or the
+    /// download-server relay's API root in server mode (the relay forwards the same paths to GitHub
+    /// with its own server-side token, so every endpoint shape below is identical in both modes).
+    private let apiBase: String
+    /// Full `Authorization` header value: `Bearer <PAT>` (direct), `Basic <…>` (server mode), or nil.
+    private let authValue: String?
     private let lock = NSLock()
     private var contexts: [Int: DownloadContext] = [:]
 
@@ -58,16 +63,30 @@ final class GitHubClient: NSObject {
         return URLSession(configuration: .default, delegate: self, delegateQueue: queue)
     }()
 
-    /// `token` may be nil for unauthenticated calls against public repos (e.g. the self-update check).
+    /// Direct GitHub access. `token` may be nil for unauthenticated calls against public repos
+    /// (e.g. the self-update check).
     init(token: String?) {
-        self.token = token
+        apiBase = "https://api.github.com"
+        authValue = (token?.isEmpty == false) ? "Bearer \(token!)" : nil
+        super.init()
+    }
+
+    /// Download-server (relay) access: same API paths, sent to the relay with HTTP Basic auth
+    /// (fixed username "suite" + the suite passphrase). The relay injects its own GitHub token
+    /// server-side and passes responses through — including the 302 to S3, which we follow with the
+    /// Authorization header stripped exactly as in direct mode.
+    init(serverBase: String, passphrase: String) {
+        var base = serverBase.trimmingCharacters(in: .whitespacesAndNewlines)
+        while base.hasSuffix("/") { base.removeLast() }
+        apiBase = base
+        authValue = "Basic " + Data("suite:\(passphrase)".utf8).base64EncodedString()
         super.init()
     }
 
     private func apiRequest(_ url: URL, accept: String) -> URLRequest {
         var req = URLRequest(url: url)
-        if let token = token, !token.isEmpty {
-            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let authValue = authValue {
+            req.setValue(authValue, forHTTPHeaderField: "Authorization")
         }
         req.setValue(accept, forHTTPHeaderField: "Accept")
         req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
@@ -77,7 +96,7 @@ final class GitHubClient: NSObject {
 
     /// Fetches the latest (non-prerelease) release. Throws `.noRelease` on 404.
     func latestRelease(owner: String, repo: String) async throws -> ReleaseInfo {
-        let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases/latest")!
+        let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases/latest")!
         let req = apiRequest(url, accept: "application/vnd.github+json")
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw GitHubError.badResponse }
@@ -91,7 +110,7 @@ final class GitHubClient: NSObject {
     /// releases and `404` only when the token can't see the repo, so a 404 here means **no access**
     /// (not "no release") and a 401 means the token itself is bad.
     func releases(owner: String, repo: String) async throws -> [ReleaseInfo] {
-        let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases?per_page=50")!
+        let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases?per_page=50")!
         let req = apiRequest(url, accept: "application/vnd.github+json")
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw GitHubError.badResponse }
@@ -104,7 +123,7 @@ final class GitHubClient: NSObject {
     /// Downloads a release asset by id to `dest`, reporting fractional progress (0…1).
     func downloadAsset(owner: String, repo: String, assetId: Int, to dest: URL,
                        progress: (@Sendable (Double) -> Void)? = nil) async throws {
-        let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases/assets/\(assetId)")!
+        let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases/assets/\(assetId)")!
         let req = apiRequest(url, accept: "application/octet-stream")
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             let task = session.downloadTask(with: req)

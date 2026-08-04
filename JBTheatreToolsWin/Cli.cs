@@ -27,6 +27,20 @@ public static class Cli
         "--launch", "--self-check", "--help", "-h",
     };
 
+    /// <summary>Download-server override (`--server` / `--server-pass`): when set, every client the
+    /// CLI builds goes through the relay with Basic auth instead of GitHub with a Bearer token.</summary>
+    private static string? _serverBase;
+    private static string? _serverPass;
+
+    private static bool ServerConfigured => _serverBase != null && _serverPass != null;
+
+    /// <summary>The client for this invocation: the server relay when configured, else direct GitHub.</summary>
+    private static GitHubClient MakeClient(string? token) =>
+        ServerConfigured ? new GitHubClient(_serverBase!, _serverPass!) : new GitHubClient(token);
+
+    /// <summary>Whether this invocation has ANY usable download auth (token or server pair).</summary>
+    private static bool HasAuth(string? token) => token != null || ServerConfigured;
+
     public static async Task<int> Run(string[] args)
     {
         // The verb may appear anywhere (e.g. `--token X --install helo`); find the first recognised one
@@ -51,10 +65,13 @@ public static class Cli
                 case "--catalog": if (++i < args.Length) catalogPath = args[i]; break;
                 case "--tag": if (++i < args.Length) tag = args[i]; break;
                 case "--to-applications": toApplications = true; break;
+                case "--server": if (++i < args.Length) _serverBase = args[i]; break;
+                case "--server-pass": if (++i < args.Length) _serverPass = args[i]; break;
                 default: positional.Add(a); break;
             }
         }
         token ??= SafeLoadToken();
+        if (_serverBase != null && _serverPass == null) _serverPass = SafeLoadServerPass();
 
         Catalog catalog;
         try { catalog = Catalog.Load(catalogPath); }
@@ -76,7 +93,7 @@ public static class Cli
     private static async Task<int> ListAsync(Catalog catalog, string? token)
     {
         Console.WriteLine($"JBTheatreTools — {catalog.Apps.Count} apps (platform: {Platform.AssetKey})\n");
-        using var client = token != null ? new GitHubClient(token) : null;
+        using var client = HasAuth(token) ? MakeClient(token) : null;
         foreach (var app in catalog.Apps)
         {
             var installed = InstallManager.Shared.InstalledVersion(app.Id) ?? "—";
@@ -103,7 +120,7 @@ public static class Cli
                 catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.Unauthorized) { latest = "—"; note = "token invalid or expired"; }
                 catch (Exception ex) { latest = "error"; note = ex.Message; }
             }
-            else note = "no token — set $GITHUB_TOKEN or pass --token";
+            else note = "no auth — set $GITHUB_TOKEN, pass --token, or --server + --server-pass";
 
             Console.WriteLine($"  {Pad(app.Name, 20)}  installed={Pad(installed, 8)}  latest={Pad(latest, 10)}  {note}");
         }
@@ -125,8 +142,8 @@ public static class Cli
     {
         var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
         if (app == null) { Console.Error.WriteLine($"error: pass an app id. Known ids: {string.Join(", ", catalog.Apps.Select(a => a.Id))}"); return 1; }
-        if (token == null) { Console.Error.WriteLine("error: no token."); return 1; }
-        using var client = new GitHubClient(token);
+        if (!HasAuth(token)) { Console.Error.WriteLine("error: no auth (token or --server + --server-pass)."); return 1; }
+        using var client = MakeClient(token);
         try
         {
             var all = await client.ReleasesAsync(app.Owner, app.Repo);
@@ -150,9 +167,9 @@ public static class Cli
             Console.Error.WriteLine($"error: pass an app id. Known ids: {string.Join(", ", catalog.Apps.Select(a => a.Id))}");
             return 1;
         }
-        if (token == null) { Console.Error.WriteLine("error: no token (set $GITHUB_TOKEN, pass --token, or save one in the app)."); return 1; }
+        if (!HasAuth(token)) { Console.Error.WriteLine("error: no auth (set $GITHUB_TOKEN, pass --token, save one in the app, or use --server + --server-pass)."); return 1; }
 
-        using var client = new GitHubClient(token);
+        using var client = MakeClient(token);
         try
         {
             var all = await client.ReleasesAsync(app.Owner, app.Repo);
@@ -223,7 +240,7 @@ public static class Cli
         var current = "1.0.0";
         var v = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
         if (v != null) current = $"{v.Major}.{v.Minor}.{v.Build}";
-        using var client = new GitHubClient(token);
+        using var client = MakeClient(token);
         try
         {
             var info = await client.LatestReleaseAsync(s.Owner, s.Repo);
@@ -246,6 +263,12 @@ public static class Cli
         try { return TokenStore.Load(); } catch { return null; }
     }
 
+    private static string? SafeLoadServerPass()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return null;
+        try { return TokenStore.LoadServerPass(); } catch { return null; }
+    }
+
     private static void PrintHelp() => Console.WriteLine(
         """
         JBTheatreTools — theatre/AV app launcher (headless CLI)
@@ -260,12 +283,14 @@ public static class Cli
           --help                 This help
 
         Options: --token <pat>       GitHub PAT (else $GITHUB_TOKEN, else Credential Manager)
+                 --server <url>      Download-server (relay) base URL — use instead of a token
+                 --server-pass <p>   Suite passphrase for --server (else the saved one)
                  --tag <vX.Y.Z>      Install a specific release (with --install)
                  --to-applications   Also create Start Menu + Desktop shortcuts (with --install)
                  --catalog <path>    Use a specific catalog.json
 
-        Note: a token passed via --token is visible to other local users (process list / shell
-              history). Prefer $GITHUB_TOKEN or the saved Credential Manager token where possible.
+        Note: a secret passed via --token / --server-pass is visible to other local users (process
+              list / shell history). Prefer $GITHUB_TOKEN or the saved Credential Manager values.
         """);
 
     private static int PrintHelpReturn() { PrintHelp(); return 0; }

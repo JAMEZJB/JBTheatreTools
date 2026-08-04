@@ -66,6 +66,8 @@ struct ContentView: View {
     @AppStorage("theatre.updateMode") private var updateMode: UpdateCheckMode = .everyLaunch
     @AppStorage("theatre.closeBehavior") private var closeBehavior: CloseBehavior = .quit
     @AppStorage("theatre.installToApplications") private var installToApplications = false
+    @AppStorage("theatre.authMode") private var authMode: AuthMode = .token
+    @AppStorage("theatre.serverURL") private var serverURL = ""
     @State private var showSettings = false
     @State private var refreshing = false
     @State private var updatingAll = false
@@ -88,7 +90,8 @@ struct ContentView: View {
         .preferredColorScheme(appearance.colorScheme)
         .sheet(isPresented: $showSettings) {
             SettingsView(appearance: $appearance, updateMode: $updateMode, closeBehavior: $closeBehavior,
-                         installToApplications: $installToApplications)
+                         installToApplications: $installToApplications,
+                         authMode: $authMode, serverURL: $serverURL)
                 .environmentObject(state)
         }
         .sheet(isPresented: $state.showKeychainExplainer, onDismiss: { state.acknowledgeKeychainExplainer() }) {
@@ -124,7 +127,7 @@ struct ContentView: View {
                 if refreshing { ProgressView().controlSize(.small) }
                 else { Label("Refresh", systemImage: "arrow.clockwise") }
             }
-            .disabled(refreshing || updatingAll || !state.hasToken)
+            .disabled(refreshing || updatingAll || !state.hasCredentials)
             Button { showSettings = true } label: {
                 Label("Settings", systemImage: "gearshape")
             }
@@ -140,9 +143,11 @@ struct ContentView: View {
             Spacer()
         } else {
             if let v = state.launcherUpdateAvailable { launcherBanner(v) }
-            if !state.hasToken { tokenBanner }
-            if state.hasToken, state.noAppsAccessible {
-                banner("This token can’t access any apps. Check the token’s repository access in Settings, or ask James.",
+            if !state.hasCredentials { credentialsBanner }
+            if state.hasCredentials, state.noAppsAccessible {
+                banner(authMode == .token
+                        ? "This token can’t access any apps. Check the token’s repository access in Settings, or ask James."
+                        : "No apps are reachable through the download server. Check the server URL & passphrase in Settings, or ask James.",
                        systemImage: "lock.fill", tint: .orange)
                 Spacer()
             } else {
@@ -188,12 +193,14 @@ struct ContentView: View {
         .background(Color.jbAccent.opacity(0.12))
     }
 
-    private var tokenBanner: some View {
+    private var credentialsBanner: some View {
         HStack(spacing: 10) {
             Image(systemName: "key.fill").foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Add a GitHub token to enable downloads").font(.callout).bold()
-                Text("Settings → paste a fine-grained PAT (Contents: read).")
+                Text(state.credentialsPrompt).font(.callout).bold()
+                Text(authMode == .token
+                     ? "Settings → paste a fine-grained PAT (Contents: read)."
+                     : "Settings → enter the server address and suite passphrase.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
@@ -223,7 +230,7 @@ struct ContentView: View {
 
     private func firstRefresh() async {
         guard updateMode == .everyLaunch, !refreshing else { return }
-        if state.hasToken { await refreshAll() }
+        if state.hasCredentials { await refreshAll() }
         await state.checkLauncherUpdate()
     }
 

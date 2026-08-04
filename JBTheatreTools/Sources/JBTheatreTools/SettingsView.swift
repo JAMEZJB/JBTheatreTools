@@ -6,49 +6,96 @@ struct SettingsView: View {
     @Binding var updateMode: UpdateCheckMode
     @Binding var closeBehavior: CloseBehavior
     @Binding var installToApplications: Bool
+    @Binding var authMode: AuthMode
+    @Binding var serverURL: String
     @Environment(\.dismiss) private var dismiss
     @State private var tokenField = ""
+    @State private var serverURLField = ""
+    @State private var serverPassField = ""
     @State private var checkingLauncher = false
     @State private var launcherResult: AppState.LauncherCheck?
     @State private var confirmingTokenRemove = false
+    @State private var confirmingServerRemove = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Settings").font(.title2).bold()
 
-            GroupBox(label: Label("GitHub access token", systemImage: "key.fill")) {
+            GroupBox(label: Label("Download access", systemImage: "key.fill")) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(state.hasToken
-                         ? "A token is saved in your Keychain."
-                         : "No token saved — downloads are disabled until you add one.")
-                        .font(.callout)
-                        .foregroundStyle(state.hasToken ? Color.green : Color.secondary)
-
-                    SecureField("Paste a fine-grained PAT…", text: $tokenField)
-                        .textFieldStyle(.roundedBorder)
-
-                    HStack {
-                        Button("Save") {
-                            state.setToken(tokenField)
-                            tokenField = ""
-                            Task { await state.refreshAll() }
-                        }
-                        .keyboardShortcut(.return, modifiers: [])
-                        .disabled(tokenField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                        if state.hasToken {
-                            Button("Remove", role: .destructive) { confirmingTokenRemove = true }
-                        }
-                        Spacer()
+                    // House convention: "mode" selectors use the native dropdown (default style).
+                    Picker("Downloads via", selection: $authMode) {
+                        ForEach(AuthMode.allCases) { Text($0.label).tag($0) }
                     }
+                    .tint(.selectorBlue)   // house rule 21: dropdowns are slate-blue, not the purple accent
 
-                    Link("Create a fine-grained token on GitHub →",
-                         destination: URL(string: "https://github.com/settings/personal-access-tokens/new")!)
-                        .font(.caption)
-                    Text("Give it Contents: Read-only. Only the repos this token can access appear in the list.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if authMode == .token {
+                        Text(state.hasToken
+                             ? "A token is saved in your Keychain."
+                             : "No token saved — downloads are disabled until you add one.")
+                            .font(.callout)
+                            .foregroundStyle(state.hasToken ? Color.green : Color.secondary)
+
+                        SecureField("Paste a fine-grained PAT…", text: $tokenField)
+                            .textFieldStyle(.roundedBorder)
+
+                        HStack {
+                            Button("Save") {
+                                state.setToken(tokenField)
+                                tokenField = ""
+                                Task { await state.refreshAll() }
+                            }
+                            .keyboardShortcut(.return, modifiers: [])
+                            .disabled(tokenField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                            if state.hasToken {
+                                Button("Remove", role: .destructive) { confirmingTokenRemove = true }
+                            }
+                            Spacer()
+                        }
+
+                        Link("Create a fine-grained token on GitHub →",
+                             destination: URL(string: "https://github.com/settings/personal-access-tokens/new")!)
+                            .font(.caption)
+                        Text("Give it Contents: Read-only. Only the repos this token can access appear in the list.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text(state.hasServerAuth
+                             ? "Server & passphrase saved (passphrase in your Keychain)."
+                             : "Enter the download server address and suite passphrase (ask James for both).")
+                            .font(.callout)
+                            .foregroundStyle(state.hasServerAuth ? Color.green : Color.secondary)
+
+                        TextField("Server address (https://…)", text: $serverURLField)
+                            .textFieldStyle(.roundedBorder)
+                            .autocorrectionDisabled()
+                        SecureField("Suite passphrase…", text: $serverPassField)
+                            .textFieldStyle(.roundedBorder)
+
+                        HStack {
+                            Button("Save") {
+                                state.setServerAuth(url: serverURLField, passphrase: serverPassField)
+                                serverURL = serverURLField.trimmingCharacters(in: .whitespacesAndNewlines)
+                                serverPassField = ""
+                                Task { await state.refreshAll() }
+                            }
+                            .keyboardShortcut(.return, modifiers: [])
+                            .disabled(serverURLField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                      || serverPassField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                            if state.hasServerAuth {
+                                Button("Remove", role: .destructive) { confirmingServerRemove = true }
+                            }
+                            Spacer()
+                        }
+
+                        Text("Downloads go through James's server — no GitHub token is needed on this machine.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .padding(8)
             }
@@ -159,6 +206,18 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("You'll need to paste a token again before you can install or update apps.")
+        }
+        .confirmationDialog("Remove server passphrase?", isPresented: $confirmingServerRemove, titleVisibility: .visible) {
+            Button("Remove", role: .destructive) { state.clearServerAuth() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You'll need to enter the passphrase again before you can install or update apps.")
+        }
+        .onAppear { serverURLField = serverURL }
+        // Switching modes invalidates cached release state (different credentials see different repos).
+        // (single-param onChange for macOS 13 compatibility)
+        .onChange(of: authMode) { _ in
+            state.authModeChanged()
         }
     }
 

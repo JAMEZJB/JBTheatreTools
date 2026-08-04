@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -21,6 +22,45 @@ public sealed class ReleaseInfo
 
 public enum GitHubErrorKind { NoRelease, NotAccessible, Unauthorized, Http, AssetNotFound, Bad }
 
+/// <summary>Builds clients for the active auth mode ("token" = GitHub PAT, "server" = download-server
+/// relay with the suite passphrase). Windows Credential Manager reads are silent, so unlike macOS
+/// there is no prompt to defer.</summary>
+public static class AuthClient
+{
+    /// <summary>True when the active mode's credentials are all present (no secrets returned).</summary>
+    public static bool HasCredentials(AppSettings settings) =>
+        settings.AuthMode == "server"
+            ? !string.IsNullOrWhiteSpace(settings.ServerUrl) && TokenStore.LoadServerPass() != null
+            : TokenStore.Load() != null;
+
+    /// <summary>Client for the active mode, or null when its credentials are missing.</summary>
+    public static GitHubClient? Active(AppSettings settings)
+    {
+        if (settings.AuthMode == "server")
+        {
+            var url = settings.ServerUrl?.Trim();
+            var pass = TokenStore.LoadServerPass();
+            return string.IsNullOrEmpty(url) || pass == null ? null : new GitHubClient(url, pass);
+        }
+        var token = TokenStore.Load();
+        return token == null ? null : new GitHubClient(token);
+    }
+
+    /// <summary>Client for the launcher's own (public-repo) self-update paths — never fails for lack
+    /// of credentials: uses the relay when fully configured, else direct GitHub (token optional).</summary>
+    public static GitHubClient SelfUpdate(AppSettings settings)
+    {
+        if (settings.AuthMode == "server")
+        {
+            var url = settings.ServerUrl?.Trim();
+            var pass = TokenStore.LoadServerPass();
+            if (!string.IsNullOrEmpty(url) && pass != null) return new GitHubClient(url, pass);
+            return new GitHubClient((string?)null);
+        }
+        return new GitHubClient(TokenStore.Load());
+    }
+}
+
 public sealed class GitHubException : Exception
 {
     public GitHubErrorKind Kind { get; }
@@ -38,13 +78,34 @@ public sealed class GitHubException : Exception
 /// </summary>
 public sealed class GitHubClient : IDisposable
 {
-    private readonly string? _token;
+    /// <summary>Base of the GitHub REST API — api.github.com for direct (PAT) access, or the
+    /// download-server relay's root in server mode (the relay forwards the same paths to GitHub with
+    /// its own server-side token, so every endpoint shape below is identical in both modes).</summary>
+    private readonly string _apiBase;
+    /// <summary>Full Authorization header value: "Bearer &lt;PAT&gt;", "Basic &lt;…&gt;", or null.</summary>
+    private readonly string? _authValue;
     private readonly HttpClient _http;
 
-    /// <summary>`token` may be null for unauthenticated calls against public repos (self-update check).</summary>
+    /// <summary>Direct GitHub access. `token` may be null for unauthenticated calls against public
+    /// repos (self-update check).</summary>
     public GitHubClient(string? token)
     {
-        _token = token;
+        _apiBase = "https://api.github.com";
+        _authValue = string.IsNullOrEmpty(token) ? null : $"Bearer {token}";
+        _http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+        {
+            Timeout = TimeSpan.FromMinutes(10)
+        };
+    }
+
+    /// <summary>Download-server (relay) access: same API paths, sent to the relay with HTTP Basic
+    /// auth (fixed username "suite" + the suite passphrase). The relay injects its own GitHub token
+    /// server-side and passes responses through — including the 302 to S3, which we follow without
+    /// credentials exactly as in direct mode.</summary>
+    public GitHubClient(string serverBase, string passphrase)
+    {
+        _apiBase = serverBase.Trim().TrimEnd('/');
+        _authValue = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"suite:{passphrase}"));
         _http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
         {
             Timeout = TimeSpan.FromMinutes(10)
@@ -54,8 +115,8 @@ public sealed class GitHubClient : IDisposable
     private HttpRequestMessage NewRequest(string url, string accept)
     {
         var req = new HttpRequestMessage(HttpMethod.Get, url);
-        if (!string.IsNullOrEmpty(_token))
-            req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {_token}");
+        if (_authValue != null)
+            req.Headers.TryAddWithoutValidation("Authorization", _authValue);
         req.Headers.TryAddWithoutValidation("Accept", accept);
         req.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2022-11-28");
         req.Headers.TryAddWithoutValidation("User-Agent", "JBTheatreTools");
@@ -64,7 +125,7 @@ public sealed class GitHubClient : IDisposable
 
     public async Task<ReleaseInfo> LatestReleaseAsync(string owner, string repo)
     {
-        var url = $"https://api.github.com/repos/{owner}/{repo}/releases/latest";
+        var url = $"{_apiBase}/repos/{owner}/{repo}/releases/latest";
         using var req = NewRequest(url, "application/vnd.github+json");
         using var resp = await _http.SendAsync(req);
         if (resp.StatusCode == HttpStatusCode.NotFound)
@@ -84,7 +145,7 @@ public sealed class GitHubClient : IDisposable
     /// </summary>
     public async Task<List<ReleaseInfo>> ReleasesAsync(string owner, string repo)
     {
-        var url = $"https://api.github.com/repos/{owner}/{repo}/releases?per_page=50";
+        var url = $"{_apiBase}/repos/{owner}/{repo}/releases?per_page=50";
         using var req = NewRequest(url, "application/vnd.github+json");
         using var resp = await _http.SendAsync(req);
         if (resp.StatusCode == HttpStatusCode.Unauthorized)
@@ -124,7 +185,7 @@ public sealed class GitHubClient : IDisposable
     public async Task DownloadAssetAsync(string owner, string repo, long assetId, string dest,
                                          IProgress<double>? progress = null)
     {
-        var url = $"https://api.github.com/repos/{owner}/{repo}/releases/assets/{assetId}";
+        var url = $"{_apiBase}/repos/{owner}/{repo}/releases/assets/{assetId}";
         using var resp = await SendFollowingRedirectsAsync(url, "application/octet-stream",
                                                            HttpCompletionOption.ResponseHeadersRead);
         if (!resp.IsSuccessStatusCode)

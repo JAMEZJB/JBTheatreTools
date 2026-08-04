@@ -20,6 +20,25 @@ enum CLI {
         "--launch", "--self-check", "--self-download", "--code-id", "--help", "-h",
     ]
 
+    /// Download-server override (`--server` / `--server-pass`): when set, every client the CLI builds
+    /// goes through the relay with Basic auth instead of GitHub with a Bearer token.
+    private static var serverBase: String?
+    private static var serverPass: String?
+
+    /// True when server-relay auth is fully configured for this invocation.
+    private static var serverConfigured: Bool { serverBase != nil && serverPass != nil }
+
+    /// The client for this invocation: the server relay when configured, else direct GitHub.
+    private static func makeClient(token: String?) -> GitHubClient {
+        if let base = serverBase, let pass = serverPass {
+            return GitHubClient(serverBase: base, passphrase: pass)
+        }
+        return GitHubClient(token: token)
+    }
+
+    /// Whether this invocation has ANY usable download auth (token or server pair).
+    private static func hasAuth(token: String?) -> Bool { token != nil || serverConfigured }
+
     static func run(args: [String]) {
         // The command verb may appear anywhere (options like `--token X` can precede it), so find the
         // first recognised verb rather than assuming it's args[0] — otherwise `--token X --install helo`
@@ -42,11 +61,14 @@ enum CLI {
             case "--catalog":          i += 1; catalogPath = i < args.count ? args[i] : nil
             case "--tag":              i += 1; tag = i < args.count ? args[i] : nil
             case "--to-applications":  toApplications = true
+            case "--server":           i += 1; serverBase = i < args.count ? args[i] : nil
+            case "--server-pass":      i += 1; serverPass = i < args.count ? args[i] : nil
             default:                   positional.append(a)
             }
             i += 1
         }
         if token == nil { token = TokenStore.load() }
+        if serverBase != nil && serverPass == nil { serverPass = ServerAuthStore.load() }
 
         let catalog: Catalog
         do {
@@ -76,7 +98,7 @@ enum CLI {
         print("JBTheatreTools — \(catalog.apps.count) apps (platform: macOS)\n")
         let im = InstallManager.shared
         runBlocking {
-            let client = token.map { GitHubClient(token: $0) }
+            let client: GitHubClient? = hasAuth(token: token) ? makeClient(token: token) : nil
             for app in catalog.apps {
                 let installed = im.installedVersion(app.id) ?? "—"
                 var latest = "?", note = ""
@@ -103,7 +125,7 @@ enum CLI {
                         latest = "error"; note = error.localizedDescription
                     }
                 } else {
-                    note = "no token — set $GITHUB_TOKEN or pass --token"
+                    note = "no auth — set $GITHUB_TOKEN, pass --token, or --server + --server-pass"
                 }
                 print("  \(pad(app.name, 20))  installed=\(pad(installed, 8))  latest=\(pad(latest, 10))  \(note)")
             }
@@ -126,8 +148,8 @@ enum CLI {
             fputs("error: pass an app id. Known ids: \(catalog.apps.map { $0.id }.joined(separator: ", "))\n", stderr)
             exit(1)
         }
-        guard let token = token else { fputs("error: no token.\n", stderr); exit(1) }
-        let client = GitHubClient(token: token)
+        guard hasAuth(token: token) else { fputs("error: no auth (token or --server + --server-pass).\n", stderr); exit(1) }
+        let client = makeClient(token: token)
         runBlocking {
             do {
                 let all = try await client.releases(owner: app.owner, repo: app.repo)
@@ -146,11 +168,11 @@ enum CLI {
             fputs("error: pass an app id. Known ids: \(catalog.apps.map { $0.id }.joined(separator: ", "))\n", stderr)
             exit(1)
         }
-        guard let token = token else {
-            fputs("error: no token (set $GITHUB_TOKEN, pass --token, or save one in the app).\n", stderr)
+        guard hasAuth(token: token) else {
+            fputs("error: no auth (set $GITHUB_TOKEN, pass --token, save one in the app, or use --server + --server-pass).\n", stderr)
             exit(1)
         }
-        let client = GitHubClient(token: token)
+        let client = makeClient(token: token)
         let im = InstallManager.shared
         runBlocking {
             do {
@@ -216,7 +238,7 @@ enum CLI {
     private static func selfCheck(catalog: Catalog, token: String?) {
         guard let s = catalog.selfInfo else { fputs("error: no `self` entry in catalog.\n", stderr); exit(1) }
         let current = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
-        let client = GitHubClient(token: token)
+        let client = makeClient(token: token)
         runBlocking {
             do {
                 let info = try await client.latestRelease(owner: s.owner, repo: s.repo)
@@ -231,7 +253,7 @@ enum CLI {
     private static func selfDownload(catalog: Catalog, token: String?, dir: String?) {
         guard let s = catalog.selfInfo else { fputs("error: no `self` entry in catalog.\n", stderr); exit(1) }
         let destDir = dir ?? NSTemporaryDirectory()
-        let client = GitHubClient(token: token)
+        let client = makeClient(token: token)
         runBlocking {
             do {
                 let info = try await client.latestRelease(owner: s.owner, repo: s.repo)
@@ -282,12 +304,14 @@ enum CLI {
           --help                 This help
 
         Options: --token <pat>       GitHub PAT (else $GITHUB_TOKEN, else Keychain)
+                 --server <url>      Download-server (relay) base URL — use instead of a token
+                 --server-pass <p>   Suite passphrase for --server (else the saved Keychain one)
                  --tag <vX.Y.Z>      Install a specific release (with --install)
                  --to-applications   Install into the Applications folder (with --install)
                  --catalog <path>    Use a specific catalog.json
 
-        Note: a token passed via --token is visible to other local users (process list / shell
-              history). Prefer $GITHUB_TOKEN or the saved Keychain token where possible.
+        Note: a secret passed via --token / --server-pass is visible to other local users (process
+              list / shell history). Prefer $GITHUB_TOKEN or the saved Keychain values where possible.
         """)
     }
 

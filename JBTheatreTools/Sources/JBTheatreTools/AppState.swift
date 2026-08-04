@@ -2,6 +2,19 @@ import Foundation
 import SwiftUI
 import AppKit
 
+/// Where downloads authenticate: a personal GitHub token (direct API access), or James's
+/// download server (relay) with a shared suite passphrase — no GitHub token on the machine.
+enum AuthMode: String, CaseIterable, Identifiable {
+    case token, server
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .token: return "GitHub token"
+        case .server: return "Download server"
+        }
+    }
+}
+
 /// Observable view model backing the launcher UI. All work runs on the main actor;
 /// network calls suspend rather than block, so the UI stays responsive.
 @MainActor
@@ -64,6 +77,8 @@ final class AppState: ObservableObject {
 
     @Published var rows: [Row] = []
     @Published var hasToken: Bool = TokenStore.exists()
+    /// True when a download-server URL + passphrase are both saved.
+    @Published var hasServerAuth: Bool = AppState.serverURL != nil && ServerAuthStore.exists()
     @Published var globalError: String?
     /// Set to the latest tag when a newer launcher release exists (drives the in-app banner).
     @Published var launcherUpdateAvailable: String?
@@ -104,6 +119,59 @@ final class AppState: ObservableObject {
         AppLog.shared.log("launched v\(currentVersion)")
     }
 
+    // MARK: - Auth mode
+
+    /// The active download-auth mode (persisted in the same defaults the Settings UI binds to).
+    static var authMode: AuthMode {
+        AuthMode(rawValue: UserDefaults.standard.string(forKey: "theatre.authMode") ?? "") ?? .token
+    }
+
+    /// The saved download-server base URL (nil when unset/blank).
+    static var serverURL: String? {
+        let s = (UserDefaults.standard.string(forKey: "theatre.serverURL") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? nil : s
+    }
+
+    /// Credentials for the ACTIVE mode are present — drives the "can download at all" UI state.
+    var hasCredentials: Bool {
+        Self.authMode == .token ? hasToken : hasServerAuth
+    }
+
+    /// The no-credentials call to action, worded for the active mode.
+    var credentialsPrompt: String {
+        Self.authMode == .token
+            ? "Add a GitHub token to enable downloads"
+            : "Set the download server & passphrase to enable downloads"
+    }
+
+    /// A client for the active mode, reading credentials from the Keychain (so it may trigger the
+    /// macOS prompt — call `ensureKeychainExplained()` first). Nil when credentials are missing.
+    private func activeClient() -> GitHubClient? {
+        switch Self.authMode {
+        case .token:
+            guard let token = currentToken() else { return nil }
+            return GitHubClient(token: token)
+        case .server:
+            guard let base = Self.serverURL, let pass = currentServerPass() else { return nil }
+            return GitHubClient(serverBase: base, passphrase: pass)
+        }
+    }
+
+    /// A client that must never force a Keychain read (used by the self-update paths). Falls back to
+    /// direct unauthenticated GitHub — fine there, because the launcher's own repo is public.
+    private func cachedOnlyClient() -> GitHubClient {
+        switch Self.authMode {
+        case .token:
+            return GitHubClient(token: TokenStore.cachedToken)
+        case .server:
+            if let base = Self.serverURL, let pass = ServerAuthStore.cachedPassphrase {
+                return GitHubClient(serverBase: base, passphrase: pass)
+            }
+            return GitHubClient(token: nil)
+        }
+    }
+
     // MARK: - Token
 
     func setToken(_ token: String) {
@@ -119,6 +187,34 @@ final class AppState: ObservableObject {
     func clearToken() {
         TokenStore.clear()
         hasToken = false
+        resetRowsUnchecked()
+    }
+
+    // MARK: - Download-server auth
+
+    func setServerAuth(url: String, passphrase: String) {
+        let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPass = passphrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedURL.isEmpty, !trimmedPass.isEmpty else { return }
+        UserDefaults.standard.set(trimmedURL, forKey: "theatre.serverURL")
+        ServerAuthStore.save(trimmedPass)
+        hasServerAuth = true
+        stampCodeIdentity()   // this build just wrote the item — no prompt until the next update
+    }
+
+    func clearServerAuth() {
+        ServerAuthStore.clear()
+        hasServerAuth = false
+        resetRowsUnchecked()
+    }
+
+    /// Called when the auth-mode picker changes: nothing carries over between modes, so drop cached
+    /// release state and let the next refresh rebuild it under the new mode's credentials.
+    func authModeChanged() {
+        resetRowsUnchecked()
+    }
+
+    private func resetRowsUnchecked() {
         hasRefreshed = false
         for i in rows.indices {
             // Keep installed apps visible & launchable; everything else reverts to "unchecked".
@@ -139,16 +235,29 @@ final class AppState: ObservableObject {
         return token
     }
 
+    /// Server-mode twin of `currentToken()` — reads the passphrase (same Keychain-prompt behaviour).
+    private func currentServerPass() -> String? {
+        let pass = ServerAuthStore.load()
+        if pass != nil { stampCodeIdentity() }
+        return pass
+    }
+
     private func stampCodeIdentity() {
         UserDefaults.standard.set(CodeIdentity.current(), forKey: Self.codeIDKey)
     }
 
-    /// Call before the first token read of a flow. If a token is saved and the running build differs
-    /// from the one that last accessed it (i.e. an update — so macOS WILL prompt), shows the
-    /// explainer first and waits for the user to acknowledge it.
+    /// Call before the first Keychain read of a flow. If the active mode's secret is saved and the
+    /// running build differs from the one that last accessed it (i.e. an update — so macOS WILL
+    /// prompt), shows the explainer first and waits for the user to acknowledge it.
     func ensureKeychainExplained() async {
-        guard TokenStore.cachedToken == nil else { return }   // already read this session → no prompt coming
-        guard TokenStore.exists() else { return }             // nothing saved → no read → no prompt
+        switch Self.authMode {
+        case .token:
+            guard TokenStore.cachedToken == nil else { return }    // already read → no prompt coming
+            guard TokenStore.exists() else { return }              // nothing saved → no read → no prompt
+        case .server:
+            guard ServerAuthStore.cachedPassphrase == nil else { return }
+            guard ServerAuthStore.exists() else { return }
+        }
         let last = UserDefaults.standard.string(forKey: Self.codeIDKey)
         guard last != CodeIdentity.current() else { return }  // same build → OS won't prompt
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
@@ -168,11 +277,10 @@ final class AppState: ObservableObject {
 
     func refreshAll() async {
         await ensureKeychainExplained()
-        guard let token = currentToken() else { return }
-        // Clear a stale network/token error from a previous run (but keep a catalog-load error,
+        guard let client = activeClient() else { return }
+        // Clear a stale network/credential error from a previous run (but keep a catalog-load error,
         // which leaves `rows` empty).
         if !rows.isEmpty { globalError = nil }
-        let client = GitHubClient(token: token)
         for i in rows.indices {
             await refresh(index: i, client: client)
         }
@@ -220,10 +328,12 @@ final class AppState: ObservableObject {
             rows[index].releases = []
             rows[index].status = .noAccess
         } catch GitHubError.unauthorized {
-            // The token itself is bad — surface one clear message instead of 4 broken rows.
+            // The credential itself is bad — surface one clear message instead of 10 broken rows.
             rows[index].status = .noAccess
-            globalError = "Your GitHub token is invalid or expired. Open Settings to paste a new one."
-            AppLog.shared.log("refresh: token invalid or expired")
+            globalError = Self.authMode == .token
+                ? "Your GitHub token is invalid or expired. Open Settings to paste a new one."
+                : "The download server rejected the passphrase. Check it in Settings."
+            AppLog.shared.log("refresh: credentials rejected (\(Self.authMode.rawValue) mode)")
         } catch GitHubError.noRelease {
             rows[index].latest = nil
             rows[index].releases = []
@@ -310,13 +420,11 @@ final class AppState: ObservableObject {
     func install(_ id: String, tag: String? = nil) async {
         guard let i = rows.firstIndex(where: { $0.id == id }) else { return }
         await ensureKeychainExplained()
-        guard let token = currentToken() else { return }
+        guard let client = activeClient() else { return }
         let app = rows[i].app
         rows[i].busy = true
         rows[i].progress = 0
         defer { rows[i].busy = false }
-
-        let client = GitHubClient(token: token)
         if rows[i].releases.isEmpty {
             do { rows[i].releases = try await client.releases(owner: app.owner, repo: app.repo) }
             catch { rows[i].status = .error(error.localizedDescription); return }
@@ -450,9 +558,9 @@ final class AppState: ObservableObject {
     @discardableResult
     func checkLauncherUpdate() async -> LauncherCheck {
         guard let s = selfInfo else { return .unavailable("No self-update info in catalog.") }
-        // The launcher repo is public — use the token only if already in memory; never force a
+        // The launcher repo is public — use credentials only if already in memory; never force a
         // Keychain read here (would trigger the prompt for a check that doesn't need auth).
-        let client = GitHubClient(token: TokenStore.cachedToken)
+        let client = cachedOnlyClient()
         do {
             let info = try await client.latestRelease(owner: s.owner, repo: s.repo)
             let newer = Self.versionIsNewer(info.tagName, than: currentVersion)
@@ -473,7 +581,7 @@ final class AppState: ObservableObject {
         launcherDownloadMessage = nil
         defer { launcherDownloading = false }
 
-        let client = GitHubClient(token: TokenStore.cachedToken)   // public repo; no forced Keychain read
+        let client = cachedOnlyClient()   // public repo; no forced Keychain read
         do {
             let info = try await client.latestRelease(owner: s.owner, repo: s.repo)
             guard let asset = info.assets.first(where: { $0.name == s.macAssetName }) else {

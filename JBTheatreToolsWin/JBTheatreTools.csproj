@@ -15,7 +15,7 @@
     <!-- File description shown in Task Manager / file properties; window title is set in code. -->
     <AssemblyTitle>JB Theatre Tools</AssemblyTitle>
     <Product>JB Theatre Tools</Product>
-    <Version>1.9.1</Version>
+    <Version>1.10.0</Version>
     <Company>James Breedon</Company>
     <RootNamespace>JBTheatreTools</RootNamespace>
     <ApplicationIcon>app.ico</ApplicationIcon>
@@ -37,6 +37,7 @@
     <EmbeddedResource Include="../icons/showdashboard.png" LogicalName="rowicon-showdashboard.png" />
     <EmbeddedResource Include="../icons/showhandbook.png" LogicalName="rowicon-showhandbook.png" />
     <EmbeddedResource Include="../icons/psntools.png" LogicalName="rowicon-psntools.png" />
+    <EmbeddedResource Include="../icons/dmxtools.png" LogicalName="rowicon-dmxtools.png" />
   </ItemGroup>
 
 </Project>
