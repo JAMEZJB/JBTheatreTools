@@ -43,14 +43,11 @@ that it launches normally. Apps you install **through** JB Theatre Tools are una
 
 ## Auth
 
-The catalog repos are **private**, so downloads need authentication. The launcher supports two
-modes (Settings → Download access):
-
-- **GitHub token** — paste a **fine-grained personal access token** (Contents: read) once per
-  machine. Create one at github.com/settings/tokens.
-- **Download server** — enter a server address and suite passphrase (ask the suite owner for
-  both); downloads are relayed through that server and **no GitHub token is needed on the
-  machine**.
+The catalog repos are **private**, so downloads need authentication. By default the launcher uses
+its **built-in download server**: enter the suite **passphrase** once (ask the suite owner) and
+you're done — **no GitHub token is needed on the machine**. A **GitHub token** mode (paste a
+fine-grained PAT, Contents: read) remains available in Settings → Download access, and machines
+that already have a token keep using it.
 
 Either secret is stored in the macOS **Keychain** / Windows **Credential Manager**, never written
 to disk in plaintext, and never logged. Built apps and any downloaded payloads are gitignored and

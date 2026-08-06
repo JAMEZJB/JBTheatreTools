@@ -68,7 +68,6 @@ enum CLI {
             i += 1
         }
         if token == nil { token = TokenStore.load() }
-        if serverBase != nil && serverPass == nil { serverPass = ServerAuthStore.load() }
 
         let catalog: Catalog
         do {
@@ -76,6 +75,19 @@ enum CLI {
         } catch {
             fputs("error: could not load catalog: \(error.localizedDescription)\n", stderr)
             exit(1)
+        }
+
+        // Resolve download auth: explicit server flags win (either flag implies server mode, the URL
+        // defaulting to the built-in relay); then a usable token; then the GUI-configured server mode
+        // (built-in URL + saved passphrase) so a machine set up in the app works with no flags at all.
+        if serverBase != nil || serverPass != nil {
+            serverBase = serverBase ?? AppState.serverOverride ?? catalog.downloadServer
+            if serverPass == nil { serverPass = ServerAuthStore.load() }
+        } else if token == nil, AppState.authMode == .server,
+                  let base = AppState.serverOverride ?? catalog.downloadServer,
+                  let pass = ServerAuthStore.load() {
+            serverBase = base
+            serverPass = pass
         }
 
         switch cmd {

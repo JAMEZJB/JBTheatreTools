@@ -27,20 +27,28 @@ public enum GitHubErrorKind { NoRelease, NotAccessible, Unauthorized, Http, Asse
 /// there is no prompt to defer.</summary>
 public static class AuthClient
 {
+    /// <summary>The relay base URL: the user-invisible settings.json override wins, else the
+    /// catalog's built-in `downloadServer`. Null only in a build whose catalog carries no server.</summary>
+    public static string? ResolveServerUrl(AppSettings settings, string? catalogServer)
+    {
+        var over = settings.ServerUrl?.Trim();
+        return !string.IsNullOrEmpty(over) ? over : catalogServer?.Trim();
+    }
+
     /// <summary>True when the active mode's credentials are all present (no secrets returned).</summary>
-    public static bool HasCredentials(AppSettings settings) =>
+    public static bool HasCredentials(AppSettings settings, string? catalogServer) =>
         settings.AuthMode == "server"
-            ? !string.IsNullOrWhiteSpace(settings.ServerUrl) && TokenStore.LoadServerPass() != null
+            ? ResolveServerUrl(settings, catalogServer) != null && TokenStore.LoadServerPass() != null
             : TokenStore.Load() != null;
 
     /// <summary>Client for the active mode, or null when its credentials are missing.</summary>
-    public static GitHubClient? Active(AppSettings settings)
+    public static GitHubClient? Active(AppSettings settings, string? catalogServer)
     {
         if (settings.AuthMode == "server")
         {
-            var url = settings.ServerUrl?.Trim();
+            var url = ResolveServerUrl(settings, catalogServer);
             var pass = TokenStore.LoadServerPass();
-            return string.IsNullOrEmpty(url) || pass == null ? null : new GitHubClient(url, pass);
+            return url == null || pass == null ? null : new GitHubClient(url, pass);
         }
         var token = TokenStore.Load();
         return token == null ? null : new GitHubClient(token);
@@ -48,13 +56,13 @@ public static class AuthClient
 
     /// <summary>Client for the launcher's own (public-repo) self-update paths — never fails for lack
     /// of credentials: uses the relay when fully configured, else direct GitHub (token optional).</summary>
-    public static GitHubClient SelfUpdate(AppSettings settings)
+    public static GitHubClient SelfUpdate(AppSettings settings, string? catalogServer)
     {
         if (settings.AuthMode == "server")
         {
-            var url = settings.ServerUrl?.Trim();
+            var url = ResolveServerUrl(settings, catalogServer);
             var pass = TokenStore.LoadServerPass();
-            if (!string.IsNullOrEmpty(url) && pass != null) return new GitHubClient(url, pass);
+            if (url != null && pass != null) return new GitHubClient(url, pass);
             return new GitHubClient((string?)null);
         }
         return new GitHubClient(TokenStore.Load());

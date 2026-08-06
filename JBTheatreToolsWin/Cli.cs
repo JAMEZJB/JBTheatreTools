@@ -71,11 +71,26 @@ public static class Cli
             }
         }
         token ??= SafeLoadToken();
-        if (_serverBase != null && _serverPass == null) _serverPass = SafeLoadServerPass();
 
         Catalog catalog;
         try { catalog = Catalog.Load(catalogPath); }
         catch (Exception ex) { Console.Error.WriteLine($"error: could not load catalog: {ex.Message}"); return 1; }
+
+        // Resolve download auth: explicit server flags win (either flag implies server mode, the URL
+        // defaulting to the built-in relay); then a usable token; then the GUI-configured server mode
+        // (built-in URL + saved passphrase) so a machine set up in the app works with no flags at all.
+        var settings = AppSettings.Load();
+        var builtInServer = AuthClient.ResolveServerUrl(settings, catalog.DownloadServer);
+        if (_serverBase != null || _serverPass != null)
+        {
+            _serverBase ??= builtInServer;
+            _serverPass ??= SafeLoadServerPass();
+        }
+        else if (token == null && settings.AuthMode == "server" && builtInServer != null)
+        {
+            var pass = SafeLoadServerPass();
+            if (pass != null) { _serverBase = builtInServer; _serverPass = pass; }
+        }
 
         return cmd switch
         {

@@ -14,11 +14,9 @@ public sealed class SettingsDialog : Form
     private readonly LinkLabel _tokenLink = new();
     private readonly Label _tokenHelp = new();
     private readonly Label _serverState = new();
-    private readonly TextBox _serverUrl = new();
     private readonly TextBox _serverPass = new();
     private readonly Button _serverSave = new();
     private readonly Button _serverRemove = new();
-    private readonly Label _serverHelp = new();
     private readonly ComboBox _updateMode = new();
     private readonly Label _updateHint = new();
     private readonly Button _check = new();
@@ -28,11 +26,14 @@ public sealed class SettingsDialog : Form
     private readonly ComboBox _closeBehavior = new();
     private readonly CheckBox _installToApps = new();
 
-    public SettingsDialog(AppSettings settings, SelfInfo? selfInfo, string currentVersion)
+    private readonly string? _downloadServer;
+
+    public SettingsDialog(AppSettings settings, SelfInfo? selfInfo, string currentVersion, string? downloadServer)
     {
         _settings = settings;
         _selfInfo = selfInfo;
         _currentVersion = currentVersion;
+        _downloadServer = downloadServer;
 
         Text = "Settings";
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -98,35 +99,30 @@ public sealed class SettingsDialog : Form
         _tokenHelp.Size = new Size(428, 20);
         _tokenHelp.ForeColor = Color.Gray;
 
-        // Server panel (same band; visibility-swapped with the token panel)
+        // Server panel (same band; visibility-swapped with the token panel). The relay URL is
+        // built-in (catalog `downloadServer`, with an invisible settings.json override) — the user
+        // only ever enters the passphrase.
         _serverState.AutoSize = true;
         _serverState.Location = new Point(16, 74);
 
-        _serverUrl.PlaceholderText = "Server address (https://…)";
-        _serverUrl.Location = new Point(16, 98);
-        _serverUrl.Width = 428;
-        _serverUrl.Text = _settings.ServerUrl;
-
         _serverPass.UseSystemPasswordChar = true;
         _serverPass.PlaceholderText = "Suite passphrase…";
-        _serverPass.Location = new Point(16, 130);
+        _serverPass.Location = new Point(16, 98);
         _serverPass.Width = 428;
 
         _serverSave.Text = "Save";
-        _serverSave.Location = new Point(16, 162);
+        _serverSave.Location = new Point(16, 130);
         _serverSave.Click += (_, _) =>
         {
-            var url = _serverUrl.Text.Trim();
             var pass = _serverPass.Text.Trim();
-            if (url.Length == 0 || pass.Length == 0) return;
-            _settings.ServerUrl = url;
+            if (pass.Length == 0 || AuthClient.ResolveServerUrl(_settings, _downloadServer) == null) return;
             TokenStore.SaveServerPass(pass);
             _serverPass.Clear();
             UpdateServerState();
         };
 
         _serverRemove.Text = "Remove";
-        _serverRemove.Location = new Point(_serverSave.Right + 8, 162);
+        _serverRemove.Location = new Point(_serverSave.Right + 8, 130);
         _serverRemove.Click += (_, _) =>
         {
             if (MessageBox.Show(this,
@@ -135,13 +131,6 @@ public sealed class SettingsDialog : Form
             TokenStore.ClearServerPass();
             UpdateServerState();
         };
-
-        _serverHelp.UseMnemonic = false;
-        _serverHelp.Text = "Downloads go through James's server — no GitHub token is needed on this machine.";
-        _serverHelp.AutoSize = false;
-        _serverHelp.Location = new Point(16, 194);
-        _serverHelp.Size = new Size(428, 20);
-        _serverHelp.ForeColor = Color.Gray;
 
         // --- Updates ---
         var updatesHeading = Bold("Updates", new Point(16, 228));
@@ -185,7 +174,7 @@ public sealed class SettingsDialog : Form
             SetResult("Downloading…", Color.Gray);
             try
             {
-                var dest = await LauncherUpdate.DownloadAndRevealAsync(_selfInfo, AuthClient.SelfUpdate(_settings));
+                var dest = await LauncherUpdate.DownloadAndRevealAsync(_selfInfo, AuthClient.SelfUpdate(_settings, _downloadServer));
                 SetResult($"Saved {Path.GetFileName(dest)} to Downloads — quit & replace.", Color.SeaGreen);
             }
             catch (Exception ex)
@@ -243,6 +232,15 @@ public sealed class SettingsDialog : Form
         };
         openLog.Click += (_, _) => Log.Open();
 
+        var resetOrder = new Button
+        {
+            Text = "Reset App Order",
+            Location = new Point(110, 532),
+            AutoSize = true,
+        };
+        // Clears the saved order; MainForm re-applies (→ catalog order) when the dialog closes.
+        resetOrder.Click += (_, _) => _settings.AppOrder.Clear();
+
         var done = new Button
         {
             Text = "Done",
@@ -256,9 +254,9 @@ public sealed class SettingsDialog : Form
         {
             tokenHeading, _authMode,
             _tokenState, _token, _save, _remove, _tokenLink, _tokenHelp,
-            _serverState, _serverUrl, _serverPass, _serverSave, _serverRemove, _serverHelp,
+            _serverState, _serverPass, _serverSave, _serverRemove,
             updatesHeading, _updateMode, _updateHint, versionLabel, _check, _viewRelease, _checkResult,
-            appearanceHeading, _appearance, closeHeading, _closeBehavior, _installToApps, openLog, done
+            appearanceHeading, _appearance, closeHeading, _closeBehavior, _installToApps, openLog, resetOrder, done
         });
 
         UpdateServerState();
@@ -271,17 +269,17 @@ public sealed class SettingsDialog : Form
         bool server = _settings.AuthMode == "server";
         foreach (Control c in new Control[] { _tokenState, _token, _save, _remove, _tokenLink, _tokenHelp })
             c.Visible = !server;
-        foreach (Control c in new Control[] { _serverState, _serverUrl, _serverPass, _serverSave, _serverRemove, _serverHelp })
+        foreach (Control c in new Control[] { _serverState, _serverPass, _serverSave, _serverRemove })
             c.Visible = server;
         if (!server) UpdateTokenState(); else UpdateServerState();
     }
 
     private void UpdateServerState()
     {
-        bool has = !string.IsNullOrWhiteSpace(_settings.ServerUrl) && TokenStore.LoadServerPass() != null;
+        bool has = AuthClient.ResolveServerUrl(_settings, _downloadServer) != null && TokenStore.LoadServerPass() != null;
         _serverState.Text = has
-            ? "Server & passphrase saved (passphrase in Credential Manager)."
-            : "Enter the download server address and suite passphrase (ask James for both).";
+            ? "Passphrase saved in Credential Manager."
+            : "Enter the suite passphrase (ask James) — downloads are disabled until you do.";
         _serverState.ForeColor = has ? Color.SeaGreen : Color.Gray;
         _serverRemove.Visible = has && _settings.AuthMode == "server";
     }
@@ -294,7 +292,7 @@ public sealed class SettingsDialog : Form
         _viewRelease.Visible = false;
         try
         {
-            using var client = AuthClient.SelfUpdate(_settings);   // public repo; never blocks on creds
+            using var client = AuthClient.SelfUpdate(_settings, _downloadServer);   // public repo; never blocks on creds
             var info = await client.LatestReleaseAsync(_selfInfo.Owner, _selfInfo.Repo);
             if (Versions.IsNewer(info.TagName, _currentVersion))
             {

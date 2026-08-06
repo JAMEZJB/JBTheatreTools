@@ -66,8 +66,7 @@ struct ContentView: View {
     @AppStorage("theatre.updateMode") private var updateMode: UpdateCheckMode = .everyLaunch
     @AppStorage("theatre.closeBehavior") private var closeBehavior: CloseBehavior = .quit
     @AppStorage("theatre.installToApplications") private var installToApplications = false
-    @AppStorage("theatre.authMode") private var authMode: AuthMode = .token
-    @AppStorage("theatre.serverURL") private var serverURL = ""
+    @AppStorage("theatre.authMode") private var authMode: AuthMode = .server
     @State private var showSettings = false
     @State private var refreshing = false
     @State private var updatingAll = false
@@ -90,8 +89,7 @@ struct ContentView: View {
         .preferredColorScheme(appearance.colorScheme)
         .sheet(isPresented: $showSettings) {
             SettingsView(appearance: $appearance, updateMode: $updateMode, closeBehavior: $closeBehavior,
-                         installToApplications: $installToApplications,
-                         authMode: $authMode, serverURL: $serverURL)
+                         installToApplications: $installToApplications, authMode: $authMode)
                 .environmentObject(state)
         }
         .sheet(isPresented: $state.showKeychainExplainer, onDismiss: { state.acknowledgeKeychainExplainer() }) {
@@ -147,7 +145,7 @@ struct ContentView: View {
             if state.hasCredentials, state.noAppsAccessible {
                 banner(authMode == .token
                         ? "This token can’t access any apps. Check the token’s repository access in Settings, or ask James."
-                        : "No apps are reachable through the download server. Check the server URL & passphrase in Settings, or ask James.",
+                        : "No apps are reachable right now. Check the passphrase in Settings, or ask James.",
                        systemImage: "lock.fill", tint: .orange)
                 Spacer()
             } else {
@@ -200,7 +198,7 @@ struct ContentView: View {
                 Text(state.credentialsPrompt).font(.callout).bold()
                 Text(authMode == .token
                      ? "Settings → paste a fine-grained PAT (Contents: read)."
-                     : "Settings → enter the server address and suite passphrase.")
+                     : "Settings → enter the suite passphrase (ask James).")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
@@ -379,14 +377,19 @@ struct AppRowView: View {
             }
             // Launch — available whenever something is installed, even before a refresh has run.
             if row.installed != nil { launchButton }
-            if !row.releases.isEmpty || row.installed != nil { rowMenu }
+            rowMenu   // every visible row has the ⋯ menu (reordering is always available)
         }
     }
 
-    /// Overflow menu: install a specific (older) version, or uninstall.
+    /// Overflow menu: reorder the row, install a specific (older) version, or uninstall.
     private var rowMenu: some View {
         Menu {
+            Button("Move Up") { state.moveRow(row.id, up: true) }
+                .disabled(!state.canMove(row.id, up: true))
+            Button("Move Down") { state.moveRow(row.id, up: false) }
+                .disabled(!state.canMove(row.id, up: false))
             if !row.releases.isEmpty {
+                Divider()
                 Section("Install version") {
                     ForEach(row.releases) { rel in
                         Button { Task { await state.install(row.id, tag: rel.tagName) } }
@@ -395,6 +398,13 @@ struct AppRowView: View {
                 }
             }
             if row.installed != nil {
+                Divider()
+                Button(state.isDockPinned(row.id) ? "Remove from Dock" : "Add to Dock") {
+                    state.toggleDockPin(row.id)
+                }
+                Button(state.hasDesktopAlias(row.id) ? "Remove Desktop Alias" : "Add Desktop Alias") {
+                    state.toggleDesktopAlias(row.id)
+                }
                 Divider()
                 Button("Uninstall \(row.displayName)", role: .destructive) {
                     confirmingUninstall = true
@@ -407,7 +417,7 @@ struct AppRowView: View {
         .tint(.selectorBlue)   // house rule 21: selectors/menus are slate-blue, not the purple accent
         .fixedSize()
         .disabled(row.busy)
-        .help("More versions & uninstall")
+        .help("Reorder, other versions & uninstall")
     }
 
     private func versionLabel(_ rel: ReleaseInfo) -> String {

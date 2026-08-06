@@ -14,6 +14,8 @@ public sealed class Catalog
     [JsonPropertyName("apps")] public List<CatalogApp> Apps { get; set; } = new();
     /// <summary>JBTheatreTools' own release info, for the launcher self-update check.</summary>
     [JsonPropertyName("self")] public SelfInfo? Self { get; set; }
+    /// <summary>Built-in download-relay base URL for the default (passphrase) auth mode.</summary>
+    [JsonPropertyName("downloadServer")] public string? DownloadServer { get; set; }
 
     /// <summary>Loads from (1) an explicit path, (2) the embedded resource, or (3) a parent dir of CWD.</summary>
     public static Catalog Load(string? explicitPath = null)

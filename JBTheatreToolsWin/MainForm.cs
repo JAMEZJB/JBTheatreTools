@@ -27,13 +27,13 @@ public sealed class MainForm : Form
     // Notice-banner messages (the banner doubles as the no-creds / bad-creds / no-access notice).
     // Worded per auth mode: "token" = GitHub PAT, "server" = download-server relay + suite passphrase.
     private string NoCredsMsg => _settings.AuthMode == "server"
-        ? "Set the download server & passphrase to enable downloads  —  Settings → enter both (ask James)."
+        ? "Enter the suite passphrase to enable downloads  —  Settings → Download access (ask James)."
         : "Add a GitHub token to enable downloads  —  Settings → paste a fine-grained PAT.";
     private string BadCredsMsg => _settings.AuthMode == "server"
         ? "The download server rejected the passphrase  —  check it in Settings."
         : "Your GitHub token is invalid or expired  —  open Settings to paste a new one.";
     private string NoAccessMsg => _settings.AuthMode == "server"
-        ? "No apps are reachable through the download server  —  check the URL & passphrase, or ask James."
+        ? "No apps are reachable right now  —  check the passphrase in Settings, or ask James."
         : "This token can’t access any apps  —  check its repository access, or ask James.";
 
     public MainForm()
@@ -78,7 +78,7 @@ public sealed class MainForm : Form
         Shown += async (_, _) =>
         {
             Log.Write($"launched v{CurrentVersion()}");
-            ShowNotice(AuthClient.HasCredentials(_settings) ? null : NoCredsMsg);
+            ShowNotice(AuthClient.HasCredentials(_settings, _catalog.DownloadServer) ? null : NoCredsMsg);
             if (_settings.UpdateMode == "everyLaunch")
             {
                 await RefreshAllAsync();
@@ -152,7 +152,7 @@ public sealed class MainForm : Form
             download.Text = "Downloading…";
             try
             {
-                var dest = await LauncherUpdate.DownloadAndRevealAsync(_catalog.Self, AuthClient.SelfUpdate(_settings));
+                var dest = await LauncherUpdate.DownloadAndRevealAsync(_catalog.Self, AuthClient.SelfUpdate(_settings, _catalog.DownloadServer));
                 _updateBannerText.Text = $"Saved {Path.GetFileName(dest)} to Downloads — quit & replace JB Theatre Tools.";
             }
             catch (Exception ex)
@@ -245,6 +245,11 @@ public sealed class MainForm : Form
             row.InstallVersionRequested += InstallVersionAsync;
             row.UninstallRequested += Uninstall;
             row.LaunchRequested += Launch;
+            row.MoveRequested += MoveRow;
+            row.CanMove = CanMoveRow;
+            row.ShortcutToggleRequested += ToggleShortcut;
+            row.HasDesktopShortcut = r => InstallManager.Shared.HasDesktopShortcut(r.App.Id);
+            row.HasStartMenuShortcut = r => InstallManager.Shared.HasStartMenuShortcut(r.App.Id);
             var installed = InstallManager.Shared.InstalledVersion(app.Id);
             row.SetState(installed, null, null, installed != null ? RowStatus.Installed : RowStatus.Unknown);
             row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(app.Id));
@@ -258,13 +263,81 @@ public sealed class MainForm : Form
         {
             foreach (var r in _rows) r.Width = _list.ClientSize.Width - 30;
         };
+        ApplyRowOrder();
+    }
+
+    // --- Row ordering (per-machine, persisted in settings.json) ---
+
+    /// <summary>Reorders the rows to the saved order: saved ids first (in saved order), then apps the
+    /// saved list doesn't know (added since) in catalog order. Empty saved list = catalog order.</summary>
+    private void ApplyRowOrder()
+    {
+        var ordered = new List<AppRowControl>();
+        foreach (var id in _settings.AppOrder)
+        {
+            var row = _rows.FirstOrDefault(r => r.App.Id == id);
+            if (row != null && !ordered.Contains(row)) ordered.Add(row);
+        }
+        foreach (var row in _rows)
+            if (!ordered.Contains(row)) ordered.Add(row);
+        _rows.Clear();
+        _rows.AddRange(ordered);
+        ReindexList();
+    }
+
+    /// <summary>True when the row has a VISIBLE neighbour in that direction (hidden rows are skipped).</summary>
+    private bool CanMoveRow(AppRowControl row, bool up) => VisibleNeighbour(row, up) >= 0;
+
+    /// <summary>Moves the row past its nearest visible neighbour and persists the new order.</summary>
+    private void MoveRow(AppRowControl row, bool up)
+    {
+        int i = _rows.IndexOf(row);
+        int j = VisibleNeighbour(row, up);
+        if (i < 0 || j < 0) return;
+        (_rows[i], _rows[j]) = (_rows[j], _rows[i]);
+        ReindexList();
+        _settings.AppOrder = _rows.Select(r => r.App.Id).ToList();
+        _settings.Save();
+        Log.Write($"moved {row.App.Id} {(up ? "up" : "down")}");
+    }
+
+    private int VisibleNeighbour(AppRowControl row, bool up)
+    {
+        int i = _rows.IndexOf(row);
+        if (i < 0) return -1;
+        if (up)
+        {
+            for (int k = i - 1; k >= 0; k--) if (_rows[k].Visible) return k;
+        }
+        else
+        {
+            for (int k = i + 1; k < _rows.Count; k++) if (_rows[k].Visible) return k;
+        }
+        return -1;
+    }
+
+    /// <summary>Makes the FlowLayoutPanel's child order match <c>_rows</c>.</summary>
+    private void ReindexList()
+    {
+        _list.SuspendLayout();
+        for (int i = 0; i < _rows.Count; i++)
+            _list.Controls.SetChildIndex(_rows[i], i);
+        _list.ResumeLayout();
+    }
+
+    /// <summary>Per-app shortcut toggle from the row menu (desktop: true=Desktop, false=Start Menu).</summary>
+    private void ToggleShortcut(AppRowControl row, bool desktop, bool add)
+    {
+        if (desktop) InstallManager.Shared.SetDesktopShortcut(row.App, add);
+        else InstallManager.Shared.SetStartMenuShortcut(row.App, add);
+        Log.Write($"{(add ? "added" : "removed")} {(desktop ? "desktop" : "start-menu")} shortcut for {row.App.Id}");
     }
 
     // --- Actions ---
 
     private async Task RefreshAllAsync()
     {
-        var active = AuthClient.Active(_settings);
+        var active = AuthClient.Active(_settings, _catalog.DownloadServer);
         // No credentials (e.g. just removed in Settings): reset every row to its installed/unknown state
         // and clear stale latest/releases, so no row keeps a live — but silently no-op — Install button.
         if (active == null) { ResetRowsNoToken(); ShowNotice(NoCredsMsg); RefreshUpdateAllButton(); return; }
@@ -419,7 +492,7 @@ public sealed class MainForm : Form
 
     private async Task InstallVersionAsync(AppRowControl row, string? tag)
     {
-        var active = AuthClient.Active(_settings);
+        var active = AuthClient.Active(_settings, _catalog.DownloadServer);
         if (active == null) return;
         var assetName = row.App.WindowsAssetName;
         if (assetName == null) return;
@@ -521,7 +594,7 @@ public sealed class MainForm : Form
         if (s == null) return;
         try
         {
-            using var client = AuthClient.SelfUpdate(_settings);   // launcher repo is public; never blocks on creds
+            using var client = AuthClient.SelfUpdate(_settings, _catalog.DownloadServer);   // launcher repo is public; never blocks on creds
             var info = await client.LatestReleaseAsync(s.Owner, s.Repo);
             if (Versions.IsNewer(info.TagName, CurrentVersion()))
             {
@@ -539,12 +612,13 @@ public sealed class MainForm : Form
     private void OpenSettings()
     {
         bool prevInstallLoc = _settings.InstallToApplications;
-        using var dlg = new SettingsDialog(_settings, _catalog.Self, CurrentVersion());
+        using var dlg = new SettingsDialog(_settings, _catalog.Self, CurrentVersion(), _catalog.DownloadServer);
         dlg.ApplyTheme(Theme.IsDark(_settings.Appearance));
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _settings.Save();
             ApplyTheme();
+            ApplyRowOrder();   // covers "Reset App Order" (and is a cheap no-op otherwise)
             if (_settings.InstallToApplications != prevInstallLoc)
                 ReconcileInstallLocation(_settings.InstallToApplications);
             _ = RefreshAllAsync();

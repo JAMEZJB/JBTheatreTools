@@ -33,6 +33,15 @@ public sealed class AppRowControl : UserControl
     public event Func<AppRowControl, string, Task>? InstallVersionRequested;
     public event Action<AppRowControl>? UninstallRequested;
     public event Action<AppRowControl>? LaunchRequested;
+    /// <summary>Reorder request from the ⋯ menu: true = move up, false = move down.</summary>
+    public event Action<AppRowControl, bool>? MoveRequested;
+    /// <summary>Set by MainForm before the menu opens so Move Up/Down grey out at the list edges.</summary>
+    public Func<AppRowControl, bool, bool>? CanMove;
+    /// <summary>Per-app shortcut toggle: (row, desktop: true=Desktop/false=Start Menu, add).</summary>
+    public event Action<AppRowControl, bool, bool>? ShortcutToggleRequested;
+    /// <summary>Queries set by MainForm so the menu shows Add vs Remove correctly.</summary>
+    public Func<AppRowControl, bool>? HasDesktopShortcut;
+    public Func<AppRowControl, bool>? HasStartMenuShortcut;
 
     public AppRowControl(CatalogApp app)
     {
@@ -93,8 +102,15 @@ public sealed class AppRowControl : UserControl
     private void ShowMoreMenu()
     {
         var menu = new ContextMenuStrip();
+        var moveUp = new ToolStripMenuItem("Move up") { Enabled = CanMove?.Invoke(this, true) ?? false };
+        moveUp.Click += (_, _) => MoveRequested?.Invoke(this, true);
+        var moveDown = new ToolStripMenuItem("Move down") { Enabled = CanMove?.Invoke(this, false) ?? false };
+        moveDown.Click += (_, _) => MoveRequested?.Invoke(this, false);
+        menu.Items.Add(moveUp);
+        menu.Items.Add(moveDown);
         if (Releases.Count > 0)
         {
+            menu.Items.Add(new ToolStripSeparator());
             var versions = new ToolStripMenuItem("Install version");
             foreach (var rel in Releases)
             {
@@ -113,7 +129,17 @@ public sealed class AppRowControl : UserControl
         }
         if (Installed != null)
         {
-            if (menu.Items.Count > 0) menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(new ToolStripSeparator());
+            bool hasDesk = HasDesktopShortcut?.Invoke(this) ?? false;
+            var desk = new ToolStripMenuItem(hasDesk ? "Remove desktop shortcut" : "Add desktop shortcut");
+            desk.Click += (_, _) => ShortcutToggleRequested?.Invoke(this, true, !hasDesk);
+            menu.Items.Add(desk);
+            bool hasStart = HasStartMenuShortcut?.Invoke(this) ?? false;
+            var start = new ToolStripMenuItem(hasStart ? "Remove Start Menu shortcut" : "Add Start Menu shortcut");
+            start.Click += (_, _) => ShortcutToggleRequested?.Invoke(this, false, !hasStart);
+            menu.Items.Add(start);
+
+            menu.Items.Add(new ToolStripSeparator());
             var uninstall = new ToolStripMenuItem($"Uninstall {DisplayName}");
             uninstall.Click += (_, _) => UninstallRequested?.Invoke(this);
             menu.Items.Add(uninstall);
@@ -268,7 +294,7 @@ public sealed class AppRowControl : UserControl
         _install.Enabled = LatestAssetId != null;
         // Launch is available whenever something is installed, even before a refresh has run.
         _launch.Visible = installed;
-        _more.Visible = Releases.Count > 0 || installed;
+        _more.Visible = true;   // reordering lives here, so every row keeps its ⋯ menu
 
         LayoutControls();
     }

@@ -7,10 +7,8 @@ struct SettingsView: View {
     @Binding var closeBehavior: CloseBehavior
     @Binding var installToApplications: Bool
     @Binding var authMode: AuthMode
-    @Binding var serverURL: String
     @Environment(\.dismiss) private var dismiss
     @State private var tokenField = ""
-    @State private var serverURLField = ""
     @State private var serverPassField = ""
     @State private var checkingLauncher = false
     @State private var launcherResult: AppState.LauncherCheck?
@@ -63,38 +61,29 @@ struct SettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
                         Text(state.hasServerAuth
-                             ? "Server & passphrase saved (passphrase in your Keychain)."
-                             : "Enter the download server address and suite passphrase (ask James for both).")
+                             ? "Passphrase saved in your Keychain."
+                             : "Enter the suite passphrase (ask James) — downloads are disabled until you do.")
                             .font(.callout)
                             .foregroundStyle(state.hasServerAuth ? Color.green : Color.secondary)
 
-                        TextField("Server address (https://…)", text: $serverURLField)
-                            .textFieldStyle(.roundedBorder)
-                            .autocorrectionDisabled()
                         SecureField("Suite passphrase…", text: $serverPassField)
                             .textFieldStyle(.roundedBorder)
 
                         HStack {
                             Button("Save") {
-                                state.setServerAuth(url: serverURLField, passphrase: serverPassField)
-                                serverURL = serverURLField.trimmingCharacters(in: .whitespacesAndNewlines)
+                                state.setServerPassphrase(serverPassField)
                                 serverPassField = ""
                                 Task { await state.refreshAll() }
                             }
                             .keyboardShortcut(.return, modifiers: [])
-                            .disabled(serverURLField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                      || serverPassField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .disabled(serverPassField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                      || state.serverBase == nil)
 
                             if state.hasServerAuth {
                                 Button("Remove", role: .destructive) { confirmingServerRemove = true }
                             }
                             Spacer()
                         }
-
-                        Text("Downloads go through James's server — no GitHub token is needed on this machine.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .padding(8)
@@ -170,6 +159,8 @@ struct SettingsView: View {
             HStack {
                 Button("Open Log") { AppLog.shared.open() }
                     .tint(.selectorBlue)
+                Button("Reset App Order") { state.resetAppOrder() }
+                    .tint(.selectorBlue)
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
@@ -213,7 +204,6 @@ struct SettingsView: View {
         } message: {
             Text("You'll need to enter the passphrase again before you can install or update apps.")
         }
-        .onAppear { serverURLField = serverURL }
         // Switching modes invalidates cached release state (different credentials see different repos).
         // (single-param onChange for macOS 13 compatibility)
         .onChange(of: authMode) { _ in

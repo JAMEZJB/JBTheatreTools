@@ -7,9 +7,11 @@ struct Catalog: Decodable {
     let apps: [CatalogApp]
     /// JBTheatreTools' own release info, for the launcher self-update check.
     let selfInfo: SelfInfo?
+    /// Built-in download-relay base URL for the default (passphrase) auth mode.
+    let downloadServer: String?
 
     enum CodingKeys: String, CodingKey {
-        case schemaVersion, apps
+        case schemaVersion, apps, downloadServer
         case selfInfo = "self"
     }
 

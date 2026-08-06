@@ -19,16 +19,22 @@ internal static class Shortcuts
     /// <summary>Creates a Start Menu and a Desktop shortcut named <paramref name="name"/> → the exe.</summary>
     public static void Create(string name, string targetExe)
     {
-        CreateAt(Path.Combine(StartMenuDir, name + ".lnk"), targetExe);
-        CreateAt(Path.Combine(DesktopDir, name + ".lnk"), targetExe);
+        CreateStartMenu(name, targetExe);
+        CreateDesktop(name, targetExe);
     }
 
     /// <summary>Removes both shortcuts previously created for <paramref name="name"/>.</summary>
     public static void Remove(string name)
     {
-        TryDelete(Path.Combine(StartMenuDir, name + ".lnk"));
-        TryDelete(Path.Combine(DesktopDir, name + ".lnk"));
+        RemoveStartMenu(name);
+        RemoveDesktop(name);
     }
+
+    // Per-location variants — used by the per-app "Add desktop / Start Menu shortcut" menu items.
+    public static void CreateStartMenu(string name, string targetExe) => CreateAt(Path.Combine(StartMenuDir, name + ".lnk"), targetExe);
+    public static void CreateDesktop(string name, string targetExe) => CreateAt(Path.Combine(DesktopDir, name + ".lnk"), targetExe);
+    public static void RemoveStartMenu(string name) => TryDelete(Path.Combine(StartMenuDir, name + ".lnk"));
+    public static void RemoveDesktop(string name) => TryDelete(Path.Combine(DesktopDir, name + ".lnk"));
 
     /// <summary>Sanitises an app's display name into a valid .lnk file name.</summary>
     public static string SafeName(string name)

@@ -14,9 +14,13 @@ public sealed class InstalledRecord
     public string Version { get; set; } = "";
     public string Path { get; set; } = "";
     public string InstalledAt { get; set; } = "";
-    /// <summary>Name of the Start Menu/Desktop shortcuts created for this app, if any — so uninstall
-    /// (and reinstall) can remove them. Null when the app was installed without shortcuts.</summary>
+    /// <summary>LEGACY (pre-v1.11): one name covering BOTH the Start Menu and Desktop .lnk. Migrated
+    /// into the two per-location fields on manifest read; kept only so old manifests deserialize.</summary>
     public string? ShortcutName { get; set; }
+    /// <summary>.lnk base name in the Start Menu (null = no Start Menu shortcut).</summary>
+    public string? StartMenuShortcut { get; set; }
+    /// <summary>.lnk base name on the Desktop (null = no Desktop shortcut).</summary>
+    public string? DesktopShortcut { get; set; }
 }
 
 /// <summary>
@@ -47,14 +51,23 @@ public sealed class InstallManager
 
     public Dictionary<string, InstalledRecord> Manifest()
     {
+        Dictionary<string, InstalledRecord> m = new();
         try
         {
             if (File.Exists(ManifestPath))
-                return JsonSerializer.Deserialize<Dictionary<string, InstalledRecord>>(
+                m = JsonSerializer.Deserialize<Dictionary<string, InstalledRecord>>(
                     File.ReadAllText(ManifestPath)) ?? new();
         }
         catch { /* fall through to empty */ }
-        return new();
+        // Migrate the legacy single ShortcutName (which meant BOTH locations) to per-location fields.
+        foreach (var rec in m.Values)
+        {
+            if (string.IsNullOrEmpty(rec.ShortcutName)) continue;
+            rec.StartMenuShortcut ??= rec.ShortcutName;
+            rec.DesktopShortcut ??= rec.ShortcutName;
+            rec.ShortcutName = null;   // persisted on the next WriteManifest
+        }
+        return m;
     }
 
     private void WriteManifest(Dictionary<string, InstalledRecord> m)
@@ -108,25 +121,29 @@ public sealed class InstallManager
         File.Copy(downloadedExe, dest, overwrite: true);
 
         var m = Manifest();
-        // Remove shortcuts from any previous install (the name or the setting may have changed).
-        if (m.TryGetValue(app.Id, out var prev) && !string.IsNullOrEmpty(prev.ShortcutName))
-            Shortcuts.Remove(prev.ShortcutName!);
-
-        string? shortcutName = null;
-        if (toApplications)
+        // Remove shortcuts from any previous install (the name may have changed), remembering which
+        // locations the user had so an update re-creates them.
+        bool hadStart = false, hadDesktop = false;
+        if (m.TryGetValue(app.Id, out var prev))
         {
-            // Name the shortcut after the app's own ProductName, falling back to the catalog name.
-            // Best-effort: a shortcut failure must not abort the install — the exe + manifest still record it.
-            try
-            {
-                shortcutName = Shortcuts.SafeName(TryProductName(dest) ?? app.Name);
-                Shortcuts.Create(shortcutName, dest);
-            }
-            catch (Exception ex)
-            {
-                shortcutName = null;
-                Log.Write($"install {app.Id}: shortcut creation failed: {ex.Message}");
-            }
+            hadStart = prev.StartMenuShortcut != null;
+            hadDesktop = prev.DesktopShortcut != null;
+            if (prev.StartMenuShortcut != null) Shortcuts.RemoveStartMenu(prev.StartMenuShortcut);
+            if (prev.DesktopShortcut != null) Shortcuts.RemoveDesktop(prev.DesktopShortcut);
+        }
+
+        // The global install-to-Applications setting creates both; otherwise keep whatever the user
+        // had added per-app. Best-effort: a shortcut failure must not abort the install.
+        string? startName = null, desktopName = null;
+        try
+        {
+            var name = Shortcuts.SafeName(TryProductName(dest) ?? app.Name);
+            if (toApplications || hadStart) { Shortcuts.CreateStartMenu(name, dest); startName = name; }
+            if (toApplications || hadDesktop) { Shortcuts.CreateDesktop(name, dest); desktopName = name; }
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"install {app.Id}: shortcut creation failed: {ex.Message}");
         }
 
         m[app.Id] = new InstalledRecord
@@ -134,7 +151,8 @@ public sealed class InstallManager
             Version = version,
             Path = dest,
             InstalledAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            ShortcutName = shortcutName
+            StartMenuShortcut = startName,
+            DesktopShortcut = desktopName
         };
         WriteManifest(m);
         return dest;
@@ -156,12 +174,15 @@ public sealed class InstallManager
         Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
     }
 
-    /// <summary>Removes the installed app's folder and its manifest entry.</summary>
+    /// <summary>Removes the installed app's folder, its shortcuts, and its manifest entry.</summary>
     public void Uninstall(string appId)
     {
         var m = Manifest();
-        if (m.TryGetValue(appId, out var rec) && !string.IsNullOrEmpty(rec.ShortcutName))
-            Shortcuts.Remove(rec.ShortcutName!);
+        if (m.TryGetValue(appId, out var rec))
+        {
+            if (rec.StartMenuShortcut != null) Shortcuts.RemoveStartMenu(rec.StartMenuShortcut);
+            if (rec.DesktopShortcut != null) Shortcuts.RemoveDesktop(rec.DesktopShortcut);
+        }
         var dir = Path.Combine(AppsDir, appId);
         try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
         catch (Exception ex) { Log.Write($"uninstall {appId}: could not delete {dir}: {ex.Message}"); }
@@ -175,31 +196,70 @@ public sealed class InstallManager
     {
         var m = Manifest();
         if (!m.TryGetValue(appId, out var r) || !File.Exists(r.Path)) return false;
-        bool has = !string.IsNullOrEmpty(r.ShortcutName);
-        return toApplications ? !has : has;
+        bool hasBoth = r.StartMenuShortcut != null && r.DesktopShortcut != null;
+        bool hasAny = r.StartMenuShortcut != null || r.DesktopShortcut != null;
+        return toApplications ? !hasBoth : hasAny;
     }
 
-    /// <summary>Adds or removes an installed app's Start Menu/Desktop shortcuts to match the setting.</summary>
+    /// <summary>Adds or removes an installed app's Start Menu/Desktop shortcuts to match the setting
+    /// (the global reconcile acts on BOTH locations, including per-app-added ones).</summary>
     public void SyncShortcuts(CatalogApp app, bool toApplications)
     {
         var m = Manifest();
         if (!m.TryGetValue(app.Id, out var r) || !File.Exists(r.Path)) return;
         if (toApplications)
         {
-            if (string.IsNullOrEmpty(r.ShortcutName))
-            {
-                var name = Shortcuts.SafeName(TryProductName(r.Path) ?? app.Name);
-                Shortcuts.Create(name, r.Path);
-                r.ShortcutName = name;
-                WriteManifest(m);
-            }
+            var name = Shortcuts.SafeName(TryProductName(r.Path) ?? app.Name);
+            if (r.StartMenuShortcut == null) { Shortcuts.CreateStartMenu(name, r.Path); r.StartMenuShortcut = name; }
+            if (r.DesktopShortcut == null) { Shortcuts.CreateDesktop(name, r.Path); r.DesktopShortcut = name; }
         }
-        else if (!string.IsNullOrEmpty(r.ShortcutName))
+        else
         {
-            Shortcuts.Remove(r.ShortcutName!);
-            r.ShortcutName = null;
-            WriteManifest(m);
+            if (r.StartMenuShortcut != null) { Shortcuts.RemoveStartMenu(r.StartMenuShortcut); r.StartMenuShortcut = null; }
+            if (r.DesktopShortcut != null) { Shortcuts.RemoveDesktop(r.DesktopShortcut); r.DesktopShortcut = null; }
         }
+        WriteManifest(m);
+    }
+
+    // --- Per-app shortcut toggles (from the row's ⋯ menu) ---
+
+    public bool HasDesktopShortcut(string appId) => Manifest().TryGetValue(appId, out var r) && r.DesktopShortcut != null;
+    public bool HasStartMenuShortcut(string appId) => Manifest().TryGetValue(appId, out var r) && r.StartMenuShortcut != null;
+
+    public void SetDesktopShortcut(CatalogApp app, bool on)
+    {
+        var m = Manifest();
+        if (!m.TryGetValue(app.Id, out var r) || !File.Exists(r.Path)) return;
+        if (on && r.DesktopShortcut == null)
+        {
+            var name = Shortcuts.SafeName(TryProductName(r.Path) ?? app.Name);
+            Shortcuts.CreateDesktop(name, r.Path);
+            r.DesktopShortcut = name;
+        }
+        else if (!on && r.DesktopShortcut != null)
+        {
+            Shortcuts.RemoveDesktop(r.DesktopShortcut);
+            r.DesktopShortcut = null;
+        }
+        WriteManifest(m);
+    }
+
+    public void SetStartMenuShortcut(CatalogApp app, bool on)
+    {
+        var m = Manifest();
+        if (!m.TryGetValue(app.Id, out var r) || !File.Exists(r.Path)) return;
+        if (on && r.StartMenuShortcut == null)
+        {
+            var name = Shortcuts.SafeName(TryProductName(r.Path) ?? app.Name);
+            Shortcuts.CreateStartMenu(name, r.Path);
+            r.StartMenuShortcut = name;
+        }
+        else if (!on && r.StartMenuShortcut != null)
+        {
+            Shortcuts.RemoveStartMenu(r.StartMenuShortcut);
+            r.StartMenuShortcut = null;
+        }
+        WriteManifest(m);
     }
 
     // --- Download integrity (SHA-256) ---

@@ -77,8 +77,9 @@ final class AppState: ObservableObject {
 
     @Published var rows: [Row] = []
     @Published var hasToken: Bool = TokenStore.exists()
-    /// True when a download-server URL + passphrase are both saved.
-    @Published var hasServerAuth: Bool = AppState.serverURL != nil && ServerAuthStore.exists()
+    /// True when the built-in download server is configured and a passphrase is saved. (Set in init,
+    /// after the catalog — which carries the server URL — has loaded.)
+    @Published var hasServerAuth: Bool = false
     @Published var globalError: String?
     /// Set to the latest tag when a newer launcher release exists (drives the in-app banner).
     @Published var launcherUpdateAvailable: String?
@@ -95,8 +96,14 @@ final class AppState: ObservableObject {
     @Published var relocationNote: String?
 
     private var selfInfo: SelfInfo?
+    /// The download-relay base URL: an (invisible, settings-only) local override wins, else the
+    /// catalog's built-in `downloadServer`. Nil only in a build whose catalog carries no server.
+    private(set) var serverBase: String?
+    /// App ids in catalog order — the baseline the user's saved ordering is applied over.
+    private var catalogOrder: [String] = []
     private var explainerContinuation: CheckedContinuation<Void, Never>?
     private static let codeIDKey = "theatre.lastKeychainCodeID"
+    private static let appOrderKey = "theatre.appOrder"
 
     var currentVersion: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
@@ -106,6 +113,7 @@ final class AppState: ObservableObject {
         do {
             let catalog = try Catalog.load()
             selfInfo = catalog.selfInfo
+            serverBase = Self.serverOverride ?? catalog.downloadServer
             rows = catalog.apps.map {
                 let installed = InstallManager.shared.installedVersion($0.id)
                 return Row(app: $0,
@@ -113,21 +121,35 @@ final class AppState: ObservableObject {
                            status: installed != nil ? .installed : .unknown,
                            resolvedName: InstallManager.shared.installedDisplayName($0.id))
             }
+            catalogOrder = catalog.apps.map(\.id)
+            rows = Self.applyingSavedOrder(rows)
         } catch {
             globalError = "Could not load app catalog: \(error.localizedDescription)"
         }
+        // First run of this build generation: materialise the default auth mode. Server (passphrase)
+        // is the default for fresh installs, but a machine that already has a PAT saved stays in
+        // token mode — updating must never silently break a working token setup.
+        if UserDefaults.standard.string(forKey: "theatre.authMode") == nil {
+            UserDefaults.standard.set(
+                (TokenStore.exists() ? AuthMode.token : AuthMode.server).rawValue,
+                forKey: "theatre.authMode")
+        }
+        hasServerAuth = serverBase != nil && ServerAuthStore.exists()
         AppLog.shared.log("launched v\(currentVersion)")
     }
 
     // MARK: - Auth mode
 
-    /// The active download-auth mode (persisted in the same defaults the Settings UI binds to).
-    static var authMode: AuthMode {
-        AuthMode(rawValue: UserDefaults.standard.string(forKey: "theatre.authMode") ?? "") ?? .token
+    /// The active download-auth mode. Server (passphrase) is the default; init materialises the
+    /// stored value on first run so a machine with an existing PAT stays in token mode.
+    /// (nonisolated: UserDefaults is thread-safe and the CLI reads this off the main actor.)
+    nonisolated static var authMode: AuthMode {
+        AuthMode(rawValue: UserDefaults.standard.string(forKey: "theatre.authMode") ?? "") ?? .server
     }
 
-    /// The saved download-server base URL (nil when unset/blank).
-    static var serverURL: String? {
+    /// User-invisible relay-URL override (defaults key only, no UI) — an escape hatch if the
+    /// built-in catalog URL ever has to move for machines on an old build.
+    nonisolated static var serverOverride: String? {
         let s = (UserDefaults.standard.string(forKey: "theatre.serverURL") ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return s.isEmpty ? nil : s
@@ -142,7 +164,7 @@ final class AppState: ObservableObject {
     var credentialsPrompt: String {
         Self.authMode == .token
             ? "Add a GitHub token to enable downloads"
-            : "Set the download server & passphrase to enable downloads"
+            : "Enter the suite passphrase to enable downloads"
     }
 
     /// A client for the active mode, reading credentials from the Keychain (so it may trigger the
@@ -153,7 +175,7 @@ final class AppState: ObservableObject {
             guard let token = currentToken() else { return nil }
             return GitHubClient(token: token)
         case .server:
-            guard let base = Self.serverURL, let pass = currentServerPass() else { return nil }
+            guard let base = serverBase, let pass = currentServerPass() else { return nil }
             return GitHubClient(serverBase: base, passphrase: pass)
         }
     }
@@ -165,7 +187,7 @@ final class AppState: ObservableObject {
         case .token:
             return GitHubClient(token: TokenStore.cachedToken)
         case .server:
-            if let base = Self.serverURL, let pass = ServerAuthStore.cachedPassphrase {
+            if let base = serverBase, let pass = ServerAuthStore.cachedPassphrase {
                 return GitHubClient(serverBase: base, passphrase: pass)
             }
             return GitHubClient(token: nil)
@@ -192,13 +214,11 @@ final class AppState: ObservableObject {
 
     // MARK: - Download-server auth
 
-    func setServerAuth(url: String, passphrase: String) {
-        let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedPass = passphrase.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedURL.isEmpty, !trimmedPass.isEmpty else { return }
-        UserDefaults.standard.set(trimmedURL, forKey: "theatre.serverURL")
-        ServerAuthStore.save(trimmedPass)
-        hasServerAuth = true
+    func setServerPassphrase(_ passphrase: String) {
+        let trimmed = passphrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        ServerAuthStore.save(trimmed)
+        hasServerAuth = serverBase != nil
         stampCodeIdentity()   // this build just wrote the item — no prompt until the next update
     }
 
@@ -295,6 +315,92 @@ final class AppState: ObservableObject {
 
     /// Number of installed apps with an update available — drives the header "Update All" button.
     var updatesAvailable: Int { rows.filter { $0.status == .updateAvailable }.count }
+
+    // MARK: - Row ordering (per-machine, persisted)
+
+    /// Reorders `rows` to the user's saved order: saved ids first (in saved order), then any ids the
+    /// saved list doesn't know (e.g. apps added to the catalog since) in catalog position. Ids in the
+    /// saved list that no longer exist are ignored.
+    private static func applyingSavedOrder(_ rows: [Row]) -> [Row] {
+        let saved = UserDefaults.standard.stringArray(forKey: appOrderKey) ?? []
+        guard !saved.isEmpty else { return rows }
+        var remaining = rows
+        var ordered: [Row] = []
+        for id in saved {
+            if let i = remaining.firstIndex(where: { $0.id == id }) {
+                ordered.append(remaining.remove(at: i))
+            }
+        }
+        // Apps the saved list doesn't know (added since) follow at the end, in catalog order.
+        ordered.append(contentsOf: remaining)
+        return ordered
+    }
+
+    private func persistOrder() {
+        UserDefaults.standard.set(rows.map(\.id), forKey: Self.appOrderKey)
+    }
+
+    /// Whether the row can move up/down relative to its VISIBLE neighbours (hidden rows are skipped).
+    func canMove(_ id: String, up: Bool) -> Bool {
+        visibleNeighbour(of: id, up: up) != nil
+    }
+
+    /// Moves the row past its nearest visible neighbour and persists the new order.
+    func moveRow(_ id: String, up: Bool) {
+        guard let i = rows.firstIndex(where: { $0.id == id }),
+              let j = visibleNeighbour(of: id, up: up) else { return }
+        rows.swapAt(i, j)
+        persistOrder()
+        AppLog.shared.log("moved \(id) \(up ? "up" : "down")")
+    }
+
+    /// Restores the catalog's default order (Settings → Reset App Order).
+    func resetAppOrder() {
+        UserDefaults.standard.removeObject(forKey: Self.appOrderKey)
+        let index = Dictionary(uniqueKeysWithValues: catalogOrder.enumerated().map { ($1, $0) })
+        rows.sort { (index[$0.id] ?? .max) < (index[$1.id] ?? .max) }
+        AppLog.shared.log("app order reset to catalog default")
+    }
+
+    private func visibleNeighbour(of id: String, up: Bool) -> Int? {
+        guard let i = rows.firstIndex(where: { $0.id == id }) else { return nil }
+        let range = up ? Array((0..<i).reversed()) : Array((i + 1)..<rows.count)
+        return range.first { rows[$0].isVisible }
+    }
+
+    // MARK: - Desktop alias & Dock pin (per-app, from the row menu; best-effort like win shortcuts)
+
+    func hasDesktopAlias(_ id: String) -> Bool { InstallManager.shared.hasDesktopAlias(id) }
+
+    func isDockPinned(_ id: String) -> Bool {
+        guard let path = InstallManager.shared.installedPath(id)?.path else { return false }
+        return Dock.isPinned(path)
+    }
+
+    func toggleDesktopAlias(_ id: String) {
+        if hasDesktopAlias(id) {
+            InstallManager.shared.removeDesktopAlias(id)
+            AppLog.shared.log("removed desktop alias for \(id)")
+        } else {
+            do {
+                try InstallManager.shared.addDesktopAlias(id)
+                AppLog.shared.log("added desktop alias for \(id)")
+            } catch {
+                AppLog.shared.log("desktop alias for \(id) FAILED: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func toggleDockPin(_ id: String) {
+        guard let path = InstallManager.shared.installedPath(id)?.path else { return }
+        if Dock.isPinned(path) {
+            Dock.unpin(path)
+            AppLog.shared.log("unpinned \(id) from Dock")
+        } else {
+            Dock.pin(path)
+            AppLog.shared.log("pinned \(id) to Dock")
+        }
+    }
 
     /// Updates every app that currently has an update available, one at a time.
     func updateAll() async {

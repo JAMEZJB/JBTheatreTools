@@ -15,6 +15,9 @@ struct InstalledRecord: Codable {
     var version: String
     var path: String
     var installedAt: String
+    /// Path of the Finder alias this launcher created on the user's Desktop (nil = none).
+    /// Optional so manifests written by older versions decode unchanged.
+    var desktopAlias: String?
 }
 
 enum InstallError: LocalizedError {
@@ -166,7 +169,14 @@ final class InstallManager {
         try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
         let dest = targetDir.appendingPathComponent(current.lastPathComponent)
         if dest.standardizedFileURL.path != current.standardizedFileURL.path { try? fm.removeItem(at: dest) }
+        let wasPinned = Dock.isPinned(rec.path)
         try fm.moveItem(at: current, to: dest)
+        // A Dock tile stores the absolute path, so re-pin at the new location (one Dock restart).
+        // Desktop aliases are bookmark-based and follow the move on their own.
+        if wasPinned {
+            Dock.unpin(rec.path, restartDock: false)
+            Dock.pin(dest.path)
+        }
         m[appId]?.path = dest.path
         writeManifest(m)
     }
@@ -184,13 +194,47 @@ final class InstallManager {
         try proc.run()
     }
 
-    /// Removes the installed `.app` bundle and its manifest entry.
+    /// Removes the installed `.app` bundle, any Desktop alias / Dock pin we created, and the
+    /// manifest entry.
     func uninstall(_ appId: String) throws {
         var m = manifest()
         if let rec = m[appId] {
+            if let alias = rec.desktopAlias { try? fm.removeItem(at: URL(fileURLWithPath: alias)) }
+            Dock.unpin(rec.path)
             try? fm.removeItem(at: URL(fileURLWithPath: rec.path))
         }
         m.removeValue(forKey: appId)
+        writeManifest(m)
+    }
+
+    // MARK: - Desktop alias (per-app, user-requested from the row menu)
+
+    /// True when this launcher has created a Desktop alias for the app and it still exists.
+    func hasDesktopAlias(_ appId: String) -> Bool {
+        guard let alias = manifest()[appId]?.desktopAlias else { return false }
+        return fm.fileExists(atPath: alias)
+    }
+
+    /// Creates a Finder alias to the installed app on the user's Desktop (bookmark-based, so it
+    /// keeps working if the app is later relocated between install locations).
+    func addDesktopAlias(_ appId: String) throws {
+        guard let appURL = installedPath(appId) else { throw InstallError.notInstalled }
+        let desktop = fm.urls(for: .desktopDirectory, in: .userDomainMask)[0]
+        let name = appURL.deletingPathExtension().lastPathComponent
+        let aliasURL = desktop.appendingPathComponent(name)
+        let data = try appURL.bookmarkData(options: .suitableForBookmarkFile,
+                                           includingResourceValuesForKeys: nil, relativeTo: nil)
+        try? fm.removeItem(at: aliasURL)
+        try URL.writeBookmarkData(data, to: aliasURL)
+        var m = manifest()
+        m[appId]?.desktopAlias = aliasURL.path
+        writeManifest(m)
+    }
+
+    func removeDesktopAlias(_ appId: String) {
+        var m = manifest()
+        if let alias = m[appId]?.desktopAlias { try? fm.removeItem(at: URL(fileURLWithPath: alias)) }
+        m[appId]?.desktopAlias = nil
         writeManifest(m)
     }
 
