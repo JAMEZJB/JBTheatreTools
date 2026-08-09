@@ -29,3 +29,6 @@
 # Local-only docs (not published)
 /CLAUDE.md
 /docs/dev-kickoff.md
+
+# Local scratch — James's private working area, never committed (this is the ONE public repo).
+/_private/
