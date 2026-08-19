@@ -156,6 +156,27 @@ struct SettingsView: View {
                 .padding(8)
             }
 
+            if state.hasHiddenApps {
+                GroupBox(label: Label("Hidden apps", systemImage: "eye.slash")) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(state.hiddenRows) { row in
+                            HStack {
+                                Text(row.displayName).font(.callout)
+                                Spacer()
+                                Button("Show") { state.setHidden(row.id, false) }
+                                    .tint(.selectorBlue)
+                            }
+                        }
+                        HStack {
+                            Spacer()
+                            Button("Show All") { state.showAllHidden() }
+                                .tint(.selectorBlue)
+                        }
+                    }
+                    .padding(8)
+                }
+            }
+
             HStack {
                 Button("Open Log") { AppLog.shared.open() }
                     .tint(.selectorBlue)

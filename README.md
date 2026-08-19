@@ -29,6 +29,7 @@ built by James Breedon & Claude Code.
 | Show Handbook | `JAMEZJB/ShowHandbook` | `ShowHandbook-macOS.zip`, `ShowHandbook-Windows-{x64,arm64}.exe` |
 | PSN Tools | `JAMEZJB/PSNTools` | `PSNTools-macOS.zip`, `PSNTools-Windows-{x64,arm64}.exe` |
 | DMX Tools | `JAMEZJB/DMXTools` | `DMXTools-macOS.zip`, `DMXTools-Windows-{x64,arm64}.exe` |
+| Desk Convert | `JAMEZJB/DeskConvert` | `DeskConvert-macOS.zip`, `DeskConvert-Windows-{x64,arm64}.exe` |
 
 Asset names differ per app, so the launcher resolves the right one for the current OS/arch. An app listed
 ahead of its first release shows "No release" and becomes installable once a build ships.

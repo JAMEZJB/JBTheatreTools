@@ -65,6 +65,9 @@ public sealed class MainForm : Form
         _list.WrapContents = false;
         _list.AutoScroll = true;
         _list.Padding = new Padding(10);
+        _list.AllowDrop = true;   // drag-to-reorder rows
+        _list.DragOver += (_, e) => e.Effect = DragDropEffects.Move;
+        _list.DragDrop += OnListDragDrop;
         root.Controls.Add(_list, 0, 3);
 
         root.Controls.Add(BuildFooter(), 0, 4);
@@ -250,12 +253,17 @@ public sealed class MainForm : Form
             row.ShortcutToggleRequested += ToggleShortcut;
             row.HasDesktopShortcut = r => InstallManager.Shared.HasDesktopShortcut(r.App.Id);
             row.HasStartMenuShortcut = r => InstallManager.Shared.HasStartMenuShortcut(r.App.Id);
+            row.PinToggleRequested += TogglePin;
+            row.HideRequested += HideRow;
+            row.IsPinnedQuery = r => IsPinned(r.App.Id);
             var installed = InstallManager.Shared.InstalledVersion(app.Id);
             row.SetState(installed, null, null, installed != null ? RowStatus.Installed : RowStatus.Unknown);
             row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(app.Id));
+            row.SetPinned(IsPinned(app.Id));
             // Installed apps show immediately (launchable pre-refresh); not-installed rows stay hidden
             // until a refresh confirms the token can reach them, so inaccessible apps never flash in.
-            row.Visible = installed != null;
+            // Hidden apps never show.
+            row.Visible = installed != null && !IsHidden(app.Id);
             _rows.Add(row);
             _list.Controls.Add(row);
         }
@@ -282,47 +290,102 @@ public sealed class MainForm : Form
             if (!ordered.Contains(row)) ordered.Add(row);
         _rows.Clear();
         _rows.AddRange(ordered);
+        // Reflect pin + hidden state (they may have changed in Settings — e.g. "Show all hidden").
+        foreach (var r in _rows)
+        {
+            r.SetPinned(IsPinned(r.App.Id));
+            if (IsHidden(r.App.Id)) r.Visible = false;
+            else if (!r.Visible && InstallManager.Shared.InstalledVersion(r.App.Id) != null) r.Visible = true;
+        }
         ReindexList();
     }
 
-    /// <summary>True when the row has a VISIBLE neighbour in that direction (hidden rows are skipped).</summary>
-    private bool CanMoveRow(AppRowControl row, bool up) => VisibleNeighbour(row, up) >= 0;
+    private bool IsPinned(string id) => _settings.PinnedApps.Contains(id);
+    private bool IsHidden(string id) => _settings.HiddenApps.Contains(id);
 
-    /// <summary>Moves the row past its nearest visible neighbour and persists the new order.</summary>
+    /// <summary>True when the row has a same-group VISIBLE neighbour in that direction.</summary>
+    private bool CanMoveRow(AppRowControl row, bool up) => GroupNeighbour(row, up) >= 0;
+
+    /// <summary>Moves the row past its nearest same-group neighbour and persists the new order.</summary>
     private void MoveRow(AppRowControl row, bool up)
     {
         int i = _rows.IndexOf(row);
-        int j = VisibleNeighbour(row, up);
+        int j = GroupNeighbour(row, up);
         if (i < 0 || j < 0) return;
         (_rows[i], _rows[j]) = (_rows[j], _rows[i]);
+        PersistOrder();
         ReindexList();
-        _settings.AppOrder = _rows.Select(r => r.App.Id).ToList();
-        _settings.Save();
         Log.Write($"moved {row.App.Id} {(up ? "up" : "down")}");
     }
 
-    private int VisibleNeighbour(AppRowControl row, bool up)
+    /// <summary>Nearest neighbour in `up`/down that is visible AND in the same pin group.</summary>
+    private int GroupNeighbour(AppRowControl row, bool up)
     {
         int i = _rows.IndexOf(row);
         if (i < 0) return -1;
-        if (up)
-        {
-            for (int k = i - 1; k >= 0; k--) if (_rows[k].Visible) return k;
-        }
-        else
-        {
-            for (int k = i + 1; k < _rows.Count; k++) if (_rows[k].Visible) return k;
-        }
+        bool pinned = IsPinned(row.App.Id);
+        if (up) { for (int k = i - 1; k >= 0; k--) if (_rows[k].Visible && IsPinned(_rows[k].App.Id) == pinned) return k; }
+        else { for (int k = i + 1; k < _rows.Count; k++) if (_rows[k].Visible && IsPinned(_rows[k].App.Id) == pinned) return k; }
         return -1;
     }
 
-    /// <summary>Makes the FlowLayoutPanel's child order match <c>_rows</c>.</summary>
+    private void PersistOrder()
+    {
+        _settings.AppOrder = _rows.Select(r => r.App.Id).ToList();
+        _settings.Save();
+    }
+
+    /// <summary>Sets the FlowLayoutPanel child order: visible PINNED rows first, then visible unpinned,
+    /// then the hidden/invisible ones (which take no space). <c>_rows</c> stays the master order.</summary>
     private void ReindexList()
     {
         _list.SuspendLayout();
-        for (int i = 0; i < _rows.Count; i++)
-            _list.Controls.SetChildIndex(_rows[i], i);
+        int idx = 0;
+        foreach (var r in _rows.Where(r => r.Visible && IsPinned(r.App.Id))) _list.Controls.SetChildIndex(r, idx++);
+        foreach (var r in _rows.Where(r => r.Visible && !IsPinned(r.App.Id))) _list.Controls.SetChildIndex(r, idx++);
+        foreach (var r in _rows.Where(r => !r.Visible)) _list.Controls.SetChildIndex(r, idx++);
         _list.ResumeLayout();
+    }
+
+    // --- Pin / hide toggles + drag-to-reorder ---
+
+    private void TogglePin(AppRowControl row)
+    {
+        var id = row.App.Id;
+        if (_settings.PinnedApps.Remove(id)) { }
+        else _settings.PinnedApps.Add(id);
+        _settings.Save();
+        row.SetPinned(IsPinned(id));
+        ReindexList();
+        RefreshUpdateAllButton();
+        Log.Write($"{(IsPinned(id) ? "pinned" : "unpinned")} {id}");
+    }
+
+    private void HideRow(AppRowControl row)
+    {
+        if (!_settings.HiddenApps.Contains(row.App.Id)) _settings.HiddenApps.Add(row.App.Id);
+        _settings.Save();
+        row.Visible = false;
+        ReindexList();
+        Log.Write($"hid {row.App.Id}");
+    }
+
+    /// <summary>Drop handler for drag-to-reorder: moves the dragged row next to the drop target within
+    /// the same pin group, persists, and re-lays out. Cross-group drops are ignored (use Pin/Unpin).</summary>
+    private void OnListDragDrop(object? sender, DragEventArgs e)
+    {
+        if (e.Data?.GetData(typeof(AppRowControl)) is not AppRowControl dragged) return;
+        var pt = _list.PointToClient(new Point(e.X, e.Y));
+        var target = _rows.FirstOrDefault(r => r.Visible && r.Bounds.Contains(pt));
+        if (target == null || target == dragged) return;
+        if (IsPinned(dragged.App.Id) != IsPinned(target.App.Id)) return;   // don't cross the pin boundary
+        bool below = pt.Y > target.Top + target.Height / 2;
+        _rows.Remove(dragged);
+        int ti = _rows.IndexOf(target);
+        _rows.Insert(below ? ti + 1 : ti, dragged);
+        PersistOrder();
+        ReindexList();
+        Log.Write($"dragged {dragged.App.Id} into place");
     }
 
     /// <summary>Per-app shortcut toggle from the row menu (desktop: true=Desktop, false=Start Menu).</summary>
@@ -394,9 +457,10 @@ public sealed class MainForm : Form
                     row.SetState(installed, null, null, RowStatus.Error);
                     Log.Write($"refresh {row.App.Id} error: {ex.Message}");
                 }
-                // Visible iff installed locally OR the token reached the repo.
-                row.Visible = installed != null || accessible;
+                // Visible iff (installed locally OR the token reached the repo) AND not hidden by the user.
+                row.Visible = (installed != null || accessible) && !IsHidden(row.App.Id);
             }
+            ReindexList();   // re-group pinned-first now that visibility settled
 
             // One clear notice for the whole-credential states instead of rows full of errors.
             if (unauthorized) { ShowNotice(BadCredsMsg); Log.Write($"refresh: credentials rejected ({_settings.AuthMode} mode)"); }
@@ -429,8 +493,9 @@ public sealed class MainForm : Form
             row.SetReleases(new List<ReleaseInfo>());
             row.SetState(installed, null, null, installed != null ? RowStatus.Installed : RowStatus.Unknown);
             row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.Id));
-            row.Visible = installed != null;
+            row.Visible = installed != null && !IsHidden(row.App.Id);
         }
+        ReindexList();
     }
 
     private async Task UpdateAllAsync()

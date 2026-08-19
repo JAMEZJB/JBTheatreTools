@@ -94,6 +94,12 @@ final class AppState: ObservableObject {
     /// confirmation. A short note is shown afterwards if any app couldn't be moved (e.g. it was open).
     @Published var relocationPrompt: RelocationPrompt?
     @Published var relocationNote: String?
+    /// App ids the user pinned to the top of the list (per-machine). Order within the pinned group
+    /// comes from `rows`, so a Set is enough.
+    @Published var pinnedIds: Set<String> = []
+    /// App ids the user hid from the list (per-machine). Hidden apps stay in `rows` (so unhiding
+    /// restores their position) but are filtered out of every display group.
+    @Published var hiddenIds: Set<String> = []
 
     private var selfInfo: SelfInfo?
     /// The download-relay base URL: an (invisible, settings-only) local override wins, else the
@@ -104,6 +110,8 @@ final class AppState: ObservableObject {
     private var explainerContinuation: CheckedContinuation<Void, Never>?
     private static let codeIDKey = "theatre.lastKeychainCodeID"
     private static let appOrderKey = "theatre.appOrder"
+    private static let pinnedKey = "theatre.pinnedApps"
+    private static let hiddenKey = "theatre.hiddenApps"
 
     var currentVersion: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
@@ -123,6 +131,9 @@ final class AppState: ObservableObject {
             }
             catalogOrder = catalog.apps.map(\.id)
             rows = Self.applyingSavedOrder(rows)
+            let known = Set(catalogOrder)
+            pinnedIds = Set(UserDefaults.standard.stringArray(forKey: Self.pinnedKey) ?? []).intersection(known)
+            hiddenIds = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? []).intersection(known)
         } catch {
             globalError = "Could not load app catalog: \(error.localizedDescription)"
         }
@@ -340,21 +351,72 @@ final class AppState: ObservableObject {
         UserDefaults.standard.set(rows.map(\.id), forKey: Self.appOrderKey)
     }
 
-    /// Whether the row can move up/down relative to its VISIBLE neighbours (hidden rows are skipped).
-    func canMove(_ id: String, up: Bool) -> Bool {
-        visibleNeighbour(of: id, up: up) != nil
+    // MARK: Display groups (pinned first, hidden filtered out)
+
+    func isPinned(_ id: String) -> Bool { pinnedIds.contains(id) }
+    func isHidden(_ id: String) -> Bool { hiddenIds.contains(id) }
+
+    /// Rows the user pinned to the top — visible, not hidden, in `rows` order.
+    var pinnedDisplayRows: [Row] { rows.filter { $0.isVisible && !hiddenIds.contains($0.id) && pinnedIds.contains($0.id) } }
+    /// The unpinned rows below — visible, not hidden, in `rows` order.
+    var mainDisplayRows: [Row] { rows.filter { $0.isVisible && !hiddenIds.contains($0.id) && !pinnedIds.contains($0.id) } }
+    /// All hidden apps (for the Settings "Hidden apps" list — shown regardless of reachability).
+    var hiddenRows: [Row] { rows.filter { hiddenIds.contains($0.id) } }
+    var hasHiddenApps: Bool { !hiddenIds.isEmpty }
+    /// True when at least one row is shown (drives the "everything's hidden" empty state).
+    var hasVisibleRows: Bool { !pinnedDisplayRows.isEmpty || !mainDisplayRows.isEmpty }
+
+    // MARK: Pin / hide toggles
+
+    func togglePin(_ id: String) {
+        if pinnedIds.contains(id) { pinnedIds.remove(id) } else { pinnedIds.insert(id) }
+        UserDefaults.standard.set(Array(pinnedIds), forKey: Self.pinnedKey)
+        AppLog.shared.log("\(pinnedIds.contains(id) ? "pinned" : "unpinned") \(id)")
     }
 
-    /// Moves the row past its nearest visible neighbour and persists the new order.
+    func setHidden(_ id: String, _ hidden: Bool) {
+        if hidden { hiddenIds.insert(id) } else { hiddenIds.remove(id) }
+        UserDefaults.standard.set(Array(hiddenIds), forKey: Self.hiddenKey)
+        AppLog.shared.log("\(hidden ? "hid" : "unhid") \(id)")
+    }
+
+    func showAllHidden() {
+        hiddenIds.removeAll()
+        UserDefaults.standard.set([String](), forKey: Self.hiddenKey)
+        AppLog.shared.log("unhid all apps")
+    }
+
+    // MARK: Reorder — drag (per group) and Move Up/Down
+
+    /// Drag reorder within one display group (pinned or main). Reassigns the group members among the
+    /// slots they already occupy in `rows`, so non-group rows stay put and render stays pinned-first.
+    func moveInList(pinned: Bool, from source: IndexSet, to destination: Int) {
+        var groupIds = (pinned ? pinnedDisplayRows : mainDisplayRows).map(\.id)
+        guard !groupIds.isEmpty else { return }
+        groupIds.move(fromOffsets: source, toOffset: destination)
+        let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        let slots = rows.indices.filter { pinned ? pinnedIds.contains(rows[$0].id) && rows[$0].isVisible && !hiddenIds.contains(rows[$0].id)
+                                                 : !pinnedIds.contains(rows[$0].id) && rows[$0].isVisible && !hiddenIds.contains(rows[$0].id) }
+        for (k, slot) in slots.enumerated() where k < groupIds.count {
+            if let row = byId[groupIds[k]] { rows[slot] = row }
+        }
+        persistOrder()
+        AppLog.shared.log("reordered \(pinned ? "pinned" : "main") list")
+    }
+
+    /// Whether the row can move up/down within its own display group (pinned/main), skipping hidden.
+    func canMove(_ id: String, up: Bool) -> Bool { groupNeighbour(of: id, up: up) != nil }
+
+    /// Moves the row past its nearest same-group neighbour and persists the new order.
     func moveRow(_ id: String, up: Bool) {
         guard let i = rows.firstIndex(where: { $0.id == id }),
-              let j = visibleNeighbour(of: id, up: up) else { return }
+              let j = groupNeighbour(of: id, up: up) else { return }
         rows.swapAt(i, j)
         persistOrder()
         AppLog.shared.log("moved \(id) \(up ? "up" : "down")")
     }
 
-    /// Restores the catalog's default order (Settings → Reset App Order).
+    /// Restores the catalog's default order (Settings → Reset App Order). Pins/hides are left as-is.
     func resetAppOrder() {
         UserDefaults.standard.removeObject(forKey: Self.appOrderKey)
         let index = Dictionary(uniqueKeysWithValues: catalogOrder.enumerated().map { ($1, $0) })
@@ -362,10 +424,14 @@ final class AppState: ObservableObject {
         AppLog.shared.log("app order reset to catalog default")
     }
 
-    private func visibleNeighbour(of id: String, up: Bool) -> Int? {
+    /// Nearest neighbour in the given direction that is visible, not hidden, and in the SAME pin group.
+    private func groupNeighbour(of id: String, up: Bool) -> Int? {
         guard let i = rows.firstIndex(where: { $0.id == id }) else { return nil }
+        let pinned = pinnedIds.contains(id)
         let range = up ? Array((0..<i).reversed()) : Array((i + 1)..<rows.count)
-        return range.first { rows[$0].isVisible }
+        return range.first {
+            rows[$0].isVisible && !hiddenIds.contains(rows[$0].id) && pinnedIds.contains(rows[$0].id) == pinned
+        }
     }
 
     // MARK: - Desktop alias & Dock pin (per-app, from the row menu; best-effort like win shortcuts)

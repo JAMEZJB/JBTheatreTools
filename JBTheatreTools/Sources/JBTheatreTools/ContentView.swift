@@ -148,25 +148,34 @@ struct ContentView: View {
                         : "No apps are reachable right now. Check the passphrase in Settings, or ask James.",
                        systemImage: "lock.fill", tint: .orange)
                 Spacer()
+            } else if !state.hasVisibleRows {
+                banner(state.hasHiddenApps
+                        ? "Every app is hidden. Show them again from Settings → Hidden apps."
+                        : "No apps to show yet. Press Refresh, or check your access in Settings.",
+                       systemImage: "eye.slash", tint: .gray)
+                Spacer()
             } else {
+                // Two groups: pinned apps float to the top; each group drag-reorders on its own
+                // (drag a row within its group; move a row between groups with Pin / Unpin).
                 List {
-                    // Only show installed apps + apps whose repo the token is confirmed to reach;
-                    // not-yet-checked / inaccessible not-installed rows stay hidden (no flicker).
-                    ForEach($state.rows) { $row in
-                        if row.isVisible {
-                            AppRowView(row: $row)
-                            if row.id != lastVisibleRowID { Divider() }
+                    if !state.pinnedDisplayRows.isEmpty {
+                        Section("Pinned") {
+                            ForEach(state.pinnedDisplayRows) { row in
+                                AppRowView(row: row)
+                            }
+                            .onMove { state.moveInList(pinned: true, from: $0, to: $1) }
                         }
+                    }
+                    Section {
+                        ForEach(state.mainDisplayRows) { row in
+                            AppRowView(row: row)
+                        }
+                        .onMove { state.moveInList(pinned: false, from: $0, to: $1) }
                     }
                 }
                 .listStyle(.plain)
             }
         }
-    }
-
-    /// id of the last *visible* row, so the inter-row divider isn't drawn after the final one.
-    private var lastVisibleRowID: String? {
-        state.rows.last { $0.isVisible }?.id
     }
 
     private func launcherBanner(_ version: String) -> some View {
@@ -248,14 +257,19 @@ struct ContentView: View {
 /// A single catalog row: name, blurb, version line, status badge, and action buttons.
 struct AppRowView: View {
     @EnvironmentObject var state: AppState
-    @Binding var row: AppState.Row
+    let row: AppState.Row
     @State private var confirmingUninstall = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             iconView
             VStack(alignment: .leading, spacing: 3) {
-                Text(row.displayName).font(.body).bold()
+                HStack(spacing: 5) {
+                    Text(row.displayName).font(.body).bold()
+                    if state.isPinned(row.id) {
+                        Image(systemName: "pin.fill").font(.caption2).foregroundStyle(Color.selectorBlue)
+                    }
+                }
                 Text(row.app.blurb).font(.caption).foregroundStyle(.secondary)
                 versionLine
                 if row.busy {
@@ -384,10 +398,14 @@ struct AppRowView: View {
     /// Overflow menu: reorder the row, install a specific (older) version, or uninstall.
     private var rowMenu: some View {
         Menu {
+            Button(state.isPinned(row.id) ? "Unpin from Top" : "Pin to Top") {
+                state.togglePin(row.id)
+            }
             Button("Move Up") { state.moveRow(row.id, up: true) }
                 .disabled(!state.canMove(row.id, up: true))
             Button("Move Down") { state.moveRow(row.id, up: false) }
                 .disabled(!state.canMove(row.id, up: false))
+            Button("Hide from List") { state.setHidden(row.id, true) }
             if !row.releases.isEmpty {
                 Divider()
                 Section("Install version") {

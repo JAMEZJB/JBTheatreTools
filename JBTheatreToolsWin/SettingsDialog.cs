@@ -241,6 +241,16 @@ public sealed class SettingsDialog : Form
         // Clears the saved order; MainForm re-applies (→ catalog order) when the dialog closes.
         resetOrder.Click += (_, _) => _settings.AppOrder.Clear();
 
+        var showHidden = new Button
+        {
+            Text = _settings.HiddenApps.Count > 0 ? $"Show Hidden Apps ({_settings.HiddenApps.Count})" : "Show Hidden Apps",
+            Location = new Point(228, 532),
+            AutoSize = true,
+            Enabled = _settings.HiddenApps.Count > 0,
+        };
+        // Un-hides everything; MainForm re-applies when the dialog closes.
+        showHidden.Click += (_, _) => { _settings.HiddenApps.Clear(); showHidden.Enabled = false; showHidden.Text = "Show Hidden Apps"; };
+
         var done = new Button
         {
             Text = "Done",
@@ -256,7 +266,7 @@ public sealed class SettingsDialog : Form
             _tokenState, _token, _save, _remove, _tokenLink, _tokenHelp,
             _serverState, _serverPass, _serverSave, _serverRemove,
             updatesHeading, _updateMode, _updateHint, versionLabel, _check, _viewRelease, _checkResult,
-            appearanceHeading, _appearance, closeHeading, _closeBehavior, _installToApps, openLog, resetOrder, done
+            appearanceHeading, _appearance, closeHeading, _closeBehavior, _installToApps, openLog, resetOrder, showHidden, done
         });
 
         UpdateServerState();

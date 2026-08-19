@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64. macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Ten apps listed; asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships).",
+  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64. macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Eleven apps listed; asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships).",
   "downloadServer": "https://jbtheatretools.jamesbreedon.com/ghapi",
   "self": {
     "owner": "JAMEZJB",
@@ -130,6 +130,18 @@
         "macos": "DMXTools-macOS.zip",
         "windows-x64": "DMXTools-Windows-x64.exe",
         "windows-arm64": "DMXTools-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "deskconvert",
+      "name": "Desk Convert",
+      "blurb": "Convert digital mixing-console show files between manufacturers (DiGiCo ↔ Yamaha).",
+      "owner": "JAMEZJB",
+      "repo": "DeskConvert",
+      "assets": {
+        "macos": "DeskConvert-macOS.zip",
+        "windows-x64": "DeskConvert-Windows-x64.exe",
+        "windows-arm64": "DeskConvert-Windows-arm64.exe"
       }
     }
   ]

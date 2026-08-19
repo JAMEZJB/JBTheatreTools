@@ -11,6 +11,8 @@ public sealed class AppSettings
     public bool InstallToApplications { get; set; }       // true: also add Start menu + Desktop shortcuts on install
     public string AuthMode { get; set; } = "";            // "token" (GitHub PAT) | "server" (relay, DEFAULT); "" = resolved in Load()
     public List<string> AppOrder { get; set; } = new();   // user's row order (app ids); empty = catalog order
+    public List<string> PinnedApps { get; set; } = new(); // app ids pinned to the top of the list
+    public List<string> HiddenApps { get; set; } = new(); // app ids hidden from the list
     public string ServerUrl { get; set; } = "";           // user-INVISIBLE relay-URL override (settings.json only, no UI); normally
                                                           // empty — the URL comes from the catalog's downloadServer
 

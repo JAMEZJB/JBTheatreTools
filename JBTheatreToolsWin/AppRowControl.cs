@@ -21,6 +21,7 @@ public sealed class AppRowControl : UserControl
 
     private readonly PictureBox _icon = new();
     private readonly Label _name = new();
+    private readonly Label _pin = new();
     private readonly Label _blurb = new();
     private readonly Label _version = new();
     private readonly Label _badge = new();
@@ -28,6 +29,7 @@ public sealed class AppRowControl : UserControl
     private readonly Button _launch = new();
     private readonly Button _more = new();
     private readonly ProgressBar _progress = new();
+    private Point _mouseDownScreen;
 
     public event Func<AppRowControl, Task>? InstallRequested;
     public event Func<AppRowControl, string, Task>? InstallVersionRequested;
@@ -42,6 +44,11 @@ public sealed class AppRowControl : UserControl
     /// <summary>Queries set by MainForm so the menu shows Add vs Remove correctly.</summary>
     public Func<AppRowControl, bool>? HasDesktopShortcut;
     public Func<AppRowControl, bool>? HasStartMenuShortcut;
+    /// <summary>Pin-to-top toggle from the ⋯ menu, and a query so the menu label + badge are correct.</summary>
+    public event Action<AppRowControl>? PinToggleRequested;
+    public Func<AppRowControl, bool>? IsPinnedQuery;
+    /// <summary>Hide-from-list request from the ⋯ menu.</summary>
+    public event Action<AppRowControl>? HideRequested;
 
     public AppRowControl(CatalogApp app)
     {
@@ -61,6 +68,12 @@ public sealed class AppRowControl : UserControl
         _name.AutoSize = true;
         _name.Location = new Point(64, 10);
         _name.UseMnemonic = false;
+
+        _pin.Text = "📌";
+        _pin.Font = new Font("Segoe UI Emoji", 8f);
+        _pin.AutoSize = true;
+        _pin.Location = new Point(_name.Right + 4, 12);
+        _pin.Visible = false;
 
         _blurb.Text = app.Blurb;
         _blurb.AutoSize = true;
@@ -92,22 +105,56 @@ public sealed class AppRowControl : UserControl
         _progress.Visible = false;
         _progress.Size = new Size(220, 6);
 
-        Controls.AddRange(new Control[] { _icon, _name, _blurb, _version, _badge, _install, _launch, _more, _progress });
+        Controls.AddRange(new Control[] { _icon, _name, _pin, _blurb, _version, _badge, _install, _launch, _more, _progress });
         Resize += (_, _) => LayoutControls();
+        // Drag-to-reorder: a press-and-drag anywhere on the row body (not on the buttons) starts a move.
+        foreach (Control c in new Control[] { this, _icon, _name, _blurb, _version })
+        {
+            c.MouseDown += Row_MouseDown;
+            c.MouseMove += Row_MouseMove;
+        }
         LayoutControls();
         UpdateVisual();
         UpdateIcon();
     }
 
+    /// <summary>Reflects the pinned state: shows the 📌 badge and repositions it after the name.</summary>
+    public void SetPinned(bool pinned)
+    {
+        _pin.Visible = pinned;
+        _pin.Location = new Point(_name.Right + 4, 12);
+    }
+
+    private void Row_MouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left) _mouseDownScreen = Cursor.Position;
+    }
+
+    private void Row_MouseMove(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        var d = SystemInformation.DragSize;
+        if (Math.Abs(Cursor.Position.X - _mouseDownScreen.X) < d.Width &&
+            Math.Abs(Cursor.Position.Y - _mouseDownScreen.Y) < d.Height) return;
+        DoDragDrop(this, DragDropEffects.Move);   // MainForm's list handles the drop + reorder
+    }
+
     private void ShowMoreMenu()
     {
         var menu = new ContextMenuStrip();
+        bool pinned = IsPinnedQuery?.Invoke(this) ?? false;
+        var pin = new ToolStripMenuItem(pinned ? "Unpin from top" : "Pin to top");
+        pin.Click += (_, _) => PinToggleRequested?.Invoke(this);
+        menu.Items.Add(pin);
         var moveUp = new ToolStripMenuItem("Move up") { Enabled = CanMove?.Invoke(this, true) ?? false };
         moveUp.Click += (_, _) => MoveRequested?.Invoke(this, true);
         var moveDown = new ToolStripMenuItem("Move down") { Enabled = CanMove?.Invoke(this, false) ?? false };
         moveDown.Click += (_, _) => MoveRequested?.Invoke(this, false);
         menu.Items.Add(moveUp);
         menu.Items.Add(moveDown);
+        var hide = new ToolStripMenuItem("Hide from list");
+        hide.Click += (_, _) => HideRequested?.Invoke(this);
+        menu.Items.Add(hide);
         if (Releases.Count > 0)
         {
             menu.Items.Add(new ToolStripSeparator());
@@ -149,6 +196,7 @@ public sealed class AppRowControl : UserControl
 
     private void LayoutControls()
     {
+        _pin.Location = new Point(_name.Right + 4, 12);
         int x = Width - 14;
         _more.Location = new Point(x - _more.Width, 28); x = _more.Left - 8;
         if (_launch.Visible) { _launch.Location = new Point(x - _launch.Width, 28); x = _launch.Left - 8; }
