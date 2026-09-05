@@ -49,6 +49,10 @@ struct CatalogApp: Decodable, Identifiable {
     let id: String
     let name: String
     let blurb: String
+    /// Optional one-line "what's new" for this app's current release (shown under the row when present).
+    let whatsNew: String?
+    /// Optional version the whatsNew line refers to (e.g. "v1.5.0"), used to label it "New in vX.Y.Z:".
+    let whatsNewVersion: String?
     let owner: String
     let repo: String
     /// Platform key → exact release-asset name. Keys: macos, windows-x64, windows-arm64.

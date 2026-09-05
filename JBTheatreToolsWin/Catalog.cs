@@ -56,6 +56,10 @@ public sealed class CatalogApp
     [JsonPropertyName("id")] public string Id { get; set; } = "";
     [JsonPropertyName("name")] public string Name { get; set; } = "";
     [JsonPropertyName("blurb")] public string Blurb { get; set; } = "";
+    /// <summary>Optional one-line "what's new" for this app's current release (shown under the row when present).</summary>
+    [JsonPropertyName("whatsNew")] public string? WhatsNew { get; set; }
+    /// <summary>Optional version the whatsNew line refers to (e.g. "v1.5.0"), used to label it "New in vX.Y.Z:".</summary>
+    [JsonPropertyName("whatsNewVersion")] public string? WhatsNewVersion { get; set; }
     [JsonPropertyName("owner")] public string Owner { get; set; } = "";
     [JsonPropertyName("repo")] public string Repo { get; set; } = "";
 

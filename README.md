@@ -30,6 +30,11 @@ built by James Breedon & Claude Code.
 | PSN Tools | `JAMEZJB/PSNTools` | `PSNTools-macOS.zip`, `PSNTools-Windows-{x64,arm64}.exe` |
 | DMX Tools | `JAMEZJB/DMXTools` | `DMXTools-macOS.zip`, `DMXTools-Windows-{x64,arm64}.exe` |
 | Desk Convert | `JAMEZJB/DeskConvert` | `DeskConvert-macOS.zip`, `DeskConvert-Windows-{x64,arm64}.exe` |
+| NDI Tools | `JAMEZJB/NDITools` | `NDITools-macOS.zip`, `NDITools-Windows-{x64,arm64}.exe` |
+| PowerCalc | `JAMEZJB/PowerCalc` | `PowerCalc-macOS.zip`, `PowerCalc-Windows-{x64,arm64}.exe` |
+| Show Control Tools | `JAMEZJB/ShowControlTools` | `ShowControlTools-macOS.zip`, `ShowControlTools-Windows-{x64,arm64}.exe` |
+| ShowNet Scanner | `JAMEZJB/ShowNetScanner` | `ShowNetScanner-macOS.zip`, `ShowNetScanner-Windows-{x64,arm64}.exe` |
+| Timecode Tools | `JAMEZJB/TimecodeTools` | `TimecodeTools-macOS.zip`, `TimecodeTools-Windows-{x64,arm64}.exe` |
 
 Asset names differ per app, so the launcher resolves the right one for the current OS/arch. An app listed
 ahead of its first release shows "No release" and becomes installable once a build ships.

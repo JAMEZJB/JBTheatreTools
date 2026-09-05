@@ -24,6 +24,7 @@ public sealed class AppRowControl : UserControl
     private readonly Label _pin = new();
     private readonly Label _blurb = new();
     private readonly Label _version = new();
+    private readonly Label _whatsNew = new();
     private readonly Label _badge = new();
     private readonly Button _install = new();
     private readonly Button _launch = new();
@@ -53,7 +54,8 @@ public sealed class AppRowControl : UserControl
     public AppRowControl(CatalogApp app)
     {
         App = app;
-        Height = 82;
+        bool hasWhatsNew = !string.IsNullOrEmpty(app.WhatsNew);
+        Height = hasWhatsNew ? 100 : 82;   // taller only when a "what's new" line is shown
         Margin = new Padding(0);
 
         _icon.Size = new Size(40, 40);
@@ -83,6 +85,18 @@ public sealed class AppRowControl : UserControl
         _version.AutoSize = true;
         _version.Location = new Point(64, 52);
 
+        // One-line "what's new" for the app's current release; only present when the catalog carries it.
+        _whatsNew.AutoSize = true;
+        _whatsNew.Location = new Point(64, 68);
+        _whatsNew.UseMnemonic = false;
+        _whatsNew.Font = new Font(Font.FontFamily, 8.25f);
+        _whatsNew.Visible = hasWhatsNew;
+        if (hasWhatsNew)
+        {
+            string label = string.IsNullOrEmpty(app.WhatsNewVersion) ? "What's new:" : $"New in {app.WhatsNewVersion}:";
+            _whatsNew.Text = $"{label} {app.WhatsNew}";
+        }
+
         _badge.AutoSize = true;
         _badge.Font = new Font(Font.FontFamily, 8.5f, FontStyle.Bold);
 
@@ -105,10 +119,10 @@ public sealed class AppRowControl : UserControl
         _progress.Visible = false;
         _progress.Size = new Size(220, 6);
 
-        Controls.AddRange(new Control[] { _icon, _name, _pin, _blurb, _version, _badge, _install, _launch, _more, _progress });
+        Controls.AddRange(new Control[] { _icon, _name, _pin, _blurb, _version, _whatsNew, _badge, _install, _launch, _more, _progress });
         Resize += (_, _) => LayoutControls();
         // Drag-to-reorder: a press-and-drag anywhere on the row body (not on the buttons) starts a move.
-        foreach (Control c in new Control[] { this, _icon, _name, _blurb, _version })
+        foreach (Control c in new Control[] { this, _icon, _name, _blurb, _version, _whatsNew })
         {
             c.MouseDown += Row_MouseDown;
             c.MouseMove += Row_MouseMove;
@@ -202,7 +216,7 @@ public sealed class AppRowControl : UserControl
         if (_launch.Visible) { _launch.Location = new Point(x - _launch.Width, 28); x = _launch.Left - 8; }
         if (_install.Visible) { _install.Location = new Point(x - _install.Width, 28); x = _install.Left - 8; }
         _badge.Location = new Point(x - _badge.Width - 4, 32);
-        _progress.Location = new Point(14, 70);
+        _progress.Location = new Point(14, Height - 12);   // pinned to the bottom (row height varies with the what's-new line)
     }
 
     public void SetChecking()
@@ -353,5 +367,6 @@ public sealed class AppRowControl : UserControl
         _name.ForeColor = Theme.Fg(dark);
         _blurb.ForeColor = Theme.Sub(dark);
         _version.ForeColor = Theme.Sub(dark);
+        _whatsNew.ForeColor = Theme.Accent;
     }
 }

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64. macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Eleven apps listed; asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships).",
+  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64. macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Sixteen apps listed; Each app entry may carry optional `whatsNew` + `whatsNewVersion` strings (a one-line what's-new for its current release, shown under the app in both launchers; omitted for apps with no release yet). asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships).",
   "downloadServer": "https://jbtheatretools.jamesbreedon.com/ghapi",
   "self": {
     "owner": "JAMEZJB",
@@ -9,13 +9,17 @@
       "macos": "JBTheatreTools-macOS.zip",
       "windows-x64": "JBTheatreTools-Windows-x64.exe",
       "windows-arm64": "JBTheatreTools-Windows-arm64.exe"
-    }
+    },
+    "whatsNew": "Apps now show what's new in their latest version.",
+    "whatsNewVersion": "v1.14.0"
   },
   "apps": [
     {
       "id": "helocontrol",
       "name": "HELO Control",
       "blurb": "Control AJA HELO stream / record encoders.",
+      "whatsNew": "Start/stop streaming from the app, and over OSC.",
+      "whatsNewVersion": "v1.5.0",
       "owner": "JAMEZJB",
       "repo": "HeloControl",
       "assets": {
@@ -28,6 +32,8 @@
       "id": "ciscoswitchtools",
       "name": "Cisco Switch Tools",
       "blurb": "Back up & manage Cisco CBS350 / SG switches over SSH.",
+      "whatsNew": "Custom output folders are now sanitised before writing.",
+      "whatsNewVersion": "v1.4.3",
       "owner": "JAMEZJB",
       "repo": "CiscoSwitchTools",
       "assets": {
@@ -40,6 +46,8 @@
       "id": "ciscobrotherlabels",
       "name": "Cisco Brother Labels",
       "blurb": "Generate Brother P-touch port labels from Cisco switch configs.",
+      "whatsNew": "Warns when labels are dropped or a file has none.",
+      "whatsNewVersion": "v1.0.9",
       "owner": "JAMEZJB",
       "repo": "CiscoBrotherLabels",
       "assets": {
@@ -52,6 +60,8 @@
       "id": "machineinventory",
       "name": "Machine Inventory",
       "blurb": "Collect hardware / software inventory from show machines.",
+      "whatsNew": "Maintenance and reliability release; no functional changes.",
+      "whatsNewVersion": "v1.2.0",
       "owner": "JAMEZJB",
       "repo": "ShowMachinesInventory",
       "assets": {
@@ -64,6 +74,8 @@
       "id": "networkportmap",
       "name": "Network Port Map",
       "blurb": "Map network switch ports to the devices plugged into them.",
+      "whatsNew": "Maintenance and build-hardening release; no functional changes.",
+      "whatsNewVersion": "v1.6.3",
       "owner": "JAMEZJB",
       "repo": "NetworkPortMap",
       "assets": {
@@ -76,6 +88,8 @@
       "id": "projectorcontrol",
       "name": "Projector Control",
       "blurb": "Control theatre projectors over PJLink (Panasonic / Epson).",
+      "whatsNew": "Switch a projector's input source from the app.",
+      "whatsNewVersion": "v1.7.0",
       "owner": "JAMEZJB",
       "repo": "ProjectorControl",
       "assets": {
@@ -88,6 +102,8 @@
       "id": "showdashboard",
       "name": "Show Dashboard",
       "blurb": "Generate a Node-RED show-control dashboard for a production.",
+      "whatsNew": "New L-Acoustics amp control, plus custom device groups.",
+      "whatsNewVersion": "v1.11.0",
       "owner": "JAMEZJB",
       "repo": "ShowDashboard",
       "assets": {
@@ -100,6 +116,8 @@
       "id": "showhandbook",
       "name": "Show Handbook",
       "blurb": "Generate a per-show video handbook document.",
+      "whatsNew": "Cleaner page breaks and fully generic boilerplate.",
+      "whatsNewVersion": "v1.17.0",
       "owner": "JAMEZJB",
       "repo": "ShowHandbook",
       "assets": {
@@ -112,6 +130,8 @@
       "id": "psntools",
       "name": "PSN Tools",
       "blurb": "Monitor, visualise, generate & record PosiStageNet (PSN) tracking data.",
+      "whatsNew": "Change any setting while it's running — no restart.",
+      "whatsNewVersion": "v1.2.3",
       "owner": "JAMEZJB",
       "repo": "PSNTools",
       "assets": {
@@ -124,6 +144,8 @@
       "id": "dmxtools",
       "name": "DMX Tools",
       "blurb": "Monitor, generate & translate Art-Net + sACN lighting data.",
+      "whatsNew": "Edit settings live; fixed sACN→Art-Net translation.",
+      "whatsNewVersion": "v1.1.0",
       "owner": "JAMEZJB",
       "repo": "DMXTools",
       "assets": {
@@ -136,12 +158,74 @@
       "id": "deskconvert",
       "name": "Desk Convert",
       "blurb": "Convert digital mixing-console show files between manufacturers (DiGiCo ↔ Yamaha).",
+      "whatsNew": "Now writes Yamaha bus names; fixed a startup crash.",
+      "whatsNewVersion": "v0.3.1",
       "owner": "JAMEZJB",
       "repo": "DeskConvert",
       "assets": {
         "macos": "DeskConvert-macOS.zip",
         "windows-x64": "DeskConvert-Windows-x64.exe",
         "windows-arm64": "DeskConvert-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "nditools",
+      "name": "NDI Tools",
+      "blurb": "Discover NDI video sources on the network and check their health & bandwidth.",
+      "owner": "JAMEZJB",
+      "repo": "NDITools",
+      "assets": {
+        "macos": "NDITools-macOS.zip",
+        "windows-x64": "NDITools-Windows-x64.exe",
+        "windows-arm64": "NDITools-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "powercalc",
+      "name": "PowerCalc",
+      "blurb": "Plan power distribution, balance the phases & print a load sheet.",
+      "owner": "JAMEZJB",
+      "repo": "PowerCalc",
+      "assets": {
+        "macos": "PowerCalc-macOS.zip",
+        "windows-x64": "PowerCalc-Windows-x64.exe",
+        "windows-arm64": "PowerCalc-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "showcontroltools",
+      "name": "Show Control Tools",
+      "blurb": "Monitor & translate OSC, MIDI and MSC show-control messages.",
+      "owner": "JAMEZJB",
+      "repo": "ShowControlTools",
+      "assets": {
+        "macos": "ShowControlTools-macOS.zip",
+        "windows-x64": "ShowControlTools-Windows-x64.exe",
+        "windows-arm64": "ShowControlTools-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "shownetscanner",
+      "name": "ShowNet Scanner",
+      "blurb": "Discover every device on a show network in one live inventory.",
+      "owner": "JAMEZJB",
+      "repo": "ShowNetScanner",
+      "assets": {
+        "macos": "ShowNetScanner-macOS.zip",
+        "windows-x64": "ShowNetScanner-Windows-x64.exe",
+        "windows-arm64": "ShowNetScanner-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "timecodetools",
+      "name": "Timecode Tools",
+      "blurb": "Monitor, generate, convert & compare LTC, MTC and Art-Net timecode.",
+      "owner": "JAMEZJB",
+      "repo": "TimecodeTools",
+      "assets": {
+        "macos": "TimecodeTools-macOS.zip",
+        "windows-x64": "TimecodeTools-Windows-x64.exe",
+        "windows-arm64": "TimecodeTools-Windows-arm64.exe"
       }
     }
   ]

@@ -272,6 +272,7 @@ struct AppRowView: View {
                 }
                 Text(row.app.blurb).font(.caption).foregroundStyle(.secondary)
                 versionLine
+                whatsNewLine
                 if row.busy {
                     ProgressView(value: row.progress)
                         .frame(maxWidth: 240)
@@ -337,6 +338,27 @@ struct AppRowView: View {
         }
         .font(.caption2)
         .foregroundStyle(.secondary)
+    }
+
+    /// One-line "what's new" for the app's current release, shown only when the catalog carries it.
+    /// Labelled "New in vX.Y.Z:" when a version is present, else "What's new:".
+    @ViewBuilder
+    private var whatsNewLine: some View {
+        if let note = row.app.whatsNew, !note.isEmpty {
+            (
+                Text(whatsNewLabel).fontWeight(.semibold)
+                + Text(" ") + Text(note)
+            )
+            .font(.caption2)
+            .foregroundStyle(Color.selectorBlue)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var whatsNewLabel: String {
+        if let v = row.app.whatsNewVersion, !v.isEmpty { return "New in \(v):" }
+        return "What's new:"
     }
 
     @ViewBuilder
