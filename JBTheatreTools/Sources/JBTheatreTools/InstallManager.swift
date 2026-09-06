@@ -18,6 +18,9 @@ struct InstalledRecord: Codable {
     /// Path of the Finder alias this launcher created on the user's Desktop (nil = none).
     /// Optional so manifests written by older versions decode unchanged.
     var desktopAlias: String?
+    /// Which variant (e.g. "standard" / "full") is installed, for apps that ship variants.
+    /// Optional so manifests written by older versions decode unchanged (nil = single-variant app).
+    var variant: String?
 }
 
 enum InstallError: LocalizedError {
@@ -113,7 +116,7 @@ final class InstallManager {
     /// When `toApplications` is true the bundle is placed in the Applications folder (so it shows in
     /// Launchpad/Spotlight and launches without this launcher); otherwise in the managed apps dir.
     @discardableResult
-    func install(app: CatalogApp, version: String, downloadedZip: URL, toApplications: Bool) throws -> URL {
+    func install(app: CatalogApp, version: String, downloadedZip: URL, toApplications: Bool, variant: String? = nil) throws -> URL {
         let extractDir = cacheDir.appendingPathComponent("extract-\(app.id)", isDirectory: true)
         try? fm.removeItem(at: extractDir)
         try fm.createDirectory(at: extractDir, withIntermediateDirectories: true)
@@ -133,9 +136,18 @@ final class InstallManager {
         try fm.moveItem(at: bundle, to: dest)
 
         var m = manifest()
-        m[app.id] = InstalledRecord(version: version, path: dest.path, installedAt: Self.isoNow())
+        // Preserve any desktop-alias path already recorded; update version/path/variant.
+        let priorAlias = m[app.id]?.desktopAlias
+        m[app.id] = InstalledRecord(version: version, path: dest.path, installedAt: Self.isoNow(),
+                                    desktopAlias: priorAlias, variant: variant)
         writeManifest(m)
         return dest
+    }
+
+    /// The installed variant id for an app that ships variants (nil if not installed or single-variant).
+    func installedVariant(_ appId: String) -> String? {
+        guard let rec = manifest()[appId], fm.fileExists(atPath: rec.path) else { return nil }
+        return rec.variant
     }
 
     /// Where "install to the Applications folder" puts apps: `/Applications` when it's writable (admin

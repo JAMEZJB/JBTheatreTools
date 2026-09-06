@@ -25,7 +25,10 @@ public sealed class AppRowControl : UserControl
     private readonly Label _blurb = new();
     private readonly Label _version = new();
     private readonly Label _whatsNew = new();
+    private readonly ComboBox _variant = new();
     private readonly Label _badge = new();
+    private bool _compact;
+    private bool _suppressVariantEvent;
     private readonly Button _install = new();
     private readonly Button _launch = new();
     private readonly Button _more = new();
@@ -50,12 +53,21 @@ public sealed class AppRowControl : UserControl
     public Func<AppRowControl, bool>? IsPinnedQuery;
     /// <summary>Hide-from-list request from the ⋯ menu.</summary>
     public event Action<AppRowControl>? HideRequested;
+    /// <summary>User picked a different variant (Standard/Full) — carries the chosen variant id.</summary>
+    public event Action<AppRowControl, string>? VariantChangeRequested;
+    /// <summary>Set by MainForm: the currently-selected variant id for this app.</summary>
+    public Func<AppRowControl, string?>? SelectedVariantQuery;
+    /// <summary>Set by MainForm: true when the selected variant differs from the installed one.</summary>
+    public Func<AppRowControl, bool>? VariantSwitchQuery;
+    /// <summary>Set by MainForm: the installed variant's label (for the version line), or null.</summary>
+    public Func<AppRowControl, string?>? InstalledVariantLabelQuery;
 
     public AppRowControl(CatalogApp app)
     {
         App = app;
         bool hasWhatsNew = !string.IsNullOrEmpty(app.WhatsNew);
-        Height = hasWhatsNew ? 100 : 82;   // taller only when a "what's new" line is shown
+        int variantY = hasWhatsNew ? 86 : 68;   // y of the variant toggle, below the version / what's-new lines
+        Height = app.HasVariants ? variantY + 28 : (hasWhatsNew ? 100 : 82);
         Margin = new Padding(0);
 
         _icon.Size = new Size(40, 40);
@@ -97,6 +109,25 @@ public sealed class AppRowControl : UserControl
             _whatsNew.Text = $"{label} {app.WhatsNew}";
         }
 
+        // Variant toggle (Standard/Full) — only for apps that ship more than one download.
+        _variant.DropDownStyle = ComboBoxStyle.DropDownList;
+        _variant.Font = new Font(Font.FontFamily, 8.25f);
+        _variant.Width = 120;
+        _variant.Location = new Point(64, variantY);
+        _variant.Visible = app.HasVariants;
+        if (app.HasVariants && app.Variants != null)
+        {
+            foreach (var v in app.Variants) _variant.Items.Add(v.Label);
+            if (_variant.Items.Count > 0) { _suppressVariantEvent = true; _variant.SelectedIndex = 0; _suppressVariantEvent = false; }
+            _variant.SelectedIndexChanged += (_, _) =>
+            {
+                if (_suppressVariantEvent) return;
+                int idx = _variant.SelectedIndex;
+                if (idx >= 0 && app.Variants != null && idx < app.Variants.Count)
+                    VariantChangeRequested?.Invoke(this, app.Variants[idx].Id);
+            };
+        }
+
         _badge.AutoSize = true;
         _badge.Font = new Font(Font.FontFamily, 8.5f, FontStyle.Bold);
 
@@ -119,13 +150,16 @@ public sealed class AppRowControl : UserControl
         _progress.Visible = false;
         _progress.Size = new Size(220, 6);
 
-        Controls.AddRange(new Control[] { _icon, _name, _pin, _blurb, _version, _whatsNew, _badge, _install, _launch, _more, _progress });
+        Controls.AddRange(new Control[] { _icon, _name, _pin, _blurb, _version, _whatsNew, _variant, _badge, _install, _launch, _more, _progress });
         Resize += (_, _) => LayoutControls();
-        // Drag-to-reorder: a press-and-drag anywhere on the row body (not on the buttons) starts a move.
+        // Drag-to-reorder (list mode): a press-and-drag on the row body starts a move. Right-click opens
+        // the action menu (needed for grid tiles); double-click launches/installs.
         foreach (Control c in new Control[] { this, _icon, _name, _blurb, _version, _whatsNew })
         {
             c.MouseDown += Row_MouseDown;
             c.MouseMove += Row_MouseMove;
+            c.MouseUp += Row_RightClick;
+            c.DoubleClick += (_, _) => PrimaryAction();
         }
         LayoutControls();
         UpdateVisual();
@@ -153,6 +187,35 @@ public sealed class AppRowControl : UserControl
         DoDragDrop(this, DragDropEffects.Move);   // MainForm's list handles the drop + reorder
     }
 
+    private void Row_RightClick(object? sender, MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Right) ShowMoreMenu();
+    }
+
+    /// <summary>Double-click / grid-tile click: install the selected variant when it differs from the
+    /// installed one; else launch when installed; else install (when the status allows it).</summary>
+    private void PrimaryAction()
+    {
+        if (!Enabled) return;
+        if ((VariantSwitchQuery?.Invoke(this) ?? false) && InstallRequested != null) { _ = InstallRequested(this); return; }
+        if (Installed != null) { LaunchRequested?.Invoke(this); return; }
+        if (Status is RowStatus.NotInstalled or RowStatus.UpdateAvailable or RowStatus.Error && InstallRequested != null)
+            _ = InstallRequested(this);
+    }
+
+    /// <summary>Sets the variant dropdown's selection without firing the change event (used by MainForm
+    /// to reflect the persisted choice).</summary>
+    public void SetSelectedVariant(string? variantId)
+    {
+        if (!App.HasVariants || App.Variants == null) return;
+        int idx = App.Variants.FindIndex(v => v.Id == variantId);
+        if (idx < 0) idx = 0;
+        if (_variant.SelectedIndex == idx) return;
+        _suppressVariantEvent = true;
+        _variant.SelectedIndex = idx;
+        _suppressVariantEvent = false;
+    }
+
     private void ShowMoreMenu()
     {
         var menu = new ContextMenuStrip();
@@ -169,6 +232,28 @@ public sealed class AppRowControl : UserControl
         var hide = new ToolStripMenuItem("Hide from list");
         hide.Click += (_, _) => HideRequested?.Invoke(this);
         menu.Items.Add(hide);
+        if (App.HasVariants && App.Variants != null)
+        {
+            menu.Items.Add(new ToolStripSeparator());
+            var sel = SelectedVariantQuery?.Invoke(this);
+            var variant = new ToolStripMenuItem("Variant");
+            foreach (var v in App.Variants)
+            {
+                var vid = v.Id;
+                var item = new ToolStripMenuItem(v.Label) { Checked = v.Id == sel };
+                item.Click += (_, _) => VariantChangeRequested?.Invoke(this, vid);
+                variant.DropDownItems.Add(item);
+            }
+            menu.Items.Add(variant);
+            // When the selected variant isn't the installed one, offer to install it.
+            if (VariantSwitchQuery?.Invoke(this) ?? false)
+            {
+                var lbl = App.Variants.FirstOrDefault(v => v.Id == sel)?.Label ?? "variant";
+                var switchItem = new ToolStripMenuItem($"Install {lbl}");
+                switchItem.Click += async (_, _) => { if (InstallRequested != null) await InstallRequested(this); };
+                menu.Items.Add(switchItem);
+            }
+        }
         if (Releases.Count > 0)
         {
             menu.Items.Add(new ToolStripSeparator());
@@ -205,11 +290,12 @@ public sealed class AppRowControl : UserControl
             uninstall.Click += (_, _) => UninstallRequested?.Invoke(this);
             menu.Items.Add(uninstall);
         }
-        if (menu.Items.Count > 0) menu.Show(_more, new Point(0, _more.Height));
+        if (menu.Items.Count > 0) menu.Show(Cursor.Position);
     }
 
     private void LayoutControls()
     {
+        if (_compact) { LayoutCompact(); return; }
         _pin.Location = new Point(_name.Right + 4, 12);
         int x = Width - 14;
         _more.Location = new Point(x - _more.Width, 28); x = _more.Left - 8;
@@ -217,6 +303,63 @@ public sealed class AppRowControl : UserControl
         if (_install.Visible) { _install.Location = new Point(x - _install.Width, 28); x = _install.Left - 8; }
         _badge.Location = new Point(x - _badge.Width - 4, 32);
         _progress.Location = new Point(14, Height - 12);   // pinned to the bottom (row height varies with the what's-new line)
+    }
+
+    /// <summary>Grid-tile layout: a large centred icon, the name below it, and a compact status line.
+    /// Per-app actions live in the right-click menu; a double-click launches or installs.</summary>
+    private void LayoutCompact()
+    {
+        int w = Width;
+        _icon.Size = new Size(48, 48);
+        _icon.Location = new Point((w - 48) / 2, 12);
+        _name.Location = new Point(6, 64);
+        _name.Size = new Size(w - 12, 32);
+        _badge.Location = new Point(6, 100);
+        _badge.Size = new Size(w - 12, 16);
+        _pin.Location = new Point(w - _pin.Width - 6, 6);
+        _progress.Location = new Point(10, Height - 12);
+        _progress.Width = w - 20;
+        _blurb.Visible = _version.Visible = _whatsNew.Visible = false;
+        _install.Visible = _launch.Visible = _more.Visible = _variant.Visible = false;
+    }
+
+    /// <summary>Switches the row between the detailed list layout and a compact grid tile.</summary>
+    public void SetCompact(bool compact)
+    {
+        _compact = compact;
+        if (compact)
+        {
+            Margin = new Padding(6);
+            Size = new Size(132, 140);
+            _name.AutoSize = false;
+            _name.TextAlign = ContentAlignment.TopCenter;
+            _badge.AutoSize = false;
+            _badge.TextAlign = ContentAlignment.MiddleCenter;
+        }
+        else
+        {
+            Margin = new Padding(0);
+            _icon.Size = new Size(40, 40);
+            _icon.Location = new Point(14, 21);
+            _name.AutoSize = true;
+            _name.TextAlign = ContentAlignment.TopLeft;
+            _name.Location = new Point(64, 10);
+            _badge.AutoSize = true;
+            _badge.TextAlign = ContentAlignment.TopLeft;
+            _blurb.Visible = _version.Visible = true;
+            _whatsNew.Visible = !string.IsNullOrEmpty(App.WhatsNew);
+            _variant.Visible = App.HasVariants;
+            bool hasWhatsNew = !string.IsNullOrEmpty(App.WhatsNew);
+            int variantY = hasWhatsNew ? 86 : 68;
+            Height = App.HasVariants ? variantY + 28 : (hasWhatsNew ? 100 : 82);
+        }
+        UpdateVisual();
+    }
+
+    private string? SelectedVariantLabel()
+    {
+        var sel = SelectedVariantQuery?.Invoke(this);
+        return App.Variants?.FirstOrDefault(v => v.Id == sel)?.Label;
     }
 
     public void SetChecking()
@@ -333,7 +476,10 @@ public sealed class AppRowControl : UserControl
 
     private void UpdateVisual()
     {
-        _version.Text = $"Installed: {Installed ?? "—"}    ·    Latest: {Latest ?? "—"}";
+        if (App.HasVariants) SetSelectedVariant(SelectedVariantQuery?.Invoke(this));
+        var instVar = InstalledVariantLabelQuery?.Invoke(this);
+        string instText = Installed == null ? "—" : (instVar != null ? $"{Installed} ({instVar})" : Installed);
+        _version.Text = $"Installed: {instText}    ·    Latest: {Latest ?? "—"}";
 
         (string text, Color color) = Status switch
         {
@@ -351,8 +497,12 @@ public sealed class AppRowControl : UserControl
         _badge.ForeColor = color;
 
         bool installed = Installed != null;
-        _install.Visible = Status is RowStatus.NotInstalled or RowStatus.UpdateAvailable or RowStatus.Error;
-        _install.Text = Status == RowStatus.UpdateAvailable ? "Update" : (installed ? "Retry" : "Install");
+        bool variantSwitch = VariantSwitchQuery?.Invoke(this) ?? false;
+        _install.Visible = Status is RowStatus.NotInstalled or RowStatus.UpdateAvailable or RowStatus.Error || variantSwitch;
+        _install.Text = Status == RowStatus.UpdateAvailable ? "Update"
+                        : (variantSwitch && Status is not (RowStatus.NotInstalled or RowStatus.Error))
+                            ? $"Install {SelectedVariantLabel() ?? "variant"}"
+                            : (installed ? "Retry" : "Install");
         _install.Enabled = LatestAssetId != null;
         // Launch is available whenever something is installed, even before a refresh has run.
         _launch.Visible = installed;
@@ -368,5 +518,7 @@ public sealed class AppRowControl : UserControl
         _blurb.ForeColor = Theme.Sub(dark);
         _version.ForeColor = Theme.Sub(dark);
         _whatsNew.ForeColor = Theme.Accent;
+        _variant.BackColor = Theme.Card(dark);
+        _variant.ForeColor = Theme.Fg(dark);
     }
 }

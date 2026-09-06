@@ -15,6 +15,7 @@ public sealed class MainForm : Form
     private readonly Label _updateBannerText = new();
     private readonly Button _refresh = new();
     private readonly Button _updateAll = new();
+    private readonly Button _viewToggle = new();
     private readonly Button _settingsBtn = new();
     private readonly Label _title = new();
     private readonly Label _subtitle = new();
@@ -119,17 +120,22 @@ public sealed class MainForm : Form
         _updateAll.Visible = false;
         _updateAll.Click += async (_, _) => await UpdateAllAsync();
 
+        _viewToggle.AutoSize = true;
+        _viewToggle.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _viewToggle.Click += (_, _) => ToggleViewMode();
+
         _settingsBtn.Text = "Settings";
         _settingsBtn.AutoSize = true;
         _settingsBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _settingsBtn.Click += (_, _) => OpenSettings();
 
-        header.Controls.AddRange(new Control[] { _title, _subtitle, _updateAll, _refresh, _settingsBtn });
+        header.Controls.AddRange(new Control[] { _title, _subtitle, _updateAll, _viewToggle, _refresh, _settingsBtn });
         header.Resize += (_, _) =>
         {
             _settingsBtn.Location = new Point(header.Width - _settingsBtn.Width - 14, 16);
             _refresh.Location = new Point(_settingsBtn.Left - _refresh.Width - 8, 16);
-            _updateAll.Location = new Point(_refresh.Left - _updateAll.Width - 8, 16);
+            _viewToggle.Location = new Point(_refresh.Left - _viewToggle.Width - 8, 16);
+            _updateAll.Location = new Point(_viewToggle.Left - _updateAll.Width - 8, 16);
         };
         return header;
     }
@@ -256,6 +262,11 @@ public sealed class MainForm : Form
             row.PinToggleRequested += TogglePin;
             row.HideRequested += HideRow;
             row.IsPinnedQuery = r => IsPinned(r.App.Id);
+            row.VariantChangeRequested += (r, vid) => SetVariant(r, vid);
+            row.SelectedVariantQuery = r => SelectedVariant(r.App);
+            row.VariantSwitchQuery = VariantSwitchAvailable;
+            row.InstalledVariantLabelQuery = InstalledVariantLabel;
+            row.SetSelectedVariant(SelectedVariant(app));
             var installed = InstallManager.Shared.InstalledVersion(app.Id);
             row.SetState(installed, null, null, installed != null ? RowStatus.Installed : RowStatus.Unknown);
             row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(app.Id));
@@ -269,9 +280,11 @@ public sealed class MainForm : Form
         }
         _list.Resize += (_, _) =>
         {
+            if (_settings.ViewMode == "grid") return;   // grid tiles are fixed-size; don't stretch them
             foreach (var r in _rows) r.Width = _list.ClientSize.Width - 30;
         };
         ApplyRowOrder();
+        ApplyViewMode();
     }
 
     // --- Row ordering (per-machine, persisted in settings.json) ---
@@ -302,6 +315,78 @@ public sealed class MainForm : Form
 
     private bool IsPinned(string id) => _settings.PinnedApps.Contains(id);
     private bool IsHidden(string id) => _settings.HiddenApps.Contains(id);
+
+    // ── Variants (apps that ship more than one download, e.g. NDI Standard/Full) ──────────────
+
+    /// <summary>The selected variant id for an app (persisted), defaulting to its first variant.</summary>
+    private string? SelectedVariant(CatalogApp app)
+    {
+        if (!app.HasVariants || app.Variants == null) return null;
+        if (_settings.AppVariants.TryGetValue(app.Id, out var v) && app.Variants.Any(x => x.Id == v)) return v;
+        return app.Variants.FirstOrDefault()?.Id;
+    }
+
+    /// <summary>Changes the selected variant, persists it, and re-resolves the row's asset/status.</summary>
+    private void SetVariant(AppRowControl row, string variantId)
+    {
+        _settings.AppVariants[row.App.Id] = variantId;
+        _settings.Save();
+        row.SetSelectedVariant(variantId);
+        RecomputeRow(row);
+        Log.Write($"variant for {row.App.Id} → {variantId}");
+    }
+
+    /// <summary>Re-derives a row's latest-asset id + status from its cached releases (after a variant change).</summary>
+    private void RecomputeRow(AppRowControl row)
+    {
+        var latest = Versions.Latest(row.Releases);
+        if (latest == null) { row.SetState(row.Installed, row.Latest, null, row.Status); return; }
+        var asset = latest.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAsset(SelectedVariant(row.App)));
+        row.SetState(row.Installed, latest.TagName, asset?.Id, ComputeStatus(row.Installed, latest.TagName, asset != null));
+    }
+
+    /// <summary>True when a variant app has a different variant selected than the one installed.</summary>
+    private bool VariantSwitchAvailable(AppRowControl row)
+    {
+        if (!row.App.HasVariants || row.Installed == null) return false;
+        var inst = InstallManager.Shared.InstalledVariant(row.App.Id) ?? row.App.Variants?.FirstOrDefault()?.Id;
+        return inst != SelectedVariant(row.App);
+    }
+
+    /// <summary>The installed variant's label for a row (for the version line), or null.</summary>
+    private string? InstalledVariantLabel(AppRowControl row)
+    {
+        if (!row.App.HasVariants || row.App.Variants == null) return null;
+        var inst = InstallManager.Shared.InstalledVariant(row.App.Id) ?? row.App.Variants.FirstOrDefault()?.Id;
+        return row.App.Variants.FirstOrDefault(v => v.Id == inst)?.Label;
+    }
+
+    // ── View mode (detailed list vs compact icon grid) ───────────────────────────────────────
+
+    private void ToggleViewMode()
+    {
+        _settings.ViewMode = _settings.ViewMode == "grid" ? "list" : "grid";
+        _settings.Save();
+        ApplyViewMode();
+    }
+
+    /// <summary>Applies the current view mode: list = full-width detailed rows; grid = fixed-size tiles
+    /// that wrap into a grid.</summary>
+    private void ApplyViewMode()
+    {
+        bool grid = _settings.ViewMode == "grid";
+        _viewToggle.Text = grid ? "List view" : "Grid view";
+        _list.SuspendLayout();
+        _list.WrapContents = grid;
+        _list.FlowDirection = grid ? FlowDirection.LeftToRight : FlowDirection.TopDown;
+        foreach (var r in _rows)
+        {
+            r.SetCompact(grid);
+            if (!grid) r.Width = _list.ClientSize.Width - 30;
+        }
+        _list.ResumeLayout();
+        ReindexList();
+    }
 
     /// <summary>True when the row has a same-group VISIBLE neighbour in that direction.</summary>
     private bool CanMoveRow(AppRowControl row, bool up) => GroupNeighbour(row, up) >= 0;
@@ -432,7 +517,7 @@ public sealed class MainForm : Form
                     }
                     else
                     {
-                        var asset = latest.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAssetName);
+                        var asset = latest.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAsset(SelectedVariant(row.App)));
                         row.SetState(installed, latest.TagName, asset?.Id, ComputeStatus(installed, latest.TagName, asset != null));
                     }
                 }
@@ -559,7 +644,8 @@ public sealed class MainForm : Form
     {
         var active = AuthClient.Active(_settings, _catalog.DownloadServer);
         if (active == null) return;
-        var assetName = row.App.WindowsAssetName;
+        var variantId = SelectedVariant(row.App);
+        var assetName = row.App.WindowsAsset(variantId);
         if (assetName == null) return;
 
         row.SetBusy(true);
@@ -593,7 +679,7 @@ public sealed class MainForm : Form
                 Log.Write($"install {row.App.Id} {rel.TagName}: BLOCKED (strict) — {reason}");
                 throw new Exception($"Couldn't verify the download — {reason}. Install aborted for safety.");
             }
-            InstallManager.Shared.Install(row.App, rel.TagName, cache, assetName, _settings.InstallToApplications);
+            InstallManager.Shared.Install(row.App, rel.TagName, cache, assetName, _settings.InstallToApplications, variantId);
             InstallManager.TryDelete(cache);   // verified copy is now installed; mirror the macOS zip cleanup
             var latest = row.Latest ?? rel.TagName;
             row.SetState(rel.TagName, row.Latest, row.LatestAssetId, ComputeStatus(rel.TagName, latest, true));

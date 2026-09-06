@@ -21,6 +21,9 @@ public sealed class InstalledRecord
     public string? StartMenuShortcut { get; set; }
     /// <summary>.lnk base name on the Desktop (null = no Desktop shortcut).</summary>
     public string? DesktopShortcut { get; set; }
+    /// <summary>Which variant (e.g. "standard"/"full") is installed, for apps that ship variants
+    /// (null = single-variant app or a manifest written before variants existed).</summary>
+    public string? Variant { get; set; }
 }
 
 /// <summary>
@@ -93,6 +96,13 @@ public sealed class InstallManager
         return m.TryGetValue(id, out var r) && File.Exists(r.Path) ? r.Path : null;
     }
 
+    /// <summary>The installed variant id for an app that ships variants (null if not installed or single-variant).</summary>
+    public string? InstalledVariant(string id)
+    {
+        var m = Manifest();
+        return m.TryGetValue(id, out var r) && File.Exists(r.Path) ? r.Variant : null;
+    }
+
     /// <summary>The installed app's own display name, read live from the exe's version info
     /// (ProductName) — the authoritative "what this app calls itself", so an installed row is never wrong.</summary>
     public string? InstalledDisplayName(string id)
@@ -110,7 +120,7 @@ public sealed class InstallManager
     /// <summary>Installs a downloaded self-contained .exe and records its version. When
     /// <paramref name="toApplications"/> is true, also creates Start Menu + Desktop shortcuts so the
     /// app is launchable without this launcher (the Windows equivalent of macOS's Applications folder).</summary>
-    public string Install(CatalogApp app, string version, string downloadedExe, string assetName, bool toApplications)
+    public string Install(CatalogApp app, string version, string downloadedExe, string assetName, bool toApplications, string? variant = null)
     {
         var dir = Path.Combine(AppsDir, app.Id);
         Directory.CreateDirectory(dir);
@@ -152,7 +162,8 @@ public sealed class InstallManager
             Path = dest,
             InstalledAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
             StartMenuShortcut = startName,
-            DesktopShortcut = desktopName
+            DesktopShortcut = desktopName,
+            Variant = variant
         };
         WriteManifest(m);
         return dest;

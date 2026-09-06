@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64. macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Sixteen apps listed; Each app entry may carry optional `whatsNew` + `whatsNewVersion` strings (a one-line what's-new for its current release, shown under the app in both launchers; omitted for apps with no release yet). asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships).",
+  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64 (plus optional per-arch macOS keys macos-arm64 / macos-x64, which the macOS launcher prefers over the universal `macos` key when present). macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Sixteen apps (NDI Tools ships two variants — Standard and a batteries-included 'Full' with the NDI runtime bundled — chosen by a per-row toggle; each app entry may carry an optional `variants` array [{id,label,assets}], and the Full variant uses the per-arch macOS keys macos-arm64 / macos-x64); Each app entry may carry optional `whatsNew` + `whatsNewVersion` strings (a one-line what's-new for its current release, shown under the app in both launchers; omitted for apps with no release yet). asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships).",
   "downloadServer": "https://jbtheatretools.jamesbreedon.com/ghapi",
   "self": {
     "owner": "JAMEZJB",
@@ -116,8 +116,8 @@
       "id": "showhandbook",
       "name": "Show Handbook",
       "blurb": "Generate a per-show video handbook document.",
-      "whatsNew": "Cleaner page breaks and fully generic boilerplate.",
-      "whatsNewVersion": "v1.17.0",
+      "whatsNew": "Tidier contents and tables, plus another image privacy pass.",
+      "whatsNewVersion": "v1.18.0",
       "owner": "JAMEZJB",
       "repo": "ShowHandbook",
       "assets": {
@@ -172,18 +172,42 @@
       "id": "nditools",
       "name": "NDI Tools",
       "blurb": "Discover NDI video sources on the network and check their health & bandwidth.",
+      "whatsNew": "First release — discover NDI sources, health and bandwidth (not a viewer).",
+      "whatsNewVersion": "v0.1.1",
       "owner": "JAMEZJB",
       "repo": "NDITools",
       "assets": {
         "macos": "NDITools-macOS.zip",
         "windows-x64": "NDITools-Windows-x64.exe",
         "windows-arm64": "NDITools-Windows-arm64.exe"
-      }
+      },
+      "variants": [
+        {
+          "id": "standard",
+          "label": "Standard",
+          "assets": {
+            "macos": "NDITools-macOS.zip",
+            "windows-x64": "NDITools-Windows-x64.exe",
+            "windows-arm64": "NDITools-Windows-arm64.exe"
+          }
+        },
+        {
+          "id": "full",
+          "label": "Full",
+          "assets": {
+            "macos-arm64": "NDITools-Full-macOS-arm64.zip",
+            "macos-x64": "NDITools-Full-macOS-x64.zip",
+            "windows-x64": "NDITools-Full-Windows-x64.exe"
+          }
+        }
+      ]
     },
     {
       "id": "powercalc",
       "name": "PowerCalc",
       "blurb": "Plan power distribution, balance the phases & print a load sheet.",
+      "whatsNew": "First release — offline phase-balance and load-sheet planner.",
+      "whatsNewVersion": "v0.1.1",
       "owner": "JAMEZJB",
       "repo": "PowerCalc",
       "assets": {
@@ -196,6 +220,8 @@
       "id": "showcontroltools",
       "name": "Show Control Tools",
       "blurb": "Monitor & translate OSC, MIDI and MSC show-control messages.",
+      "whatsNew": "First release — monitor and bridge OSC, MIDI and MSC.",
+      "whatsNewVersion": "v0.1.0",
       "owner": "JAMEZJB",
       "repo": "ShowControlTools",
       "assets": {
@@ -208,6 +234,8 @@
       "id": "shownetscanner",
       "name": "ShowNet Scanner",
       "blurb": "Discover every device on a show network in one live inventory.",
+      "whatsNew": "First release — sweeps every show protocol into one live inventory.",
+      "whatsNewVersion": "v0.1.1",
       "owner": "JAMEZJB",
       "repo": "ShowNetScanner",
       "assets": {
@@ -220,6 +248,8 @@
       "id": "timecodetools",
       "name": "Timecode Tools",
       "blurb": "Monitor, generate, convert & compare LTC, MTC and Art-Net timecode.",
+      "whatsNew": "First release — read, generate, convert and compare LTC/MTC/Art-Net.",
+      "whatsNewVersion": "v1.0.0",
       "owner": "JAMEZJB",
       "repo": "TimecodeTools",
       "assets": {

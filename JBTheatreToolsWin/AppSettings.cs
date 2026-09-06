@@ -10,9 +10,11 @@ public sealed class AppSettings
     public string CloseBehavior { get; set; } = "quit";   // "quit" | "keepRunning" (X = quit, or minimise to tray)
     public bool InstallToApplications { get; set; }       // true: also add Start menu + Desktop shortcuts on install
     public string AuthMode { get; set; } = "";            // "token" (GitHub PAT) | "server" (relay, DEFAULT); "" = resolved in Load()
+    public string ViewMode { get; set; } = "list";        // "list" | "grid" (icon-tile layout)
     public List<string> AppOrder { get; set; } = new();   // user's row order (app ids); empty = catalog order
     public List<string> PinnedApps { get; set; } = new(); // app ids pinned to the top of the list
     public List<string> HiddenApps { get; set; } = new(); // app ids hidden from the list
+    public Dictionary<string, string> AppVariants { get; set; } = new(); // app id → selected variant id (e.g. NDI standard/full)
     public string ServerUrl { get; set; } = "";           // user-INVISIBLE relay-URL override (settings.json only, no UI); normally
                                                           // empty — the URL comes from the catalog's downloadServer
 

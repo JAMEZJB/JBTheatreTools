@@ -55,11 +55,58 @@ struct CatalogApp: Decodable, Identifiable {
     let whatsNewVersion: String?
     let owner: String
     let repo: String
-    /// Platform key → exact release-asset name. Keys: macos, windows-x64, windows-arm64.
+    /// Platform key → exact release-asset name. Keys: macos, windows-x64, windows-arm64,
+    /// and optionally the per-arch macOS keys macos-arm64 / macos-x64 (for tools whose macOS
+    /// build can't be universal, e.g. NDI Tools "Full"). When `variants` is present, this is the
+    /// default variant's assets (so any variant-unaware code path still resolves a sane build).
     let assets: [String: String]
 
-    /// The macOS launcher only ever installs the macOS build of each tool.
-    var macAssetName: String? { assets["macos"] }
+    /// Optional downloadable variants of the SAME app (e.g. NDI Tools "Standard" vs "Full"). When
+    /// present with more than one entry, the row shows a variant toggle and install/status resolve
+    /// against the SELECTED variant's assets. The first variant is the default.
+    let variants: [AppVariant]?
+
+    /// True when this app ships more than one variant → the launcher shows a Standard/Full toggle.
+    var hasVariants: Bool { (variants?.count ?? 0) > 1 }
+
+    /// The asset map for a given variant id (nil / unknown → the default = first variant, or the
+    /// top-level `assets` when there are no variants).
+    func assets(variantId: String?) -> [String: String] {
+        guard let vs = variants, !vs.isEmpty else { return assets }
+        return (vs.first { $0.id == variantId } ?? vs[0]).assets
+    }
+
+    /// The macOS launcher installs the macOS build of each tool, preferring an arch-specific
+    /// build (macos-arm64 / macos-x64) when the catalog carries one, else the universal `macos`.
+    var macAssetName: String? { MacArch.pick(from: assets) }
+
+    /// Variant-aware macOS asset name (the selected variant's per-arch build).
+    func macAssetName(variantId: String?) -> String? { MacArch.pick(from: assets(variantId: variantId)) }
+}
+
+/// One downloadable variant of an app (e.g. Standard / Full). `label` is the toggle text.
+struct AppVariant: Decodable, Identifiable {
+    let id: String
+    let label: String
+    let assets: [String: String]
+}
+
+/// The Mac's native hardware architecture, and per-arch macOS asset selection.
+enum MacArch {
+    /// True on Apple Silicon. Uses sysctl so it's correct even when the launcher runs under Rosetta.
+    static let isAppleSilicon: Bool = {
+        var value: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        if sysctlbyname("hw.optional.arm64", &value, &size, nil, 0) == 0 { return value == 1 }
+        return false
+    }()
+
+    /// Picks the best macOS asset: the arch-specific build for this Mac when present, else the
+    /// universal `macos` build. Returns nil only when the catalog has no usable macOS asset.
+    static func pick(from assets: [String: String]) -> String? {
+        let archKey = isAppleSilicon ? "macos-arm64" : "macos-x64"
+        return assets[archKey] ?? assets["macos"]
+    }
 }
 
 /// JBTheatreTools' own release info (for the self-update check).
@@ -67,5 +114,5 @@ struct SelfInfo: Decodable {
     let owner: String
     let repo: String
     let assets: [String: String]
-    var macAssetName: String? { assets["macos"] }
+    var macAssetName: String? { MacArch.pick(from: assets) }
 }

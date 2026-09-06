@@ -60,9 +60,18 @@ enum CloseBehavior: String, CaseIterable, Identifiable {
     }
 }
 
+/// How the app catalog is laid out: a detailed list, or a compact icon grid.
+enum AppViewMode: String, CaseIterable, Identifiable {
+    case list, grid
+    var id: String { rawValue }
+    var label: String { self == .list ? "List" : "Grid" }
+    var symbol: String { self == .list ? "list.bullet" : "square.grid.2x2" }
+}
+
 struct ContentView: View {
     @EnvironmentObject var state: AppState
     @AppStorage("theatre.appearance") private var appearance: AppAppearance = .system
+    @AppStorage("theatre.viewMode") private var viewMode: AppViewMode = .list
     @AppStorage("theatre.updateMode") private var updateMode: UpdateCheckMode = .everyLaunch
     @AppStorage("theatre.closeBehavior") private var closeBehavior: CloseBehavior = .quit
     @AppStorage("theatre.installToApplications") private var installToApplications = false
@@ -109,6 +118,17 @@ struct ContentView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
+            if state.hasVisibleRows {
+                Picker("View", selection: $viewMode) {
+                    ForEach(AppViewMode.allCases) { mode in
+                        Image(systemName: mode.symbol).help(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help("Switch between list and grid view")
+            }
             if state.updatesAvailable > 0 {
                 Button {
                     Task { await updateAllAction() }
@@ -154,26 +174,64 @@ struct ContentView: View {
                         : "No apps to show yet. Press Refresh, or check your access in Settings.",
                        systemImage: "eye.slash", tint: .gray)
                 Spacer()
+            } else if viewMode == .grid {
+                gridView
             } else {
-                // Two groups: pinned apps float to the top; each group drag-reorders on its own
-                // (drag a row within its group; move a row between groups with Pin / Unpin).
-                List {
-                    if !state.pinnedDisplayRows.isEmpty {
-                        Section("Pinned") {
-                            ForEach(state.pinnedDisplayRows) { row in
-                                AppRowView(row: row)
-                            }
-                            .onMove { state.moveInList(pinned: true, from: $0, to: $1) }
-                        }
+                listView
+            }
+        }
+    }
+
+    /// Detailed list layout (two groups: pinned floats to the top; each group drag-reorders on its own —
+    /// drag a row within its group; move a row between groups with Pin / Unpin).
+    private var listView: some View {
+        List {
+            if !state.pinnedDisplayRows.isEmpty {
+                Section("Pinned") {
+                    ForEach(state.pinnedDisplayRows) { row in
+                        AppRowView(row: row)
                     }
-                    Section {
-                        ForEach(state.mainDisplayRows) { row in
-                            AppRowView(row: row)
-                        }
-                        .onMove { state.moveInList(pinned: false, from: $0, to: $1) }
-                    }
+                    .onMove { state.moveInList(pinned: true, from: $0, to: $1) }
                 }
-                .listStyle(.plain)
+            }
+            Section {
+                ForEach(state.mainDisplayRows) { row in
+                    AppRowView(row: row)
+                }
+                .onMove { state.moveInList(pinned: false, from: $0, to: $1) }
+            }
+        }
+        .listStyle(.plain)
+    }
+
+    /// Compact icon-grid layout: an icon + name tile per app, pinned apps first. Per-app actions live in
+    /// the tile's right-click menu; a click launches (installed) or installs. Drag-reorder is list-only.
+    private var gridView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                if !state.pinnedDisplayRows.isEmpty {
+                    gridSection("Pinned", rows: state.pinnedDisplayRows)
+                    gridSection("All apps", rows: state.mainDisplayRows)
+                } else {
+                    gridSection(nil, rows: state.mainDisplayRows)
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func gridSection(_ title: String?, rows: [AppState.Row]) -> some View {
+        if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                if let title {
+                    Text(title).font(.caption).bold().foregroundStyle(.secondary)
+                }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 128), spacing: 14)],
+                          alignment: .leading, spacing: 14) {
+                    ForEach(rows) { row in AppGridTile(row: row) }
+                }
             }
         }
     }
@@ -273,6 +331,7 @@ struct AppRowView: View {
                 Text(row.app.blurb).font(.caption).foregroundStyle(.secondary)
                 versionLine
                 whatsNewLine
+                variantToggle
                 if row.busy {
                     ProgressView(value: row.progress)
                         .frame(maxWidth: 240)
@@ -294,50 +353,46 @@ struct AppRowView: View {
         }
     }
 
-    /// Leading icon: the installed app's REAL icon once installed; before install, a per-app icon
-    /// bundled in the launcher (so the row shows the actual app icon, not just a letter); and only if
-    /// neither is available, a tinted monogram tile.
-    @ViewBuilder
+    /// Leading icon: the installed app's REAL icon once installed; else the bundled per-app icon; else
+    /// a tinted monogram tile. (Shared with the grid tile via `AppIconImage`.)
     private var iconView: some View {
-        if let path = InstallManager.shared.installedPath(row.id)?.path {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
-                .resizable().interpolation(.high)
-                .frame(width: 40, height: 40)
-        } else if let bundled = Self.bundledIcon(row.id) {
-            Image(nsImage: bundled)
-                .resizable().interpolation(.high)
-                .frame(width: 40, height: 40)
-        } else {
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color.jbAccent.opacity(0.15))
-                .frame(width: 40, height: 40)
-                .overlay(
-                    Text(appInitial)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(Color.jbAccent)
-                )
-        }
-    }
-
-    /// A per-app icon shipped inside the launcher (Resources/<id>.png), shown before the app is
-    /// installed. Returns nil if this app has no bundled icon (→ monogram fallback).
-    private static func bundledIcon(_ id: String) -> NSImage? {
-        guard let url = Bundle.main.url(forResource: id, withExtension: "png") else { return nil }
-        return NSImage(contentsOf: url)
-    }
-
-    private var appInitial: String {
-        row.displayName.first.map { String($0).uppercased() } ?? "•"
+        AppIconImage(id: row.id, displayName: row.displayName, size: 40)
     }
 
     private var versionLine: some View {
         HStack(spacing: 6) {
-            Text("Installed: \(row.installed ?? "—")")
+            Text("Installed: \(installedText)")
             Text("·").foregroundStyle(.secondary)
             Text("Latest: \(row.latest ?? "—")")
         }
         .font(.caption2)
         .foregroundStyle(.secondary)
+    }
+
+    /// The installed version, annotated with the installed variant for apps that ship variants.
+    private var installedText: String {
+        guard let v = row.installed else { return "—" }
+        if let variant = state.installedVariantLabel(row) { return "\(v) (\(variant))" }
+        return v
+    }
+
+    /// A compact Standard/Full toggle, shown inline only for apps that ship variants.
+    @ViewBuilder
+    private var variantToggle: some View {
+        if row.app.hasVariants, let vs = row.app.variants {
+            Picker("", selection: Binding(
+                get: { state.selectedVariantId(row.app) ?? vs.first?.id ?? "" },
+                set: { state.setVariant(row.id, $0) }
+            )) {
+                ForEach(vs) { Text($0.label).tag($0.id) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.mini)
+            .fixedSize()
+            .tint(.selectorBlue)
+            .disabled(row.busy)
+        }
     }
 
     /// One-line "what's new" for the app's current release, shown only when the catalog carries it.
@@ -409,7 +464,10 @@ struct AppRowView: View {
             case .error:
                 installButton(title: row.installed == nil ? "Install" : "Retry")
             default:
-                EmptyView()
+                // A different variant is selected than the one installed → offer to install it.
+                if state.variantSwitchAvailable(row) {
+                    installButton(title: "Install \(state.selectedVariantLabel(row.app) ?? "variant")")
+                }
             }
             // Launch — available whenever something is installed, even before a refresh has run.
             if row.installed != nil { launchButton }
@@ -417,17 +475,93 @@ struct AppRowView: View {
         }
     }
 
-    /// Overflow menu: reorder the row, install a specific (older) version, or uninstall.
+    /// Overflow menu: pin/hide/reorder, pick a variant, install a specific (older) version, or uninstall.
     private var rowMenu: some View {
         Menu {
-            Button(state.isPinned(row.id) ? "Unpin from Top" : "Pin to Top") {
-                state.togglePin(row.id)
-            }
+            AppMenuButtons(row: row, requestUninstall: { confirmingUninstall = true })
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .tint(.selectorBlue)   // house rule 21: selectors/menus are slate-blue, not the purple accent
+        .fixedSize()
+        .disabled(row.busy)
+        .help("Variant, reorder, other versions & uninstall")
+    }
+
+    private func installButton(title: String) -> some View {
+        Button(title) {
+            Task { await state.install(row.id) }
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(row.busy || row.latestAssetId == nil)
+    }
+
+    private var launchButton: some View {
+        Button("Launch") { state.launch(row.id) }
+            .disabled(row.busy)
+    }
+}
+
+/// The app's icon at a given size: the installed app's REAL icon once installed; else the per-app icon
+/// bundled in the launcher (Resources/<id>.png); else a tinted monogram tile. Shared by list & grid.
+struct AppIconImage: View {
+    let id: String
+    let displayName: String
+    var size: CGFloat = 40
+
+    var body: some View {
+        if let path = InstallManager.shared.installedPath(id)?.path {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                .resizable().interpolation(.high)
+                .frame(width: size, height: size)
+        } else if let bundled = Self.bundledIcon(id) {
+            Image(nsImage: bundled)
+                .resizable().interpolation(.high)
+                .frame(width: size, height: size)
+        } else {
+            RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                .fill(Color.jbAccent.opacity(0.15))
+                .frame(width: size, height: size)
+                .overlay(
+                    Text(displayName.first.map { String($0).uppercased() } ?? "•")
+                        .font(.system(size: size * 0.45, weight: .semibold))
+                        .foregroundStyle(Color.jbAccent)
+                )
+        }
+    }
+
+    static func bundledIcon(_ id: String) -> NSImage? {
+        guard let url = Bundle.main.url(forResource: id, withExtension: "png") else { return nil }
+        return NSImage(contentsOf: url)
+    }
+}
+
+/// The per-row action menu, shared by the list row's ⋯ button and the grid tile's right-click menu:
+/// pin/hide/reorder, pick a variant (Standard/Full), install a specific version, Dock/alias, uninstall.
+struct AppMenuButtons: View {
+    @EnvironmentObject var state: AppState
+    let row: AppState.Row
+    /// Called when the user picks Uninstall — the host view shows its own confirmation dialog.
+    var requestUninstall: () -> Void
+
+    var body: some View {
+        Group {
+            Button(state.isPinned(row.id) ? "Unpin from Top" : "Pin to Top") { state.togglePin(row.id) }
             Button("Move Up") { state.moveRow(row.id, up: true) }
                 .disabled(!state.canMove(row.id, up: true))
             Button("Move Down") { state.moveRow(row.id, up: false) }
                 .disabled(!state.canMove(row.id, up: false))
             Button("Hide from List") { state.setHidden(row.id, true) }
+            if row.app.hasVariants, let vs = row.app.variants {
+                Divider()
+                Picker("Variant", selection: Binding(
+                    get: { state.selectedVariantId(row.app) ?? vs.first?.id ?? "" },
+                    set: { state.setVariant(row.id, $0) }
+                )) {
+                    ForEach(vs) { Text($0.label).tag($0.id) }
+                }
+            }
             if !row.releases.isEmpty {
                 Divider()
                 Section("Install version") {
@@ -446,18 +580,9 @@ struct AppRowView: View {
                     state.toggleDesktopAlias(row.id)
                 }
                 Divider()
-                Button("Uninstall \(row.displayName)", role: .destructive) {
-                    confirmingUninstall = true
-                }
+                Button("Uninstall \(row.displayName)", role: .destructive) { requestUninstall() }
             }
-        } label: {
-            Image(systemName: "ellipsis.circle")
         }
-        .menuStyle(.borderlessButton)
-        .tint(.selectorBlue)   // house rule 21: selectors/menus are slate-blue, not the purple accent
-        .fixedSize()
-        .disabled(row.busy)
-        .help("Reorder, other versions & uninstall")
     }
 
     private func versionLabel(_ rel: ReleaseInfo) -> String {
@@ -466,17 +591,108 @@ struct AppRowView: View {
         if rel.tagName == row.installed { s += "  ✓ installed" }
         return s
     }
+}
 
-    private func installButton(title: String) -> some View {
-        Button(title) {
-            Task { await state.install(row.id) }
+/// One tile in the grid view: a large icon + name, with a compact status line. A click launches the
+/// app (if installed) or installs it; the full action set lives in the right-click menu (shared with
+/// the list row). Drag-reorder stays a list-view feature; reordering here is via the menu's Move Up/Down.
+struct AppGridTile: View {
+    @EnvironmentObject var state: AppState
+    let row: AppState.Row
+    @State private var confirmingUninstall = false
+
+    var body: some View {
+        VStack(spacing: 8) {
+            AppIconImage(id: row.id, displayName: row.displayName, size: 54)
+            Text(row.displayName)
+                .font(.caption).bold()
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .frame(height: 30)
+            statusCaption
         }
-        .buttonStyle(.borderedProminent)
-        .disabled(row.busy || row.latestAssetId == nil)
+        .frame(maxWidth: .infinity)
+        .frame(height: 140)
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.secondary.opacity(0.06)))
+        .overlay(alignment: .topTrailing) {
+            if state.isPinned(row.id) {
+                Image(systemName: "pin.fill").font(.caption2)
+                    .foregroundStyle(Color.selectorBlue).padding(6)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if row.busy {
+                ProgressView(value: row.progress).controlSize(.small)
+                    .padding(.horizontal, 12).padding(.bottom, 8)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { primaryAction() }
+        .contextMenu { AppMenuButtons(row: row, requestUninstall: { confirmingUninstall = true }) }
+        .confirmationDialog("Uninstall \(row.displayName)?",
+                            isPresented: $confirmingUninstall, titleVisibility: .visible) {
+            Button("Uninstall", role: .destructive) { state.uninstall(row.id) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the installed app from your Mac. You can reinstall it anytime.")
+        }
+        .help(tooltip)
     }
 
-    private var launchButton: some View {
-        Button("Launch") { state.launch(row.id) }
-            .disabled(row.busy)
+    /// Click behaviour: launch when installed, otherwise install (when the status allows it).
+    private func primaryAction() {
+        if row.busy { return }
+        if row.installed != nil { state.launch(row.id); return }
+        switch row.status {
+        case .notInstalled, .updateAvailable, .error: Task { await state.install(row.id) }
+        default: break
+        }
+    }
+
+    @ViewBuilder
+    private var statusCaption: some View {
+        let variant = state.installedVariantLabel(row) ?? state.selectedVariantLabel(row.app)
+        Text(captionText(variant: variant))
+            .font(.caption2)
+            .foregroundStyle(captionColor)
+            .lineLimit(1)
+    }
+
+    private func captionText(variant: String?) -> String {
+        let base: String
+        switch row.status {
+        case .updateAvailable: base = "Update"
+        case .upToDate:        base = row.installed ?? "Installed"
+        case .installed:       base = row.installed ?? "Installed"
+        case .notInstalled:    base = "Install"
+        case .noRelease:       base = "No release"
+        case .missingAsset:    base = "No macOS build"
+        case .checking:        base = "Checking…"
+        case .error:           base = "Error"
+        default:               base = row.installed ?? " "
+        }
+        if let v = variant, row.app.hasVariants { return "\(base) · \(v)" }
+        return base
+    }
+
+    private var captionColor: Color {
+        switch row.status {
+        case .updateAvailable: return .jbAccent
+        case .upToDate:        return .green
+        case .missingAsset, .error: return .orange
+        default:               return .secondary
+        }
+    }
+
+    private var tooltip: String {
+        var t = row.displayName
+        if let v = row.installed {
+            t += " — installed \(v)"
+            if let vl = state.installedVariantLabel(row) { t += " (\(vl))" }
+        } else if row.status == .notInstalled {
+            t += " — click to install"
+        }
+        return t
     }
 }

@@ -63,11 +63,41 @@ public sealed class CatalogApp
     [JsonPropertyName("owner")] public string Owner { get; set; } = "";
     [JsonPropertyName("repo")] public string Repo { get; set; } = "";
 
-    /// <summary>Platform key → exact release-asset name. Keys: macos, windows-x64, windows-arm64.</summary>
+    /// <summary>Platform key → exact release-asset name. Keys: macos, windows-x64, windows-arm64
+    /// (and optional per-arch macOS keys). When <see cref="Variants"/> is present, this is the default
+    /// variant's assets.</summary>
     [JsonPropertyName("assets")] public Dictionary<string, string> Assets { get; set; } = new();
 
-    /// <summary>The Windows asset name for this machine's architecture.</summary>
+    /// <summary>Optional download variants of the SAME app (e.g. NDI Standard vs Full). When present
+    /// with more than one entry, the row shows a variant toggle and install resolves the selected one.</summary>
+    [JsonPropertyName("variants")] public List<AppVariant>? Variants { get; set; }
+
+    /// <summary>True when this app ships more than one variant → the row shows a Standard/Full toggle.</summary>
+    public bool HasVariants => (Variants?.Count ?? 0) > 1;
+
+    /// <summary>The asset map for a variant id (null/unknown → the default = first variant, or the
+    /// top-level <see cref="Assets"/> when there are no variants).</summary>
+    public Dictionary<string, string> AssetsFor(string? variantId)
+    {
+        if (Variants is { Count: > 0 } vs)
+            return (vs.FirstOrDefault(v => v.Id == variantId) ?? vs[0]).Assets;
+        return Assets;
+    }
+
+    /// <summary>The Windows asset name for this machine's architecture (default variant).</summary>
     public string? WindowsAssetName => Assets.TryGetValue(Platform.AssetKey, out var n) ? n : null;
+
+    /// <summary>Variant-aware Windows asset name for this machine's architecture.</summary>
+    public string? WindowsAsset(string? variantId)
+        => AssetsFor(variantId).TryGetValue(Platform.AssetKey, out var n) ? n : null;
+}
+
+/// <summary>One downloadable variant of an app (e.g. Standard / Full). <c>Label</c> is the toggle text.</summary>
+public sealed class AppVariant
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("label")] public string Label { get; set; } = "";
+    [JsonPropertyName("assets")] public Dictionary<string, string> Assets { get; set; } = new();
 }
 
 /// <summary>JBTheatreTools' own release info (for the self-update check).</summary>

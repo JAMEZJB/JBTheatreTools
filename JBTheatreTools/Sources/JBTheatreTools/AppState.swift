@@ -54,6 +54,8 @@ final class AppState: ObservableObject {
         var progress: Double = 0
         /// The installed app's self-declared name (read from its bundle); overrides the catalog name.
         var resolvedName: String?
+        /// Which variant is installed on disk (for apps that ship variants); nil = single-variant/none.
+        var installedVariant: String?
         /// Name to show: the installed app's own name when available, else the catalog name.
         var displayName: String { resolvedName ?? app.name }
         /// Shown once we know a row is relevant: anything installed locally, or any app whose repo
@@ -100,6 +102,9 @@ final class AppState: ObservableObject {
     /// App ids the user hid from the list (per-machine). Hidden apps stay in `rows` (so unhiding
     /// restores their position) but are filtered out of every display group.
     @Published var hiddenIds: Set<String> = []
+    /// Per-app selected variant id (per-machine), for apps that ship variants (e.g. NDI Standard/Full).
+    /// Absent → the app's default (first) variant.
+    @Published var variantSelection: [String: String] = [:]
 
     private var selfInfo: SelfInfo?
     /// The download-relay base URL: an (invisible, settings-only) local override wins, else the
@@ -112,6 +117,7 @@ final class AppState: ObservableObject {
     private static let appOrderKey = "theatre.appOrder"
     private static let pinnedKey = "theatre.pinnedApps"
     private static let hiddenKey = "theatre.hiddenApps"
+    private static let variantKey = "theatre.appVariants"
 
     var currentVersion: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
@@ -127,13 +133,17 @@ final class AppState: ObservableObject {
                 return Row(app: $0,
                            installed: installed,
                            status: installed != nil ? .installed : .unknown,
-                           resolvedName: InstallManager.shared.installedDisplayName($0.id))
+                           resolvedName: InstallManager.shared.installedDisplayName($0.id),
+                           installedVariant: InstallManager.shared.installedVariant($0.id))
             }
             catalogOrder = catalog.apps.map(\.id)
             rows = Self.applyingSavedOrder(rows)
             let known = Set(catalogOrder)
             pinnedIds = Set(UserDefaults.standard.stringArray(forKey: Self.pinnedKey) ?? []).intersection(known)
             hiddenIds = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? []).intersection(known)
+            if let saved = UserDefaults.standard.dictionary(forKey: Self.variantKey) as? [String: String] {
+                variantSelection = saved.filter { known.contains($0.key) }
+            }
         } catch {
             globalError = "Could not load app catalog: \(error.localizedDescription)"
         }
@@ -386,6 +396,55 @@ final class AppState: ObservableObject {
         AppLog.shared.log("unhid all apps")
     }
 
+    // MARK: Variants (apps that ship more than one download, e.g. NDI Standard/Full)
+
+    /// The selected variant id for an app (persisted), defaulting to its first variant. Nil if the app
+    /// ships no variants.
+    func selectedVariantId(_ app: CatalogApp) -> String? {
+        guard app.hasVariants else { return nil }
+        return variantSelection[app.id] ?? app.variants?.first?.id
+    }
+
+    /// The macOS asset name for an app, honouring the selected variant (and this Mac's architecture).
+    func macAsset(for app: CatalogApp) -> String? {
+        app.macAssetName(variantId: selectedVariantId(app))
+    }
+
+    /// Label of the variant the user has SELECTED for an app (for the toggle / version line).
+    func selectedVariantLabel(_ app: CatalogApp) -> String? {
+        guard let vid = selectedVariantId(app) else { return nil }
+        return app.variants?.first { $0.id == vid }?.label
+    }
+
+    /// Label of the variant currently INSTALLED for a row (for the version line), or nil.
+    func installedVariantLabel(_ row: Row) -> String? {
+        guard row.app.hasVariants, let vid = row.installedVariant ?? row.app.variants?.first?.id else { return nil }
+        return row.app.variants?.first { $0.id == vid }?.label
+    }
+
+    /// True when the app ships variants and the SELECTED one isn't the INSTALLED one — so the user can
+    /// install/switch to the selected build even when the installed version is otherwise "up to date".
+    func variantSwitchAvailable(_ row: Row) -> Bool {
+        guard row.app.hasVariants, row.installed != nil else { return false }
+        return (row.installedVariant ?? row.app.variants?.first?.id) != selectedVariantId(row.app)
+    }
+
+    /// Changes the selected variant for an app, persists it, and re-resolves that row's status/asset.
+    func setVariant(_ appId: String, _ variantId: String) {
+        variantSelection[appId] = variantId
+        UserDefaults.standard.set(variantSelection, forKey: Self.variantKey)
+        if let i = rows.firstIndex(where: { $0.id == appId }) { recomputeRow(i) }
+        AppLog.shared.log("variant for \(appId) → \(variantId)")
+    }
+
+    /// Re-derives latestAssetId + status for a row from its cached releases (after a variant change).
+    private func recomputeRow(_ i: Int) {
+        guard rows.indices.contains(i), let latest = Self.latest(from: rows[i].releases) else { return }
+        let assetId = latest.assets.first { $0.name == macAsset(for: rows[i].app) }?.id
+        rows[i].latestAssetId = assetId
+        rows[i].status = Self.status(installed: rows[i].installed, latest: latest.tagName, hasAsset: assetId != nil)
+    }
+
     // MARK: Reorder — drag (per group) and Move Up/Down
 
     /// Drag reorder within one display group (pinned or main). Reassigns the group members among the
@@ -480,6 +539,7 @@ final class AppState: ObservableObject {
         rows[index].status = .checking
         rows[index].installed = InstallManager.shared.installedVersion(app.id)
         rows[index].resolvedName = InstallManager.shared.installedDisplayName(app.id)
+        rows[index].installedVariant = InstallManager.shared.installedVariant(app.id)
         do {
             let all = try await client.releases(owner: app.owner, repo: app.repo)
             rows[index].releases = all
@@ -489,7 +549,7 @@ final class AppState: ObservableObject {
                 rows[index].status = .noRelease
                 return
             }
-            let assetId = latest.assets.first { $0.name == app.macAssetName }?.id
+            let assetId = latest.assets.first { $0.name == macAsset(for: app) }?.id
             rows[index].latest = latest.tagName
             rows[index].latestAssetId = assetId
             rows[index].status = Self.status(installed: rows[index].installed, latest: latest.tagName, hasAsset: assetId != nil)
@@ -606,7 +666,8 @@ final class AppState: ObservableObject {
             ? rows[i].releases.first { $0.tagName == tag }
             : Self.latest(from: rows[i].releases)
         guard let rel = release else { rows[i].status = .error("Version \(tag ?? "latest") not found."); return }
-        guard let asset = rel.assets.first(where: { $0.name == app.macAssetName }) else {
+        let variantId = selectedVariantId(app)
+        guard let asset = rel.assets.first(where: { $0.name == macAsset(for: app) }) else {
             rows[i].status = .error("No macOS asset in \(rel.tagName)."); return
         }
 
@@ -640,12 +701,13 @@ final class AppState: ObservableObject {
             case .assetNotListed: AppLog.shared.log("install \(app.id) \(rel.tagName): unverified older tag (asset not in SHA256SUMS)")
             }
             let toApps = UserDefaults.standard.bool(forKey: "theatre.installToApplications")
-            try InstallManager.shared.install(app: app, version: rel.tagName, downloadedZip: zipDest, toApplications: toApps)
+            try InstallManager.shared.install(app: app, version: rel.tagName, downloadedZip: zipDest, toApplications: toApps, variant: variantId)
             try? FileManager.default.removeItem(at: zipDest)
             rows[i].installed = rel.tagName
+            rows[i].installedVariant = variantId
             rows[i].resolvedName = InstallManager.shared.installedDisplayName(app.id)
             rows[i].status = Self.status(installed: rel.tagName, latest: rows[i].latest ?? rel.tagName, hasAsset: true)
-            AppLog.shared.log("installed \(app.id) \(rel.tagName)\(toApps ? " (Applications)" : "")")
+            AppLog.shared.log("installed \(app.id) \(rel.tagName)\(variantId.map { " [\($0)]" } ?? "")\(toApps ? " (Applications)" : "")")
         } catch {
             rows[i].status = .error(error.localizedDescription)
             AppLog.shared.log("install \(app.id) FAILED: \(error.localizedDescription)")
@@ -658,6 +720,7 @@ final class AppState: ObservableObject {
             try InstallManager.shared.uninstall(id)
             rows[i].installed = nil
             rows[i].resolvedName = nil
+            rows[i].installedVariant = nil
             if rows[i].latestAssetId != nil {
                 rows[i].status = .notInstalled
             } else if rows[i].latest == nil {
