@@ -7,7 +7,18 @@ namespace JBTheatreTools;
 /// <summary>Outcome of integrity-checking a download (verify-if-present): the SHA-256 matched, the
 /// release published no SHA256SUMS at all, or it published one but this asset isn't listed in it (e.g.
 /// a name mismatch). The two "unverified" cases are distinguished so logs/messages can tell them apart.</summary>
-public enum VerifyResult { Verified, NoManifest, AssetNotListed }
+public enum VerifyResult
+{
+    /// <summary>Suite-signed manifest, asset listed, hash matches — the only fully trusted outcome.</summary>
+    Verified,
+    /// <summary>The release publishes no SHA256SUMS at all.</summary>
+    NoManifest,
+    /// <summary>SHA256SUMS exists but doesn't list this asset.</summary>
+    AssetNotListed,
+    /// <summary>Asset listed and hash matches, but the manifest carries no suite signature — so it only proves
+    /// transport integrity, not authenticity. Accepted for explicit older-tag installs only (audit F1).</summary>
+    Unsigned,
+}
 
 public sealed class InstalledRecord
 {
@@ -96,12 +107,6 @@ public sealed class InstallManager
         return m.TryGetValue(id, out var r) && File.Exists(r.Path) ? r.Path : null;
     }
 
-    /// <summary>The installed variant id for an app that ships variants (null if not installed or single-variant).</summary>
-    public string? InstalledVariant(string id)
-    {
-        var m = Manifest();
-        return m.TryGetValue(id, out var r) && File.Exists(r.Path) ? r.Variant : null;
-    }
 
     /// <summary>The installed app's own display name, read live from the exe's version info
     /// (ProductName) — the authoritative "what this app calls itself", so an installed row is never wrong.</summary>
@@ -120,6 +125,25 @@ public sealed class InstallManager
     /// <summary>Installs a downloaded self-contained .exe and records its version. When
     /// <paramref name="toApplications"/> is true, also creates Start Menu + Desktop shortcuts so the
     /// app is launchable without this launcher (the Windows equivalent of macOS's Applications folder).</summary>
+    /// <summary>One-time migration from v1.15.0, where a non-default variant (e.g. NDI "Full") was recorded
+    /// under the plain app id. Re-keys such a record to its own variant slot. (The exe already has a
+    /// distinct name on Windows, so no rename is needed.) No-op when nothing matches.</summary>
+    public void MigrateVariantSlots(IEnumerable<CatalogApp> apps)
+    {
+        var m = Manifest();
+        bool changed = false;
+        foreach (var app in apps.Where(a => a.HasVariants))
+        {
+            if (!m.TryGetValue(app.Id, out var rec) || rec.Variant == null || app.IsDefaultVariant(rec.Variant)) continue;
+            var key = app.InstallKey(rec.Variant);
+            if (m.ContainsKey(key)) continue;   // that slot already has its own record — leave both alone
+            m[key] = rec;
+            m.Remove(app.Id);
+            changed = true;
+        }
+        if (changed) WriteManifest(m);
+    }
+
     public string Install(CatalogApp app, string version, string downloadedExe, string assetName, bool toApplications, string? variant = null)
     {
         var dir = Path.Combine(AppsDir, app.Id);
@@ -134,7 +158,10 @@ public sealed class InstallManager
         // Remove shortcuts from any previous install (the name may have changed), remembering which
         // locations the user had so an update re-creates them.
         bool hadStart = false, hadDesktop = false;
-        if (m.TryGetValue(app.Id, out var prev))
+        // Each variant is its own install slot (Standard and Full can coexist — their exes have different
+        // names, so they share apps/<id>/). Only the previous install of THIS slot is replaced.
+        var key = app.InstallKey(variant);
+        if (m.TryGetValue(key, out var prev))
         {
             hadStart = prev.StartMenuShortcut != null;
             hadDesktop = prev.DesktopShortcut != null;
@@ -147,7 +174,8 @@ public sealed class InstallManager
         string? startName = null, desktopName = null;
         try
         {
-            var name = Shortcuts.SafeName(TryProductName(dest) ?? app.Name);
+            // A non-default variant's shortcuts carry its label (" (Full)") so they sit beside the default's.
+            var name = Shortcuts.SafeName((TryProductName(dest) ?? app.Name) + app.VariantSuffix(variant));
             if (toApplications || hadStart) { Shortcuts.CreateStartMenu(name, dest); startName = name; }
             if (toApplications || hadDesktop) { Shortcuts.CreateDesktop(name, dest); desktopName = name; }
         }
@@ -156,7 +184,7 @@ public sealed class InstallManager
             Log.Write($"install {app.Id}: shortcut creation failed: {ex.Message}");
         }
 
-        m[app.Id] = new InstalledRecord
+        m[key] = new InstalledRecord
         {
             Version = version,
             Path = dest,
@@ -169,7 +197,7 @@ public sealed class InstallManager
         return dest;
     }
 
-    private static string? TryProductName(string exe)
+    internal static string? TryProductName(string exe)
     {
         try
         {
@@ -179,25 +207,38 @@ public sealed class InstallManager
         catch { return null; }
     }
 
-    public void Launch(CatalogApp app)
+    /// <summary>Launches the app's default-variant slot (CLI / single-variant apps).</summary>
+    public void Launch(CatalogApp app) => Launch(app.Id);
+
+    /// <summary>Launches a specific install slot (the row's selected variant).</summary>
+    public void Launch(string installKey)
     {
-        var path = InstalledPath(app.Id) ?? throw new InvalidOperationException("App is not installed.");
+        var path = InstalledPath(installKey) ?? throw new InvalidOperationException("App is not installed.");
         Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
     }
 
     /// <summary>Removes the installed app's folder, its shortcuts, and its manifest entry.</summary>
-    public void Uninstall(string appId)
+    /// <summary>Uninstalls ONE install slot (an app, or one variant of a variant app): removes that slot's
+    /// exe and shortcuts. The containing app dir is deleted only once nothing else is left in it, so a
+    /// sibling variant (Standard and Full share apps/&lt;id&gt;/) survives.</summary>
+    public void Uninstall(string installKey)
     {
         var m = Manifest();
-        if (m.TryGetValue(appId, out var rec))
+        if (m.TryGetValue(installKey, out var rec))
         {
             if (rec.StartMenuShortcut != null) Shortcuts.RemoveStartMenu(rec.StartMenuShortcut);
             if (rec.DesktopShortcut != null) Shortcuts.RemoveDesktop(rec.DesktopShortcut);
+            try { if (File.Exists(rec.Path)) File.Delete(rec.Path); }
+            catch (Exception ex) { Log.Write($"uninstall {installKey}: could not delete {rec.Path}: {ex.Message}"); }
+            try
+            {
+                var dir = Path.GetDirectoryName(rec.Path);
+                if (dir != null && Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any())
+                    Directory.Delete(dir);
+            }
+            catch (Exception ex) { Log.Write($"uninstall {installKey}: could not remove empty dir: {ex.Message}"); }
         }
-        var dir = Path.Combine(AppsDir, appId);
-        try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
-        catch (Exception ex) { Log.Write($"uninstall {appId}: could not delete {dir}: {ex.Message}"); }
-        if (m.Remove(appId)) WriteManifest(m);
+        if (m.Remove(installKey)) WriteManifest(m);
     }
 
     // --- Reconcile install location (Windows: the exe never moves, only its shortcuts) ---
@@ -214,13 +255,15 @@ public sealed class InstallManager
 
     /// <summary>Adds or removes an installed app's Start Menu/Desktop shortcuts to match the setting
     /// (the global reconcile acts on BOTH locations, including per-app-added ones).</summary>
-    public void SyncShortcuts(CatalogApp app, bool toApplications)
+    /// <summary>Adds (toApplications) or removes both shortcuts for one install slot; <paramref name="shortcutName"/>
+    /// is the display name to use (already carrying any variant suffix).</summary>
+    public void SyncShortcuts(string installKey, string shortcutName, bool toApplications)
     {
         var m = Manifest();
-        if (!m.TryGetValue(app.Id, out var r) || !File.Exists(r.Path)) return;
+        if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
         if (toApplications)
         {
-            var name = Shortcuts.SafeName(TryProductName(r.Path) ?? app.Name);
+            var name = Shortcuts.SafeName(shortcutName);
             if (r.StartMenuShortcut == null) { Shortcuts.CreateStartMenu(name, r.Path); r.StartMenuShortcut = name; }
             if (r.DesktopShortcut == null) { Shortcuts.CreateDesktop(name, r.Path); r.DesktopShortcut = name; }
         }
@@ -237,13 +280,13 @@ public sealed class InstallManager
     public bool HasDesktopShortcut(string appId) => Manifest().TryGetValue(appId, out var r) && r.DesktopShortcut != null;
     public bool HasStartMenuShortcut(string appId) => Manifest().TryGetValue(appId, out var r) && r.StartMenuShortcut != null;
 
-    public void SetDesktopShortcut(CatalogApp app, bool on)
+    public void SetDesktopShortcut(string installKey, string shortcutName, bool on)
     {
         var m = Manifest();
-        if (!m.TryGetValue(app.Id, out var r) || !File.Exists(r.Path)) return;
+        if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
         if (on && r.DesktopShortcut == null)
         {
-            var name = Shortcuts.SafeName(TryProductName(r.Path) ?? app.Name);
+            var name = Shortcuts.SafeName(shortcutName);
             Shortcuts.CreateDesktop(name, r.Path);
             r.DesktopShortcut = name;
         }
@@ -255,13 +298,13 @@ public sealed class InstallManager
         WriteManifest(m);
     }
 
-    public void SetStartMenuShortcut(CatalogApp app, bool on)
+    public void SetStartMenuShortcut(string installKey, string shortcutName, bool on)
     {
         var m = Manifest();
-        if (!m.TryGetValue(app.Id, out var r) || !File.Exists(r.Path)) return;
+        if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
         if (on && r.StartMenuShortcut == null)
         {
-            var name = Shortcuts.SafeName(TryProductName(r.Path) ?? app.Name);
+            var name = Shortcuts.SafeName(shortcutName);
             Shortcuts.CreateStartMenu(name, r.Path);
             r.StartMenuShortcut = name;
         }
@@ -296,10 +339,33 @@ public sealed class InstallManager
 
         var sumsPath = file + ".SHA256SUMS";
         await client.DownloadAssetAsync(owner, repo, sumsAsset.Id, sumsPath, null);
-        string text;
-        try { text = File.ReadAllText(sumsPath); }
+        byte[] sumsBytes;
+        try { sumsBytes = File.ReadAllBytes(sumsPath); }
         finally { TryDelete(sumsPath); }
 
+        // Authenticity (audit F1): the manifest is trusted only if the controller's OFFLINE minisign
+        // signature over it verifies with the embedded suite key, and its signed trusted comment names
+        // THIS release ("<repo> <tag>") so a manifest from another release can't be replayed. A present
+        // but invalid signature is always fatal; an absent one downgrades the outcome to Unsigned.
+        bool signed = false;
+        var sigAsset = release.Assets.FirstOrDefault(a => a.Name == "SHA256SUMS.minisig");
+        if (sigAsset != null)
+        {
+            var sigPath = file + ".SHA256SUMS.minisig";
+            await client.DownloadAssetAsync(owner, repo, sigAsset.Id, sigPath, null);
+            string sigText;
+            try { sigText = File.ReadAllText(sigPath); }
+            finally { TryDelete(sigPath); }
+            try { Minisign.Verify(sumsBytes, sigText, $"{repo} {release.TagName}"); }
+            catch (Minisign.VerifyException ex)
+            {
+                TryDelete(file);
+                throw new Exception($"Refusing {asset.Name}: {ex.Message} Aborting install.");
+            }
+            signed = true;
+        }
+
+        var text = System.Text.Encoding.UTF8.GetString(sumsBytes);
         var expected = ExpectedSha256(asset.Name, text);
         if (expected == null) return VerifyResult.AssetNotListed;
         var actual = Sha256Hex(file);
@@ -308,25 +374,23 @@ public sealed class InstallManager
             TryDelete(file);
             throw new Exception($"Checksum mismatch for {asset.Name} — the download does not match the release's SHA256SUMS. Aborting install.");
         }
-        return VerifyResult.Verified;
+        return signed ? VerifyResult.Verified : VerifyResult.Unsigned;
     }
+
+    /// <summary>Why a non-Verified outcome blocks a strict (current-release) install — shared by the GUI
+    /// install, the launcher self-update and the CLI so the wording stays consistent.</summary>
+    public static string StrictFailureReason(VerifyResult result, string assetName) => result switch
+    {
+        VerifyResult.Verified => "verified",
+        VerifyResult.NoManifest => "this release publishes no SHA256SUMS checksums",
+        VerifyResult.AssetNotListed => $"“{assetName}” isn't listed in this release's SHA256SUMS",
+        _ => "this release's SHA256SUMS isn't signed with the suite key",
+    };
 
     /// <summary>Returns the expected hex SHA-256 for <paramref name="assetName"/> from a SHA256SUMS body
     /// (standard <c>&lt;hex&gt;␠␠&lt;filename&gt;</c> lines), or null if the asset isn't listed.</summary>
-    public static string? ExpectedSha256(string assetName, string sumsText)
-    {
-        foreach (var raw in sumsText.Split('\n'))
-        {
-            var line = raw.Trim();
-            int sep = line.IndexOfAny(new[] { ' ', '\t' });
-            if (sep <= 0) continue;
-            var hash = line[..sep];
-            var name = line[(sep + 1)..].Trim();
-            if (name.StartsWith('*')) name = name[1..];   // sha256sum "binary mode" marker
-            if (name == assetName) return hash;
-        }
-        return null;
-    }
+    /// <summary>The hash listed for an asset in a SHA256SUMS text (parsing lives in Core: <see cref="Sha256Sums"/>).</summary>
+    public static string? ExpectedSha256(string assetName, string sumsText) => Sha256Sums.Expected(assetName, sumsText);
 
     /// <summary>Streams <paramref name="path"/> through SHA-256 and returns the lowercase hex digest.</summary>
     public static string Sha256Hex(string path)

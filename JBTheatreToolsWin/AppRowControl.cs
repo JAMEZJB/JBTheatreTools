@@ -57,10 +57,6 @@ public sealed class AppRowControl : UserControl
     public event Action<AppRowControl, string>? VariantChangeRequested;
     /// <summary>Set by MainForm: the currently-selected variant id for this app.</summary>
     public Func<AppRowControl, string?>? SelectedVariantQuery;
-    /// <summary>Set by MainForm: true when the selected variant differs from the installed one.</summary>
-    public Func<AppRowControl, bool>? VariantSwitchQuery;
-    /// <summary>Set by MainForm: the installed variant's label (for the version line), or null.</summary>
-    public Func<AppRowControl, string?>? InstalledVariantLabelQuery;
 
     public AppRowControl(CatalogApp app)
     {
@@ -197,7 +193,6 @@ public sealed class AppRowControl : UserControl
     private void PrimaryAction()
     {
         if (!Enabled) return;
-        if ((VariantSwitchQuery?.Invoke(this) ?? false) && InstallRequested != null) { _ = InstallRequested(this); return; }
         if (Installed != null) { LaunchRequested?.Invoke(this); return; }
         if (Status is RowStatus.NotInstalled or RowStatus.UpdateAvailable or RowStatus.Error && InstallRequested != null)
             _ = InstallRequested(this);
@@ -245,14 +240,6 @@ public sealed class AppRowControl : UserControl
                 variant.DropDownItems.Add(item);
             }
             menu.Items.Add(variant);
-            // When the selected variant isn't the installed one, offer to install it.
-            if (VariantSwitchQuery?.Invoke(this) ?? false)
-            {
-                var lbl = App.Variants.FirstOrDefault(v => v.Id == sel)?.Label ?? "variant";
-                var switchItem = new ToolStripMenuItem($"Install {lbl}");
-                switchItem.Click += async (_, _) => { if (InstallRequested != null) await InstallRequested(this); };
-                menu.Items.Add(switchItem);
-            }
         }
         if (Releases.Count > 0)
         {
@@ -477,8 +464,9 @@ public sealed class AppRowControl : UserControl
     private void UpdateVisual()
     {
         if (App.HasVariants) SetSelectedVariant(SelectedVariantQuery?.Invoke(this));
-        var instVar = InstalledVariantLabelQuery?.Invoke(this);
-        string instText = Installed == null ? "—" : (instVar != null ? $"{Installed} ({instVar})" : Installed);
+        // The row shows the SELECTED variant's slot, so the version line is annotated with that label.
+        var selVar = App.HasVariants ? SelectedVariantLabel() : null;
+        string instText = Installed == null ? "—" : (selVar != null ? $"{Installed} ({selVar})" : Installed);
         _version.Text = $"Installed: {instText}    ·    Latest: {Latest ?? "—"}";
 
         (string text, Color color) = Status switch
@@ -497,12 +485,8 @@ public sealed class AppRowControl : UserControl
         _badge.ForeColor = color;
 
         bool installed = Installed != null;
-        bool variantSwitch = VariantSwitchQuery?.Invoke(this) ?? false;
-        _install.Visible = Status is RowStatus.NotInstalled or RowStatus.UpdateAvailable or RowStatus.Error || variantSwitch;
-        _install.Text = Status == RowStatus.UpdateAvailable ? "Update"
-                        : (variantSwitch && Status is not (RowStatus.NotInstalled or RowStatus.Error))
-                            ? $"Install {SelectedVariantLabel() ?? "variant"}"
-                            : (installed ? "Retry" : "Install");
+        _install.Visible = Status is RowStatus.NotInstalled or RowStatus.UpdateAvailable or RowStatus.Error;
+        _install.Text = Status == RowStatus.UpdateAvailable ? "Update" : (installed ? "Retry" : "Install");
         _install.Enabled = LatestAssetId != null;
         // Launch is available whenever something is installed, even before a refresh has run.
         _launch.Visible = installed;

@@ -67,7 +67,11 @@ enum CLI {
             }
             i += 1
         }
-        if token == nil { token = TokenStore.load() }
+        // Only verbs that talk to GitHub need credentials. Local verbs (--installed / --uninstall /
+        // --launch / --code-id) must never touch the Keychain: a read there can raise an OS prompt that
+        // a headless run can't answer (audit F14).
+        let needsAuth = !["--installed", "--uninstall", "--launch", "--code-id"].contains(cmd)
+        if needsAuth, token == nil { token = TokenStore.load() }
 
         let catalog: Catalog
         do {
@@ -76,11 +80,16 @@ enum CLI {
             fputs("error: could not load catalog: \(error.localizedDescription)\n", stderr)
             exit(1)
         }
+        // Normalise the shared install manifest the same way the GUI does (v1.15.0 → per-variant slots),
+        // so the CLI sees the same slots as the app.
+        InstallManager.shared.migrateVariantSlots(catalog.apps)
 
         // Resolve download auth: explicit server flags win (either flag implies server mode, the URL
         // defaulting to the built-in relay); then a usable token; then the GUI-configured server mode
         // (built-in URL + saved passphrase) so a machine set up in the app works with no flags at all.
-        if serverBase != nil || serverPass != nil {
+        if !needsAuth {
+            // Local verb — dispatch with no credentials resolved (and no Keychain access).
+        } else if serverBase != nil || serverPass != nil {
             serverBase = serverBase ?? AppState.serverOverride ?? catalog.downloadServer
             if serverPass == nil { serverPass = ServerAuthStore.load() }
         } else if token == nil, AppState.authMode == .server,
@@ -149,8 +158,15 @@ enum CLI {
         if m.isEmpty { print("No apps installed."); return }
         print("Installed apps (\(InstallManager.shared.manifestURL.path)):\n")
         for app in catalog.apps {
-            if let rec = m[app.id] {
-                print("  \(pad(app.name, 20))  \(pad(rec.version, 10))  \(rec.path)")
+            // Every install slot: the app itself, or one per variant for variant apps (Standard + Full).
+            let slots: [(key: String, label: String?)] = app.hasVariants
+                ? (app.variants ?? []).map { (app.installKey(variantId: $0.id), $0.label) }
+                : [(app.id, nil)]
+            for slot in slots {
+                if let rec = m[slot.key] {
+                    let name = slot.label.map { "\(app.name) (\($0))" } ?? app.name
+                    print("  \(pad(name, 20))  \(pad(rec.version, 10))  \(rec.path)")
+                }
             }
         }
     }
@@ -209,15 +225,14 @@ enum CLI {
                 // (older build) stays verify-if-present. A hash mismatch always aborts (throws above).
                 if tag == nil, verification != .verified {
                     try? FileManager.default.removeItem(at: zip)
-                    let reason = verification == .noManifest
-                        ? "the release publishes no SHA256SUMS"
-                        : "\(asset.name) isn't listed in the release's SHA256SUMS"
+                    let reason = AppState.strictFailureReason(verification, assetName: asset.name)
                     AppLog.shared.log("cli: install \(app.id) \(rel.tagName) BLOCKED (strict) — \(reason)")
                     fputs("error: refusing to install \(app.name) \(rel.tagName) — \(reason). (Re-run with --tag \(rel.tagName) to install it anyway, unverified.)\n", stderr)
                     exit(1)
                 }
                 switch verification {
-                case .verified:       print("Verified \(asset.name) (sha256).")
+                case .verified:       print("Verified \(asset.name) (signed sha256).")
+                case .unsigned:       print("⚠︎ \(asset.name) installed: sha256 ok but the manifest is UNSIGNED (older tag).")
                 case .noManifest:     print("⚠︎ \(asset.name) installed unverified (older tag; no SHA256SUMS).")
                 case .assetNotListed: print("⚠︎ \(asset.name) installed unverified (older tag; not in SHA256SUMS).")
                 }
@@ -275,6 +290,16 @@ enum CLI {
                 let dest = URL(fileURLWithPath: destDir).appendingPathComponent(asset.name)
                 print("Downloading \(asset.name) (\(byteString(asset.size))) @ \(info.tagName)…")
                 try await client.downloadAsset(owner: s.owner, repo: s.repo, assetId: asset.id, to: dest)
+                // Strict verify, exactly like the GUI self-update (audit F5): size + suite-signed
+                // SHA256SUMS + hash. A failure deletes the download and exits non-zero.
+                let verification = try await AppState.verifyDownload(dest, asset: asset, release: info,
+                                                                     app: CatalogApp.forSelf(s), client: client)
+                guard verification == .verified else {
+                    try? FileManager.default.removeItem(at: dest)
+                    fputs("error: refusing to keep \(asset.name) — \(AppState.strictFailureReason(verification, assetName: asset.name)).\n", stderr)
+                    exit(1)
+                }
+                print("Verified \(asset.name) (signed sha256).")
                 print("Saved → \(dest.path)")
             } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
         }

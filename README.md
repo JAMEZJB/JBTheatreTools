@@ -43,6 +43,15 @@ ahead of its first release shows "No release" and becomes installable once a bui
 
 The launcher itself ships on **its own** Releases page: macOS `.app` (zipped) and Windows `.exe`.
 
+**Verified downloads:** every app the launcher installs (and its own updates) is checked before it can run.
+The download's size and SHA-256 must match the release's `SHA256SUMS`, and that manifest must carry a valid
+**minisign** signature — made offline with the suite's release key, whose public half is embedded in the
+launcher — naming that exact release. A tampered download, a swapped file, or a release that wasn't signed
+with that key is refused. Installing an older version from the version picker still requires a valid
+signature when one is published; releases that predate signing are allowed with an "unsigned" warning.
+(This logic is unit-tested against a real signed release: `swift test` in `JBTheatreTools/`, and
+`dotnet test JBTheatreToolsWin/Core.Tests`.)
+
 **First launch on macOS:** if you downloaded JB Theatre Tools from the browser, Gatekeeper may block it
 the first time (it's ad-hoc signed, not notarized). Right-click the app → **Open** → **Open** once; after
 that it launches normally. Apps you install **through** JB Theatre Tools are unaffected.

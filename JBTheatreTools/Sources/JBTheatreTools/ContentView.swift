@@ -369,10 +369,11 @@ struct AppRowView: View {
         .foregroundStyle(.secondary)
     }
 
-    /// The installed version, annotated with the installed variant for apps that ship variants.
+    /// The installed version of the SELECTED variant's slot, annotated with that variant's label for
+    /// apps that ship variants (each variant is its own install; the toggle picks which one is shown).
     private var installedText: String {
         guard let v = row.installed else { return "—" }
-        if let variant = state.installedVariantLabel(row) { return "\(v) (\(variant))" }
+        if let variant = state.selectedVariantLabel(row.app) { return "\(v) (\(variant))" }
         return v
     }
 
@@ -464,10 +465,7 @@ struct AppRowView: View {
             case .error:
                 installButton(title: row.installed == nil ? "Install" : "Retry")
             default:
-                // A different variant is selected than the one installed → offer to install it.
-                if state.variantSwitchAvailable(row) {
-                    installButton(title: "Install \(state.selectedVariantLabel(row.app) ?? "variant")")
-                }
+                EmptyView()
             }
             // Launch — available whenever something is installed, even before a refresh has run.
             if row.installed != nil { launchButton }
@@ -652,7 +650,7 @@ struct AppGridTile: View {
 
     @ViewBuilder
     private var statusCaption: some View {
-        let variant = state.installedVariantLabel(row) ?? state.selectedVariantLabel(row.app)
+        let variant = state.selectedVariantLabel(row.app)
         Text(captionText(variant: variant))
             .font(.caption2)
             .foregroundStyle(captionColor)
@@ -689,7 +687,7 @@ struct AppGridTile: View {
         var t = row.displayName
         if let v = row.installed {
             t += " — installed \(v)"
-            if let vl = state.installedVariantLabel(row) { t += " (\(vl))" }
+            if let vl = state.selectedVariantLabel(row.app) { t += " (\(vl))" }
         } else if row.status == .notInstalled {
             t += " — click to install"
         }

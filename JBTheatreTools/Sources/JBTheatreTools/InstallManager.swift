@@ -6,9 +6,15 @@ import CryptoKit
 /// isn't listed in it (e.g. a name mismatch). The two "unverified" cases are distinguished so the
 /// user/logs can tell "no checksums" from "checksums exist but don't cover this file".
 enum VerifyResult: Equatable {
+    /// Suite-signed manifest, asset listed, hash matches — the only fully trusted outcome.
     case verified
+    /// The release publishes no SHA256SUMS at all.
     case noManifest
+    /// SHA256SUMS exists but doesn't list this asset.
     case assetNotListed
+    /// Asset listed and hash matches, but the manifest carries no suite signature — so it only proves
+    /// transport integrity, not authenticity. Accepted for explicit older-tag installs only (audit F1).
+    case unsigned
 }
 
 struct InstalledRecord: Codable {
@@ -115,6 +121,31 @@ final class InstallManager {
     /// Extracts `downloadedZip` (a macOS app archive) and installs the contained `.app`.
     /// When `toApplications` is true the bundle is placed in the Applications folder (so it shows in
     /// Launchpad/Spotlight and launches without this launcher); otherwise in the managed apps dir.
+    /// One-time migration from v1.15.0, where a non-default variant (e.g. NDI "Full") was recorded under
+    /// the plain app id. Re-keys such a record to its own variant slot and renames the bundle with the
+    /// variant suffix, so a later default-variant install can't clobber it. No-op when nothing matches.
+    func migrateVariantSlots(_ apps: [CatalogApp]) {
+        var m = manifest()
+        var changed = false
+        for app in apps where app.hasVariants {
+            guard let rec = m[app.id], let vid = rec.variant, !app.isDefaultVariant(vid) else { continue }
+            let key = app.installKey(variantId: vid)
+            guard m[key] == nil else { continue }   // that slot already has its own record — leave both alone
+            var moved = rec
+            let suffix = app.variantSuffix(vid)
+            let current = URL(fileURLWithPath: rec.path)
+            if !suffix.isEmpty, fm.fileExists(atPath: rec.path) {
+                let dest = current.deletingLastPathComponent()
+                    .appendingPathComponent(current.deletingPathExtension().lastPathComponent + suffix + ".app")
+                if (try? fm.moveItem(at: current, to: dest)) != nil { moved.path = dest.path }
+            }
+            m[key] = moved
+            m.removeValue(forKey: app.id)
+            changed = true
+        }
+        if changed { writeManifest(m) }
+    }
+
     @discardableResult
     func install(app: CatalogApp, version: String, downloadedZip: URL, toApplications: Bool, variant: String? = nil) throws -> URL {
         let extractDir = cacheDir.appendingPathComponent("extract-\(app.id)", isDirectory: true)
@@ -126,29 +157,33 @@ final class InstallManager {
 
         guard let bundle = appBundle(in: extractDir, preferring: app.name) else { throw InstallError.noAppInZip }
 
-        // Remove any previous install first — it may be in a different location if the setting changed.
-        if let old = manifest()[app.id] { try? fm.removeItem(at: URL(fileURLWithPath: old.path)) }
+        // Each variant is its own install slot (Standard and Full can coexist), keyed by the app id for
+        // the default variant and `<id>@<variant>` otherwise. Only the previous install of THIS slot is
+        // removed — it may be in a different location if the setting changed.
+        let key = app.installKey(variantId: variant)
+        if let old = manifest()[key] { try? fm.removeItem(at: URL(fileURLWithPath: old.path)) }
 
         let destDir = toApplications ? applicationsInstallDir() : appsDir
         try? fm.createDirectory(at: destDir, withIntermediateDirectories: true)
-        let dest = destDir.appendingPathComponent(bundle.lastPathComponent)
+        // A non-default variant's bundle is renamed (e.g. "NDI Tools (Full).app") so it can sit next to
+        // the default variant's bundle in the same folder (the launcher dir or /Applications).
+        let suffix = app.variantSuffix(variant)
+        let bundleName = suffix.isEmpty
+            ? bundle.lastPathComponent
+            : bundle.deletingPathExtension().lastPathComponent + suffix + ".app"
+        let dest = destDir.appendingPathComponent(bundleName)
         try? fm.removeItem(at: dest)
         try fm.moveItem(at: bundle, to: dest)
 
         var m = manifest()
-        // Preserve any desktop-alias path already recorded; update version/path/variant.
-        let priorAlias = m[app.id]?.desktopAlias
-        m[app.id] = InstalledRecord(version: version, path: dest.path, installedAt: Self.isoNow(),
-                                    desktopAlias: priorAlias, variant: variant)
+        // Preserve any desktop-alias path already recorded for this slot; update version/path/variant.
+        let priorAlias = m[key]?.desktopAlias
+        m[key] = InstalledRecord(version: version, path: dest.path, installedAt: Self.isoNow(),
+                                 desktopAlias: priorAlias, variant: variant)
         writeManifest(m)
         return dest
     }
 
-    /// The installed variant id for an app that ships variants (nil if not installed or single-variant).
-    func installedVariant(_ appId: String) -> String? {
-        guard let rec = manifest()[appId], fm.fileExists(atPath: rec.path) else { return nil }
-        return rec.variant
-    }
 
     /// Where "install to the Applications folder" puts apps: `/Applications` when it's writable (admin
     /// users), otherwise `~/Applications`. Both appear in Launchpad & Spotlight, and neither needs an
@@ -198,8 +233,12 @@ final class InstallManager {
         return path == "/Applications" || path == user
     }
 
-    func launch(app: CatalogApp) throws {
-        guard let path = installedPath(app.id) else { throw InstallError.notInstalled }
+    /// Launches the app's default-variant slot (CLI / single-variant apps).
+    func launch(app: CatalogApp) throws { try launch(installKey: app.id) }
+
+    /// Launches a specific install slot (the row's selected variant).
+    func launch(installKey: String) throws {
+        guard let path = installedPath(installKey) else { throw InstallError.notInstalled }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         proc.arguments = [path.path]

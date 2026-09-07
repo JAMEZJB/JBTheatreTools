@@ -82,6 +82,32 @@ struct CatalogApp: Decodable, Identifiable {
 
     /// Variant-aware macOS asset name (the selected variant's per-arch build).
     func macAssetName(variantId: String?) -> String? { MacArch.pick(from: assets(variantId: variantId)) }
+
+    /// True when `variantId` is this app's default (first) variant, or the app has no variants.
+    func isDefaultVariant(_ variantId: String?) -> Bool {
+        guard hasVariants, let first = variants?.first?.id else { return true }
+        return variantId == nil || variantId == first
+    }
+
+    /// The label of a variant id, or nil.
+    func variantLabel(_ variantId: String?) -> String? {
+        guard let vid = variantId else { return nil }
+        return variants?.first { $0.id == vid }?.label
+    }
+
+    /// The install-manifest key for a variant. Each variant is its OWN install slot, so Standard and
+    /// Full can be installed side by side. The default variant keeps the plain app id (so installs
+    /// made before variants existed stay valid); other variants are `<id>@<variant>`.
+    func installKey(variantId: String?) -> String {
+        isDefaultVariant(variantId) ? id : "\(id)@\(variantId!)"
+    }
+
+    /// A suffix for on-disk names of a non-default variant (" (Full)"), so its bundle/shortcut can sit
+    /// next to the default variant's without colliding. Empty for the default variant.
+    func variantSuffix(_ variantId: String?) -> String {
+        guard !isDefaultVariant(variantId), let label = variantLabel(variantId) else { return "" }
+        return " (\(label))"
+    }
 }
 
 /// One downloadable variant of an app (e.g. Standard / Full). `label` is the toggle text.
@@ -115,4 +141,13 @@ struct SelfInfo: Decodable {
     let repo: String
     let assets: [String: String]
     var macAssetName: String? { MacArch.pick(from: assets) }
+}
+
+extension CatalogApp {
+    /// A synthetic catalog entry for the launcher itself, so its self-update download goes through the
+    /// same verification path (size + suite-signed SHA256SUMS + hash) as every app install.
+    static func forSelf(_ s: SelfInfo) -> CatalogApp {
+        CatalogApp(id: "jbtheatretools", name: "JB Theatre Tools", blurb: "", whatsNew: nil, whatsNewVersion: nil,
+                   owner: s.owner, repo: s.repo, assets: s.assets, variants: nil)
+    }
 }

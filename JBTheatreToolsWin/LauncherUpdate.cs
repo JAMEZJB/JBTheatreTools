@@ -30,7 +30,7 @@ public static class LauncherUpdate
         if (verification != VerifyResult.Verified)
         {
             InstallManager.TryDelete(dest);
-            throw new Exception("Couldn't verify the update against its SHA256SUMS — download discarded.");
+            throw new Exception($"Couldn't verify the update — {InstallManager.StrictFailureReason(verification, asset.Name)}. Download discarded.");
         }
 
         try { System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{dest}\""); } catch { /* non-fatal */ }

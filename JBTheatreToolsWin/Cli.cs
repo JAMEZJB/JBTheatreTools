@@ -70,18 +70,28 @@ public static class Cli
                 default: positional.Add(a); break;
             }
         }
-        token ??= SafeLoadToken();
+        // Only verbs that talk to GitHub need credentials. Local verbs (--installed / --uninstall /
+        // --launch) must never touch the Credential Manager / Keychain-equivalent (audit F14).
+        var needsAuth = cmd is not ("--installed" or "--uninstall" or "--launch");
+        if (needsAuth) token ??= SafeLoadToken();
 
         Catalog catalog;
         try { catalog = Catalog.Load(catalogPath); }
         catch (Exception ex) { Console.Error.WriteLine($"error: could not load catalog: {ex.Message}"); return 1; }
+        // Normalise the shared install manifest the same way the GUI does (v1.15.0 → per-variant slots),
+        // so the CLI sees the same slots as the app.
+        InstallManager.Shared.MigrateVariantSlots(catalog.Apps);
 
         // Resolve download auth: explicit server flags win (either flag implies server mode, the URL
         // defaulting to the built-in relay); then a usable token; then the GUI-configured server mode
         // (built-in URL + saved passphrase) so a machine set up in the app works with no flags at all.
         var settings = AppSettings.Load();
         var builtInServer = AuthClient.ResolveServerUrl(settings, catalog.DownloadServer);
-        if (_serverBase != null || _serverPass != null)
+        if (!needsAuth)
+        {
+            // Local verb — dispatch with no credentials resolved.
+        }
+        else if (_serverBase != null || _serverPass != null)
         {
             _serverBase ??= builtInServer;
             _serverPass ??= SafeLoadServerPass();
@@ -148,8 +158,18 @@ public static class Cli
         if (m.Count == 0) { Console.WriteLine("No apps installed."); return 0; }
         Console.WriteLine($"Installed apps ({InstallManager.Shared.ManifestPath}):\n");
         foreach (var app in catalog.Apps)
-            if (m.TryGetValue(app.Id, out var r))
-                Console.WriteLine($"  {Pad(app.Name, 20)}  {Pad(r.Version, 10)}  {r.Path}");
+        {
+            // Every install slot: the app itself, or one per variant for variant apps (Standard + Full).
+            var slots = app.HasVariants && app.Variants != null
+                ? app.Variants.Select(v => (key: app.InstallKey(v.Id), label: (string?)v.Label)).ToList()
+                : new List<(string key, string? label)> { (app.Id, null) };
+            foreach (var s in slots)
+                if (m.TryGetValue(s.key, out var r))
+                {
+                    var name = s.label != null ? $"{app.Name} ({s.label})" : app.Name;
+                    Console.WriteLine($"  {Pad(name, 20)}  {Pad(r.Version, 10)}  {r.Path}");
+                }
+        }
         return 0;
     }
 
@@ -210,16 +230,15 @@ public static class Cli
             if (tag == null && verification != VerifyResult.Verified)
             {
                 InstallManager.TryDelete(cache);
-                var reason = verification == VerifyResult.NoManifest
-                    ? "the release publishes no SHA256SUMS"
-                    : $"{asset.Name} isn't listed in the release's SHA256SUMS";
+                var reason = InstallManager.StrictFailureReason(verification, asset.Name);
                 Log.Write($"cli: install {app.Id} {rel.TagName} BLOCKED (strict) — {reason}");
                 Console.Error.WriteLine($"error: refusing to install {app.Name} {rel.TagName} — {reason}. (Re-run with --tag {rel.TagName} to install it anyway, unverified.)");
                 return 1;
             }
             Console.WriteLine(verification switch
             {
-                VerifyResult.Verified => $"Verified {asset.Name} (sha256).",
+                VerifyResult.Verified => $"Verified {asset.Name} (signed sha256).",
+                VerifyResult.Unsigned => $"⚠ {asset.Name} installed: sha256 ok but the manifest is UNSIGNED (older tag).",
                 VerifyResult.NoManifest => $"⚠ {asset.Name} installed unverified (older tag; no SHA256SUMS).",
                 _ => $"⚠ {asset.Name} installed unverified (older tag; not in SHA256SUMS).",
             });

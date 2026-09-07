@@ -90,6 +90,31 @@ public sealed class CatalogApp
     /// <summary>Variant-aware Windows asset name for this machine's architecture.</summary>
     public string? WindowsAsset(string? variantId)
         => AssetsFor(variantId).TryGetValue(Platform.AssetKey, out var n) ? n : null;
+
+    /// <summary>True when <paramref name="variantId"/> is the default (first) variant, or the app has no variants.</summary>
+    public bool IsDefaultVariant(string? variantId)
+    {
+        if (!HasVariants || Variants == null) return true;
+        return variantId == null || variantId == Variants[0].Id;
+    }
+
+    /// <summary>The label of a variant id, or null.</summary>
+    public string? VariantLabel(string? variantId)
+        => variantId == null ? null : Variants?.FirstOrDefault(v => v.Id == variantId)?.Label;
+
+    /// <summary>The install-manifest key for a variant. Each variant is its OWN install slot, so Standard
+    /// and Full can be installed side by side. The default variant keeps the plain app id (installs made
+    /// before variants existed stay valid); other variants are "&lt;id&gt;@&lt;variant&gt;".</summary>
+    public string InstallKey(string? variantId) => IsDefaultVariant(variantId) ? Id : $"{Id}@{variantId}";
+
+    /// <summary>Suffix for shortcut names of a non-default variant (" (Full)") so they don't collide with
+    /// the default variant's; empty for the default variant.</summary>
+    public string VariantSuffix(string? variantId)
+    {
+        if (IsDefaultVariant(variantId)) return "";
+        var label = VariantLabel(variantId);
+        return label == null ? "" : $" ({label})";
+    }
 }
 
 /// <summary>One downloadable variant of an app (e.g. Standard / Full). <c>Label</c> is the toggle text.</summary>

@@ -54,8 +54,6 @@ final class AppState: ObservableObject {
         var progress: Double = 0
         /// The installed app's self-declared name (read from its bundle); overrides the catalog name.
         var resolvedName: String?
-        /// Which variant is installed on disk (for apps that ship variants); nil = single-variant/none.
-        var installedVariant: String?
         /// Name to show: the installed app's own name when available, else the catalog name.
         var displayName: String { resolvedName ?? app.name }
         /// Shown once we know a row is relevant: anything installed locally, or any app whose repo
@@ -128,22 +126,24 @@ final class AppState: ObservableObject {
             let catalog = try Catalog.load()
             selfInfo = catalog.selfInfo
             serverBase = Self.serverOverride ?? catalog.downloadServer
-            rows = catalog.apps.map {
-                let installed = InstallManager.shared.installedVersion($0.id)
-                return Row(app: $0,
-                           installed: installed,
-                           status: installed != nil ? .installed : .unknown,
-                           resolvedName: InstallManager.shared.installedDisplayName($0.id),
-                           installedVariant: InstallManager.shared.installedVariant($0.id))
-            }
-            catalogOrder = catalog.apps.map(\.id)
-            rows = Self.applyingSavedOrder(rows)
-            let known = Set(catalogOrder)
-            pinnedIds = Set(UserDefaults.standard.stringArray(forKey: Self.pinnedKey) ?? []).intersection(known)
-            hiddenIds = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? []).intersection(known)
+            InstallManager.shared.migrateVariantSlots(catalog.apps)   // v1.15.0 → per-variant install slots
+            let known = Set(catalog.apps.map(\.id))
+            // Load the per-app variant choice BEFORE building rows, so each row reads its selected slot.
             if let saved = UserDefaults.standard.dictionary(forKey: Self.variantKey) as? [String: String] {
                 variantSelection = saved.filter { known.contains($0.key) }
             }
+            rows = catalog.apps.map {
+                let key = installKey(for: $0)
+                let installed = InstallManager.shared.installedVersion(key)
+                return Row(app: $0,
+                           installed: installed,
+                           status: installed != nil ? .installed : .unknown,
+                           resolvedName: InstallManager.shared.installedDisplayName(key))
+            }
+            catalogOrder = catalog.apps.map(\.id)
+            rows = Self.applyingSavedOrder(rows)
+            pinnedIds = Set(UserDefaults.standard.stringArray(forKey: Self.pinnedKey) ?? []).intersection(known)
+            hiddenIds = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? []).intersection(known)
         } catch {
             globalError = "Could not load app catalog: \(error.localizedDescription)"
         }
@@ -416,30 +416,39 @@ final class AppState: ObservableObject {
         return app.variants?.first { $0.id == vid }?.label
     }
 
-    /// Label of the variant currently INSTALLED for a row (for the version line), or nil.
-    func installedVariantLabel(_ row: Row) -> String? {
-        guard row.app.hasVariants, let vid = row.installedVariant ?? row.app.variants?.first?.id else { return nil }
-        return row.app.variants?.first { $0.id == vid }?.label
+    /// The install-manifest key of the row's SELECTED variant slot. Every variant is its own slot, so
+    /// Standard and Full can both be installed; the toggle just chooses which slot the row shows.
+    func installKey(for app: CatalogApp) -> String {
+        app.installKey(variantId: selectedVariantId(app))
     }
 
-    /// True when the app ships variants and the SELECTED one isn't the INSTALLED one — so the user can
-    /// install/switch to the selected build even when the installed version is otherwise "up to date".
-    func variantSwitchAvailable(_ row: Row) -> Bool {
-        guard row.app.hasVariants, row.installed != nil else { return false }
-        return (row.installedVariant ?? row.app.variants?.first?.id) != selectedVariantId(row.app)
+    /// The selected-slot install key for a row id (used by the alias/Dock/launch/uninstall actions).
+    private func slotKey(_ rowId: String) -> String? {
+        rows.first { $0.id == rowId }.map { installKey(for: $0.app) }
     }
 
-    /// Changes the selected variant for an app, persists it, and re-resolves that row's status/asset.
+    /// Changes the selected variant for an app, persists it, and switches the row to that variant's
+    /// install slot: re-reads what's installed there and re-resolves the latest asset + status.
     func setVariant(_ appId: String, _ variantId: String) {
         variantSelection[appId] = variantId
         UserDefaults.standard.set(variantSelection, forKey: Self.variantKey)
-        if let i = rows.firstIndex(where: { $0.id == appId }) { recomputeRow(i) }
+        if let i = rows.firstIndex(where: { $0.id == appId }) {
+            let key = installKey(for: rows[i].app)
+            rows[i].installed = InstallManager.shared.installedVersion(key)
+            rows[i].resolvedName = InstallManager.shared.installedDisplayName(key)
+            recomputeRow(i)
+        }
         AppLog.shared.log("variant for \(appId) → \(variantId)")
     }
 
     /// Re-derives latestAssetId + status for a row from its cached releases (after a variant change).
+    /// With no cached releases yet (pre-refresh), the row simply reflects whether the slot is installed.
     private func recomputeRow(_ i: Int) {
-        guard rows.indices.contains(i), let latest = Self.latest(from: rows[i].releases) else { return }
+        guard rows.indices.contains(i) else { return }
+        guard let latest = Self.latest(from: rows[i].releases) else {
+            rows[i].status = rows[i].installed != nil ? .installed : .unknown
+            return
+        }
         let assetId = latest.assets.first { $0.name == macAsset(for: rows[i].app) }?.id
         rows[i].latestAssetId = assetId
         rows[i].status = Self.status(installed: rows[i].installed, latest: latest.tagName, hasAsset: assetId != nil)
@@ -495,29 +504,33 @@ final class AppState: ObservableObject {
 
     // MARK: - Desktop alias & Dock pin (per-app, from the row menu; best-effort like win shortcuts)
 
-    func hasDesktopAlias(_ id: String) -> Bool { InstallManager.shared.hasDesktopAlias(id) }
+    func hasDesktopAlias(_ id: String) -> Bool {
+        guard let key = slotKey(id) else { return false }
+        return InstallManager.shared.hasDesktopAlias(key)
+    }
 
     func isDockPinned(_ id: String) -> Bool {
-        guard let path = InstallManager.shared.installedPath(id)?.path else { return false }
+        guard let key = slotKey(id), let path = InstallManager.shared.installedPath(key)?.path else { return false }
         return Dock.isPinned(path)
     }
 
     func toggleDesktopAlias(_ id: String) {
+        guard let key = slotKey(id) else { return }
         if hasDesktopAlias(id) {
-            InstallManager.shared.removeDesktopAlias(id)
-            AppLog.shared.log("removed desktop alias for \(id)")
+            InstallManager.shared.removeDesktopAlias(key)
+            AppLog.shared.log("removed desktop alias for \(key)")
         } else {
             do {
-                try InstallManager.shared.addDesktopAlias(id)
-                AppLog.shared.log("added desktop alias for \(id)")
+                try InstallManager.shared.addDesktopAlias(key)
+                AppLog.shared.log("added desktop alias for \(key)")
             } catch {
-                AppLog.shared.log("desktop alias for \(id) FAILED: \(error.localizedDescription)")
+                AppLog.shared.log("desktop alias for \(key) FAILED: \(error.localizedDescription)")
             }
         }
     }
 
     func toggleDockPin(_ id: String) {
-        guard let path = InstallManager.shared.installedPath(id)?.path else { return }
+        guard let key = slotKey(id), let path = InstallManager.shared.installedPath(key)?.path else { return }
         if Dock.isPinned(path) {
             Dock.unpin(path)
             AppLog.shared.log("unpinned \(id) from Dock")
@@ -537,9 +550,9 @@ final class AppState: ObservableObject {
     private func refresh(index: Int, client: GitHubClient) async {
         let app = rows[index].app
         rows[index].status = .checking
-        rows[index].installed = InstallManager.shared.installedVersion(app.id)
-        rows[index].resolvedName = InstallManager.shared.installedDisplayName(app.id)
-        rows[index].installedVariant = InstallManager.shared.installedVariant(app.id)
+        let slot = installKey(for: app)
+        rows[index].installed = InstallManager.shared.installedVersion(slot)
+        rows[index].resolvedName = InstallManager.shared.installedDisplayName(slot)
         do {
             let all = try await client.releases(owner: app.owner, repo: app.repo)
             rows[index].releases = all
@@ -636,13 +649,47 @@ final class AppState: ObservableObject {
         guard let sumsAsset = release.assets.first(where: { $0.name == "SHA256SUMS" }) else { return .noManifest }
         let sumsURL = InstallManager.shared.cacheDir.appendingPathComponent("\(app.id)-\(release.tagName)-SHA256SUMS")
         try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: sumsAsset.id, to: sumsURL)
-        let text = (try? String(contentsOf: sumsURL, encoding: .utf8)) ?? ""
+        let sumsData = (try? Data(contentsOf: sumsURL)) ?? Data()
         try? fm.removeItem(at: sumsURL)
+
+        // Authenticity (audit F1): the manifest is trusted only if the controller's OFFLINE minisign
+        // signature over it verifies with the embedded suite key, and its signed trusted comment names
+        // THIS release ("<repo> <tag>") so a manifest from another release can't be replayed. A present
+        // but invalid signature is always fatal; an absent one downgrades the outcome to `.unsigned`.
+        var signed = false
+        if let sigAsset = release.assets.first(where: { $0.name == "SHA256SUMS.minisig" }) {
+            let sigURL = InstallManager.shared.cacheDir.appendingPathComponent("\(app.id)-\(release.tagName)-SHA256SUMS.minisig")
+            try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: sigAsset.id, to: sigURL)
+            let sigText = (try? String(contentsOf: sigURL, encoding: .utf8)) ?? ""
+            try? fm.removeItem(at: sigURL)
+            do {
+                try Minisign.verify(manifest: sumsData, minisig: sigText,
+                                    expectedTrustedComment: "\(app.repo) \(release.tagName)")
+            } catch {
+                try? fm.removeItem(at: file)
+                throw error
+            }
+            signed = true
+        }
+
+        let text = String(decoding: sumsData, as: UTF8.self)
         do {
-            return try InstallManager.verify(file: file, assetName: asset.name, sums: text) ? .verified : .assetNotListed
+            guard try InstallManager.verify(file: file, assetName: asset.name, sums: text) else { return .assetNotListed }
+            return signed ? .verified : .unsigned
         } catch {
             try? fm.removeItem(at: file)
             throw error
+        }
+    }
+
+    /// Why a non-`.verified` outcome blocks a strict (current-release) install — shared by the GUI
+    /// install, the launcher self-update and the CLI so the wording stays consistent.
+    nonisolated static func strictFailureReason(_ result: VerifyResult, assetName: String) -> String {
+        switch result {
+        case .verified:       return "verified"
+        case .noManifest:     return "this release publishes no SHA256SUMS checksums"
+        case .assetNotListed: return "“\(assetName)” isn’t listed in this release’s SHA256SUMS"
+        case .unsigned:       return "this release’s SHA256SUMS isn’t signed with the suite key"
         }
     }
 
@@ -689,14 +736,13 @@ final class AppState: ObservableObject {
             // throws from verifyDownload) regardless of tag; size is always checked too.
             if tag == nil, verification != .verified {
                 try? FileManager.default.removeItem(at: zipDest)
-                let reason = verification == .noManifest
-                    ? "this release publishes no SHA256SUMS checksums"
-                    : "“\(asset.name)” isn’t listed in this release’s SHA256SUMS"
+                let reason = Self.strictFailureReason(verification, assetName: asset.name)
                 AppLog.shared.log("install \(app.id) \(rel.tagName): BLOCKED (strict) — \(reason)")
                 throw InstallError.unverified(reason: reason)
             }
             switch verification {
-            case .verified:       AppLog.shared.log("verified \(app.id) \(rel.tagName) (sha256)")
+            case .verified:       AppLog.shared.log("verified \(app.id) \(rel.tagName) (signed sha256)")
+            case .unsigned:       AppLog.shared.log("install \(app.id) \(rel.tagName): older tag — sha256 ok but manifest UNSIGNED")
             case .noManifest:     AppLog.shared.log("install \(app.id) \(rel.tagName): unverified older tag (no SHA256SUMS)")
             case .assetNotListed: AppLog.shared.log("install \(app.id) \(rel.tagName): unverified older tag (asset not in SHA256SUMS)")
             }
@@ -704,8 +750,7 @@ final class AppState: ObservableObject {
             try InstallManager.shared.install(app: app, version: rel.tagName, downloadedZip: zipDest, toApplications: toApps, variant: variantId)
             try? FileManager.default.removeItem(at: zipDest)
             rows[i].installed = rel.tagName
-            rows[i].installedVariant = variantId
-            rows[i].resolvedName = InstallManager.shared.installedDisplayName(app.id)
+            rows[i].resolvedName = InstallManager.shared.installedDisplayName(app.installKey(variantId: variantId))
             rows[i].status = Self.status(installed: rel.tagName, latest: rows[i].latest ?? rel.tagName, hasAsset: true)
             AppLog.shared.log("installed \(app.id) \(rel.tagName)\(variantId.map { " [\($0)]" } ?? "")\(toApps ? " (Applications)" : "")")
         } catch {
@@ -717,10 +762,10 @@ final class AppState: ObservableObject {
     func uninstall(_ id: String) {
         guard let i = rows.firstIndex(where: { $0.id == id }) else { return }
         do {
-            try InstallManager.shared.uninstall(id)
+            // Uninstalls the SELECTED variant's slot only (the other variant, if installed, stays).
+            try InstallManager.shared.uninstall(installKey(for: rows[i].app))
             rows[i].installed = nil
             rows[i].resolvedName = nil
-            rows[i].installedVariant = nil
             if rows[i].latestAssetId != nil {
                 rows[i].status = .notInstalled
             } else if rows[i].latest == nil {
@@ -738,7 +783,7 @@ final class AppState: ObservableObject {
     func launch(_ id: String) {
         guard let i = rows.firstIndex(where: { $0.id == id }) else { return }
         do {
-            try InstallManager.shared.launch(app: rows[i].app)
+            try InstallManager.shared.launch(installKey: installKey(for: rows[i].app))
         } catch {
             rows[i].status = .error(error.localizedDescription)
         }
@@ -749,8 +794,9 @@ final class AppState: ObservableObject {
     /// Called when the "install to Applications" setting changes. If some installed apps are still in
     /// the other location, raises a confirmation to move them all so the setting stays truthful.
     func installLocationChanged(toApplications: Bool) {
-        let count = rows.filter {
-            $0.installed != nil && InstallManager.shared.needsRelocation($0.id, toApplications: toApplications)
+        // Count every installed slot (both variants of a variant app), not just the selected ones.
+        let count = InstallManager.shared.manifest().keys.filter {
+            InstallManager.shared.needsRelocation($0, toApplications: toApplications)
         }.count
         relocationPrompt = count > 0 ? RelocationPrompt(toApplications: toApplications, count: count) : nil
     }
@@ -766,16 +812,21 @@ final class AppState: ObservableObject {
         relocationPrompt = nil
         var moved = 0
         var failed: [String] = []
-        for i in rows.indices where rows[i].installed != nil {
-            let needed = InstallManager.shared.needsRelocation(rows[i].id, toApplications: toApplications)
+        // Move every installed slot (both variants of a variant app), then refresh each row from its
+        // selected slot.
+        for key in InstallManager.shared.manifest().keys.sorted() {
+            let needed = InstallManager.shared.needsRelocation(key, toApplications: toApplications)
             do {
-                try InstallManager.shared.relocate(rows[i].id, toApplications: toApplications)
+                try InstallManager.shared.relocate(key, toApplications: toApplications)
                 if needed { moved += 1 }
             } catch {
-                failed.append(rows[i].displayName)
+                failed.append(rows.first { installKey(for: $0.app) == key }?.displayName ?? key)
             }
-            rows[i].installed = InstallManager.shared.installedVersion(rows[i].id)
-            rows[i].resolvedName = InstallManager.shared.installedDisplayName(rows[i].id)
+        }
+        for i in rows.indices {
+            let key = installKey(for: rows[i].app)
+            rows[i].installed = InstallManager.shared.installedVersion(key)
+            rows[i].resolvedName = InstallManager.shared.installedDisplayName(key)
         }
         AppLog.shared.log("relocate → \(toApplications ? "Applications" : "launcher"): moved \(moved), failed \(failed.count)")
         if !failed.isEmpty {
@@ -826,24 +877,14 @@ final class AppState: ObservableObject {
             let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
             let dest = downloads.appendingPathComponent(asset.name)
             try await client.downloadAsset(owner: s.owner, repo: s.repo, assetId: asset.id, to: dest)
-            // Strict verify: the launcher's own release always ships SHA256SUMS, so require a clean match
-            // before telling the user to run the new build. (A hash mismatch throws; no-manifest /
-            // not-listed are treated as a verification failure too — this is a current release.)
-            guard let sumsAsset = info.assets.first(where: { $0.name == "SHA256SUMS" }) else {
+            // Strict verify (this is a current release): size + suite-signed SHA256SUMS + hash, through
+            // the same path every app install uses. A bad hash or bad signature throws (and deletes the
+            // file); anything short of `.verified` is refused too.
+            let verification = try await Self.verifyDownload(dest, asset: asset, release: info,
+                                                             app: CatalogApp.forSelf(s), client: client)
+            guard verification == .verified else {
                 try? FileManager.default.removeItem(at: dest)
-                launcherDownloadMessage = "Couldn't verify the update (no checksums published) — not saved."
-                return
-            }
-            let sumsURL = dest.deletingLastPathComponent().appendingPathComponent("JBTheatreTools-SHA256SUMS.txt")
-            try await client.downloadAsset(owner: s.owner, repo: s.repo, assetId: sumsAsset.id, to: sumsURL)
-            let text = (try? String(contentsOf: sumsURL, encoding: .utf8)) ?? ""
-            try? FileManager.default.removeItem(at: sumsURL)
-            let verified: Bool
-            do { verified = try InstallManager.verify(file: dest, assetName: asset.name, sums: text) }
-            catch { try? FileManager.default.removeItem(at: dest); throw error }   // hash mismatch
-            guard verified else {
-                try? FileManager.default.removeItem(at: dest)
-                launcherDownloadMessage = "Couldn't verify the update against its SHA256SUMS — not saved."
+                launcherDownloadMessage = "Couldn't verify the update — \(Self.strictFailureReason(verification, assetName: asset.name)). Not saved."
                 return
             }
             NSWorkspace.shared.activateFileViewerSelecting([dest])

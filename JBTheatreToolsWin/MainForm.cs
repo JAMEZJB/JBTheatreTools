@@ -245,6 +245,7 @@ public sealed class MainForm : Form
             return;
         }
 
+        InstallManager.Shared.MigrateVariantSlots(_catalog.Apps);   // v1.15.0 → per-variant install slots
         _list.Controls.Clear();
         _rows.Clear();
         foreach (var app in _catalog.Apps)
@@ -257,19 +258,18 @@ public sealed class MainForm : Form
             row.MoveRequested += MoveRow;
             row.CanMove = CanMoveRow;
             row.ShortcutToggleRequested += ToggleShortcut;
-            row.HasDesktopShortcut = r => InstallManager.Shared.HasDesktopShortcut(r.App.Id);
-            row.HasStartMenuShortcut = r => InstallManager.Shared.HasStartMenuShortcut(r.App.Id);
+            row.HasDesktopShortcut = r => InstallManager.Shared.HasDesktopShortcut(InstallKey(r.App));
+            row.HasStartMenuShortcut = r => InstallManager.Shared.HasStartMenuShortcut(InstallKey(r.App));
             row.PinToggleRequested += TogglePin;
             row.HideRequested += HideRow;
             row.IsPinnedQuery = r => IsPinned(r.App.Id);
             row.VariantChangeRequested += (r, vid) => SetVariant(r, vid);
             row.SelectedVariantQuery = r => SelectedVariant(r.App);
-            row.VariantSwitchQuery = VariantSwitchAvailable;
-            row.InstalledVariantLabelQuery = InstalledVariantLabel;
             row.SetSelectedVariant(SelectedVariant(app));
-            var installed = InstallManager.Shared.InstalledVersion(app.Id);
+            var slot = InstallKey(app);
+            var installed = InstallManager.Shared.InstalledVersion(slot);
             row.SetState(installed, null, null, installed != null ? RowStatus.Installed : RowStatus.Unknown);
-            row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(app.Id));
+            row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(slot));
             row.SetPinned(IsPinned(app.Id));
             // Installed apps show immediately (launchable pre-refresh); not-installed rows stay hidden
             // until a refresh confirms the token can reach them, so inaccessible apps never flash in.
@@ -308,7 +308,7 @@ public sealed class MainForm : Form
         {
             r.SetPinned(IsPinned(r.App.Id));
             if (IsHidden(r.App.Id)) r.Visible = false;
-            else if (!r.Visible && InstallManager.Shared.InstalledVersion(r.App.Id) != null) r.Visible = true;
+            else if (!r.Visible && InstallManager.Shared.InstalledVersion(InstallKey(r.App)) != null) r.Visible = true;
         }
         ReindexList();
     }
@@ -332,6 +332,10 @@ public sealed class MainForm : Form
         _settings.AppVariants[row.App.Id] = variantId;
         _settings.Save();
         row.SetSelectedVariant(variantId);
+        // Switch the row to this variant's install slot: re-read what's installed there, then re-resolve.
+        var key = InstallKey(row.App);
+        row.SetState(InstallManager.Shared.InstalledVersion(key), row.Latest, row.LatestAssetId, row.Status);
+        row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(key));
         RecomputeRow(row);
         Log.Write($"variant for {row.App.Id} → {variantId}");
     }
@@ -340,25 +344,41 @@ public sealed class MainForm : Form
     private void RecomputeRow(AppRowControl row)
     {
         var latest = Versions.Latest(row.Releases);
-        if (latest == null) { row.SetState(row.Installed, row.Latest, null, row.Status); return; }
+        if (latest == null)
+        {
+            // No cached releases yet (pre-refresh): the row just reflects whether the slot is installed.
+            row.SetState(row.Installed, null, null, row.Installed != null ? RowStatus.Installed : RowStatus.Unknown);
+            return;
+        }
         var asset = latest.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAsset(SelectedVariant(row.App)));
         row.SetState(row.Installed, latest.TagName, asset?.Id, ComputeStatus(row.Installed, latest.TagName, asset != null));
     }
 
-    /// <summary>True when a variant app has a different variant selected than the one installed.</summary>
-    private bool VariantSwitchAvailable(AppRowControl row)
+    /// <summary>The install-manifest key of the row's SELECTED variant slot. Every variant is its own
+    /// slot, so Standard and Full can both be installed; the toggle just picks which slot the row shows.</summary>
+    private string InstallKey(CatalogApp app) => app.InstallKey(SelectedVariant(app));
+
+    /// <summary>Shortcut base name for a slot: the installed exe's product name (or the catalog name)
+    /// plus the variant suffix (" (Full)") so the two variants' shortcuts don't collide.</summary>
+    private static string ShortcutNameFor(AppRowControl row, string? variantId)
     {
-        if (!row.App.HasVariants || row.Installed == null) return false;
-        var inst = InstallManager.Shared.InstalledVariant(row.App.Id) ?? row.App.Variants?.FirstOrDefault()?.Id;
-        return inst != SelectedVariant(row.App);
+        var path = InstallManager.Shared.InstalledPath(row.App.InstallKey(variantId));
+        var product = path != null ? InstallManager.TryProductName(path) : null;
+        return (product ?? row.App.Name) + row.App.VariantSuffix(variantId);
     }
 
-    /// <summary>The installed variant's label for a row (for the version line), or null.</summary>
-    private string? InstalledVariantLabel(AppRowControl row)
+    private string ShortcutName(AppRowControl row) => ShortcutNameFor(row, SelectedVariant(row.App));
+
+    /// <summary>Every install slot — each app once, or once per variant for variant apps — as (key, shortcut name).</summary>
+    private IEnumerable<(string key, string name)> AllSlots()
     {
-        if (!row.App.HasVariants || row.App.Variants == null) return null;
-        var inst = InstallManager.Shared.InstalledVariant(row.App.Id) ?? row.App.Variants.FirstOrDefault()?.Id;
-        return row.App.Variants.FirstOrDefault(v => v.Id == inst)?.Label;
+        foreach (var r in _rows)
+        {
+            if (r.App.HasVariants && r.App.Variants != null)
+                foreach (var v in r.App.Variants) yield return (r.App.InstallKey(v.Id), ShortcutNameFor(r, v.Id));
+            else
+                yield return (r.App.Id, ShortcutNameFor(r, null));
+        }
     }
 
     // ── View mode (detailed list vs compact icon grid) ───────────────────────────────────────
@@ -476,8 +496,8 @@ public sealed class MainForm : Form
     /// <summary>Per-app shortcut toggle from the row menu (desktop: true=Desktop, false=Start Menu).</summary>
     private void ToggleShortcut(AppRowControl row, bool desktop, bool add)
     {
-        if (desktop) InstallManager.Shared.SetDesktopShortcut(row.App, add);
-        else InstallManager.Shared.SetStartMenuShortcut(row.App, add);
+        if (desktop) InstallManager.Shared.SetDesktopShortcut(InstallKey(row.App), ShortcutName(row), add);
+        else InstallManager.Shared.SetStartMenuShortcut(InstallKey(row.App), ShortcutName(row), add);
         Log.Write($"{(add ? "added" : "removed")} {(desktop ? "desktop" : "start-menu")} shortcut for {row.App.Id}");
     }
 
@@ -502,8 +522,9 @@ public sealed class MainForm : Form
                 // row that turns out inaccessible never flashes into view. We set visibility from the
                 // outcome at the end of the iteration.
                 row.SetChecking();
-                var installed = InstallManager.Shared.InstalledVersion(row.App.Id);
-                row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.Id));
+                var slot = InstallKey(row.App);
+                var installed = InstallManager.Shared.InstalledVersion(slot);
+                row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(slot));
                 bool accessible = false;
                 try
                 {
@@ -574,10 +595,11 @@ public sealed class MainForm : Form
     {
         foreach (var row in _rows)
         {
-            var installed = InstallManager.Shared.InstalledVersion(row.App.Id);
+            var slot = InstallKey(row.App);
+            var installed = InstallManager.Shared.InstalledVersion(slot);
             row.SetReleases(new List<ReleaseInfo>());
             row.SetState(installed, null, null, installed != null ? RowStatus.Installed : RowStatus.Unknown);
-            row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.Id));
+            row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(slot));
             row.Visible = installed != null && !IsHidden(row.App.Id);
         }
         ReindexList();
@@ -673,9 +695,7 @@ public sealed class MainForm : Form
             if (tag == null && verification != VerifyResult.Verified)
             {
                 InstallManager.TryDelete(cache);
-                var reason = verification == VerifyResult.NoManifest
-                    ? "this release publishes no SHA256SUMS checksums"
-                    : $"“{assetName}” isn't listed in this release's SHA256SUMS";
+                var reason = InstallManager.StrictFailureReason(verification, assetName);
                 Log.Write($"install {row.App.Id} {rel.TagName}: BLOCKED (strict) — {reason}");
                 throw new Exception($"Couldn't verify the download — {reason}. Install aborted for safety.");
             }
@@ -683,10 +703,11 @@ public sealed class MainForm : Form
             InstallManager.TryDelete(cache);   // verified copy is now installed; mirror the macOS zip cleanup
             var latest = row.Latest ?? rel.TagName;
             row.SetState(rel.TagName, row.Latest, row.LatestAssetId, ComputeStatus(rel.TagName, latest, true));
-            row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.Id));
+            row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.InstallKey(variantId)));
             Log.Write(verification switch
             {
-                VerifyResult.Verified => $"verified {row.App.Id} {rel.TagName} (sha256)",
+                VerifyResult.Verified => $"verified {row.App.Id} {rel.TagName} (signed sha256)",
+                VerifyResult.Unsigned => $"install {row.App.Id} {rel.TagName}: older tag — sha256 ok but manifest UNSIGNED",
                 VerifyResult.NoManifest => $"install {row.App.Id} {rel.TagName}: unverified older tag (no SHA256SUMS)",
                 _ => $"install {row.App.Id} {rel.TagName}: unverified older tag (asset not in SHA256SUMS)",
             });
@@ -711,7 +732,8 @@ public sealed class MainForm : Form
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         try
         {
-            InstallManager.Shared.Uninstall(row.App.Id);
+            // Uninstalls the SELECTED variant's slot only (a sibling variant, if installed, stays).
+            InstallManager.Shared.Uninstall(InstallKey(row.App));
             var status = row.LatestAssetId != null
                 ? RowStatus.NotInstalled
                 : (row.Latest == null ? RowStatus.Unknown : RowStatus.MissingAsset);
@@ -731,7 +753,7 @@ public sealed class MainForm : Form
     {
         try
         {
-            InstallManager.Shared.Launch(row.App);
+            InstallManager.Shared.Launch(InstallKey(row.App));
         }
         catch (Exception ex)
         {
@@ -780,9 +802,10 @@ public sealed class MainForm : Form
     /// installed apps so they don't end up split. (Windows: the exe never moves — only its shortcuts.)</summary>
     private void ReconcileInstallLocation(bool toApplications)
     {
-        var affected = _rows.Where(r =>
-            InstallManager.Shared.InstalledVersion(r.App.Id) != null &&
-            InstallManager.Shared.NeedsShortcutSync(r.App.Id, toApplications)).ToList();
+        // Consider every installed slot (both variants of a variant app), not just the selected ones.
+        var affected = AllSlots().Where(s =>
+            InstallManager.Shared.InstalledVersion(s.key) != null &&
+            InstallManager.Shared.NeedsShortcutSync(s.key, toApplications)).ToList();
         if (affected.Count == 0) return;
 
         var verb = toApplications
@@ -793,8 +816,8 @@ public sealed class MainForm : Form
                 "Install location changed", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
             return;
 
-        foreach (var r in affected)
-            InstallManager.Shared.SyncShortcuts(r.App, toApplications);
+        foreach (var s in affected)
+            InstallManager.Shared.SyncShortcuts(s.key, s.name, toApplications);
     }
 
     // --- Helpers ---

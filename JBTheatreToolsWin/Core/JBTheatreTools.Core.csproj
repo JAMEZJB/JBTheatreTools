@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Platform-neutral logic that gates security decisions (release-manifest signature verification,
+       SHA256SUMS parsing). Kept out of the WinForms project so it can be unit-tested on any OS
+       (`dotnet test` in Core.Tests) and shared by the launcher without a Windows-only dependency. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>JBTheatreTools</RootNamespace>
+    <AssemblyName>JBTheatreTools.Core</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Pure-managed Ed25519 + BLAKE2b for minisign verification: .NET's BCL has no Ed25519 (audit F1).
+         Pinned to an exact version (no floating range) — bump deliberately. -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
+  </ItemGroup>
+
+</Project>

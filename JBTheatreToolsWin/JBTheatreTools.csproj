@@ -15,11 +15,18 @@
     <!-- File description shown in Task Manager / file properties; window title is set in code. -->
     <AssemblyTitle>JB Theatre Tools</AssemblyTitle>
     <Product>JB Theatre Tools</Product>
-    <Version>1.15.0</Version>
+    <Version>1.16.0</Version>
     <Company>James Breedon</Company>
     <RootNamespace>JBTheatreTools</RootNamespace>
     <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The platform-neutral Core library (signature verification, checksum parsing) and its tests live
+         in subfolders: keep them out of this project's default source glob and reference Core instead. -->
+    <Compile Remove="Core/**;Core.Tests/**" />
+    <ProjectReference Include="Core/JBTheatreTools.Core.csproj" />
+  </ItemGroup>
 
   <ItemGroup>
     <!-- The shared catalog lives at the repo root; embed it so the single-file exe is self-contained. -->
