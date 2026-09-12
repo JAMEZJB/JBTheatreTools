@@ -39,15 +39,10 @@ public sealed class Catalog
             return r.ReadToEnd();
         }
 
-        var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
-        for (int i = 0; i < 6 && dir != null; i++)
-        {
-            var candidate = Path.Combine(dir.FullName, "catalog.json");
-            if (File.Exists(candidate)) return File.ReadAllText(candidate);
-            dir = dir.Parent;
-        }
-        throw new FileNotFoundException(
-            "catalog.json not found (not embedded and not in any parent of the working directory).");
+        // No walking up from the CWD (audit F9): a catalog.json in a parent of an arbitrary working
+        // directory must never be trusted to dictate owners/repos/relay. The shipped exe embeds it;
+        // bare-binary / dev use must pass --catalog explicitly.
+        throw new FileNotFoundException("catalog.json is not embedded; pass --catalog <path>.");
     }
 }
 

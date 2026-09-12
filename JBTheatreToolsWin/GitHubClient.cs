@@ -30,10 +30,8 @@ public static class AuthClient
     /// <summary>The relay base URL: the user-invisible settings.json override wins, else the
     /// catalog's built-in `downloadServer`. Null only in a build whose catalog carries no server.</summary>
     public static string? ResolveServerUrl(AppSettings settings, string? catalogServer)
-    {
-        var over = settings.ServerUrl?.Trim();
-        return !string.IsNullOrEmpty(over) ? over : catalogServer?.Trim();
-    }
+        // The invisible ServerUrl override is clamped to https on a jamesbreedon.com host (audit F2).
+        => RelayUrl.Resolve(settings.ServerUrl, catalogServer);
 
     /// <summary>True when the active mode's credentials are all present (no secrets returned).</summary>
     public static bool HasCredentials(AppSettings settings, string? catalogServer) =>
@@ -181,6 +179,14 @@ public sealed class GitHubClient : IDisposable
             var location = resp.Headers.Location.IsAbsoluteUri
                 ? resp.Headers.Location
                 : new Uri(current, resp.Headers.Location);
+            // F11: never follow a redirect off https (a downgrade would carry the asset + its SHA256SUMS
+            // in cleartext, rewritable in flight). GitHub never does this; only a hostile relay / http
+            // override could. macOS gets this for free from ATS.
+            if (location.Scheme != Uri.UriSchemeHttps)
+            {
+                resp.Dispose();
+                throw new Exception($"Refusing a non-HTTPS redirect to {location.Host} — download aborted.");
+            }
             resp.Dispose();
             current = location;
             using var hopReq = new HttpRequestMessage(HttpMethod.Get, location);

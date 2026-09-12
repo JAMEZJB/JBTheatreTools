@@ -360,12 +360,9 @@ public sealed class MainForm : Form
 
     /// <summary>Shortcut base name for a slot: the installed exe's product name (or the catalog name)
     /// plus the variant suffix (" (Full)") so the two variants' shortcuts don't collide.</summary>
+    // F10: shortcut name comes from the CATALOG (trusted), never the downloaded exe's ProductName.
     private static string ShortcutNameFor(AppRowControl row, string? variantId)
-    {
-        var path = InstallManager.Shared.InstalledPath(row.App.InstallKey(variantId));
-        var product = path != null ? InstallManager.TryProductName(path) : null;
-        return (product ?? row.App.Name) + row.App.VariantSuffix(variantId);
-    }
+        => row.App.Name + row.App.VariantSuffix(variantId);
 
     private string ShortcutName(AppRowControl row) => ShortcutNameFor(row, SelectedVariant(row.App));
 
@@ -508,7 +505,21 @@ public sealed class MainForm : Form
 
     private async Task RefreshAllAsync()
     {
-        var active = AuthClient.Active(_settings, _catalog.DownloadServer);
+        // These handlers run as `async void` (Shown / Refresh.Click), so an exception that escapes here —
+        // e.g. AuthClient.Active → Credential Manager P/Invoke throwing on a corrupt blob or a locked-down
+        // image — would be an unobserved async-void fault that kills the launcher at startup. Guard the
+        // whole body: on failure, log and show the no-credentials notice instead of crashing (audit F15).
+        GitHubClient? active;
+        try
+        {
+            active = AuthClient.Active(_settings, _catalog.DownloadServer);
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"refresh: credential resolution failed: {ex.Message}");
+            ResetRowsNoToken(); ShowNotice(NoCredsMsg); RefreshUpdateAllButton();
+            return;
+        }
         // No credentials (e.g. just removed in Settings): reset every row to its installed/unknown state
         // and clear stale latest/releases, so no row keeps a live — but silently no-op — Install button.
         if (active == null) { ResetRowsNoToken(); ShowNotice(NoCredsMsg); RefreshUpdateAllButton(); return; }

@@ -508,9 +508,20 @@ struct AppIconImage: View {
     let displayName: String
     var size: CGFloat = 40
 
+    /// `NSWorkspace.icon(forFile:)` is a comparatively heavy call; cache the result per path so a redraw
+    /// (e.g. during a download) doesn't re-resolve it every time (audit F12). A path's icon is stable for
+    /// the session; a reinstall reuses the same path, which is fine.
+    private static let iconCache = NSCache<NSString, NSImage>()
+    private static func installedIcon(_ path: String) -> NSImage {
+        if let hit = iconCache.object(forKey: path as NSString) { return hit }
+        let img = NSWorkspace.shared.icon(forFile: path)
+        iconCache.setObject(img, forKey: path as NSString)
+        return img
+    }
+
     var body: some View {
         if let path = InstallManager.shared.installedPath(id)?.path {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+            Image(nsImage: Self.installedIcon(path))
                 .resizable().interpolation(.high)
                 .frame(width: size, height: size)
         } else if let bundled = Self.bundledIcon(id) {

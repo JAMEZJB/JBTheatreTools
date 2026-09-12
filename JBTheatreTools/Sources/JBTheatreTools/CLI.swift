@@ -213,7 +213,7 @@ enum CLI {
                     fputs("error: release \(rel.tagName) has no macOS asset.\n", stderr); exit(1)
                 }
                 print("Downloading \(asset.name) (\(byteString(asset.size))) @ \(rel.tagName)…")
-                let zip = im.cacheDir.appendingPathComponent("\(app.id)-\(rel.tagName).zip")
+                let zip = im.cacheDir.appendingPathComponent("\(app.id)-\(PathSafe.component(rel.tagName)).zip")
                 final class PctBox: @unchecked Sendable { var last = -1 }
                 let pctBox = PctBox()
                 try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: asset.id, to: zip) { p in
@@ -269,7 +269,7 @@ enum CLI {
         runBlocking {
             do {
                 let info = try await client.latestRelease(owner: s.owner, repo: s.repo)
-                let newer = isNewer(info.tagName, than: current)
+                let newer = AppState.versionIsNewer(info.tagName, than: current)
                 print("JB Theatre Tools: current v\(current), latest \(info.tagName) → \(newer ? "UPDATE AVAILABLE" : "up to date")")
             } catch GitHubError.noRelease {
                 print("JB Theatre Tools: current v\(current), no launcher release published yet")
@@ -287,7 +287,7 @@ enum CLI {
                 guard let asset = info.assets.first(where: { $0.name == s.macAssetName }) else {
                     fputs("error: release \(info.tagName) has no macOS asset.\n", stderr); exit(1)
                 }
-                let dest = URL(fileURLWithPath: destDir).appendingPathComponent(asset.name)
+                let dest = URL(fileURLWithPath: destDir).appendingPathComponent(PathSafe.component(asset.name))
                 print("Downloading \(asset.name) (\(byteString(asset.size))) @ \(info.tagName)…")
                 try await client.downloadAsset(owner: s.owner, repo: s.repo, assetId: asset.id, to: dest)
                 // Strict verify, exactly like the GUI self-update (audit F5): size + suite-signed
@@ -310,21 +310,6 @@ enum CLI {
     private static func appFor(_ id: String?, _ catalog: Catalog) -> CatalogApp? {
         guard let id = id else { return nil }
         return catalog.apps.first { $0.id == id }
-    }
-
-    private static func isNewer(_ a: String, than b: String) -> Bool {
-        func parts(_ s: String) -> [Int] {
-            var t = s.trimmingCharacters(in: .whitespaces)
-            if t.hasPrefix("v") || t.hasPrefix("V") { t.removeFirst() }
-            return t.split(separator: ".").map { Int($0.prefix { $0.isNumber }) ?? 0 }
-        }
-        let pa = parts(a), pb = parts(b)
-        for i in 0..<max(pa.count, pb.count) {
-            let x = i < pa.count ? pa[i] : 0
-            let y = i < pb.count ? pb[i] : 0
-            if x != y { return x > y }
-        }
-        return false
     }
 
     private static func printHelp() {

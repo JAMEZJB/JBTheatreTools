@@ -262,14 +262,32 @@
       "id": "pdftools",
       "name": "PDF Tools",
       "blurb": "A private, offline PDF toolbox — merge, split, convert, redact and more.",
-      "whatsNew": "Chain several tools in one run; visual organise, crop, annotate, form-fill.",
-      "whatsNewVersion": "v0.2.0",
+      "whatsNew": "New Full edition: OCR, Office conversion and PDF/A, all offline.",
+      "whatsNewVersion": "v0.3.0",
       "owner": "JAMEZJB",
       "repo": "PDFTools",
       "assets": {
         "macos": "PDFTools-macOS.zip",
         "windows-x64": "PDFTools-Windows-x64.exe"
-      }
+      },
+      "variants": [
+        {
+          "id": "light",
+          "label": "Light",
+          "assets": {
+            "macos": "PDFTools-macOS.zip",
+            "windows-x64": "PDFTools-Windows-x64.exe"
+          }
+        },
+        {
+          "id": "full",
+          "label": "Full",
+          "assets": {
+            "macos-arm64": "PDFTools-Full-macOS-arm64.zip",
+            "macos-x64": "PDFTools-Full-macOS-x64.zip"
+          }
+        }
+      ]
     }
   ]
 }

@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import AppKit   // NSWorkspace.runningApplications — refuse to replace a bundle that's open (audit F4)
 
 /// Outcome of integrity-checking a downloaded asset (verify-if-present): the file passed the SHA-256
 /// check, the release published no `SHA256SUMS` manifest at all, or it published one but this asset
@@ -36,6 +37,11 @@ enum InstallError: LocalizedError {
     case sizeMismatch(expected: Int, got: Int)
     case checksumMismatch(String)
     case unverified(reason: String)
+    /// The app being updated/relocated is currently running — replacing its bundle would break the
+    /// running process mid-use (audit F4).
+    case appRunning(String)
+    /// Something the launcher didn't install already occupies the destination — don't destroy it (F6).
+    case destinationOccupied(String)
 
     var errorDescription: String? {
         switch self {
@@ -48,7 +54,28 @@ enum InstallError: LocalizedError {
             return "Checksum mismatch for \(name) — the download does not match the release's SHA256SUMS. Aborting install."
         case .unverified(let reason):
             return "Couldn't verify this download — \(reason). Install aborted for safety."
+        case .appRunning(let name):
+            return "Quit \(name) before updating it, then try again."
+        case .destinationOccupied(let path):
+            return "An app JB Theatre Tools didn't install is already at \(path). Remove or rename it first, then try again."
         }
+    }
+}
+
+/// Pure, unit-tested decisions behind the install-safety guards (audit F4 + F6), so the FileManager /
+/// NSWorkspace glue that calls them stays a thin, reasoned-about layer.
+enum InstallGuard {
+    /// True when `target` is one of the currently-running app bundles (path-normalised so a trailing
+    /// slash or `.` doesn't defeat the match).
+    static func isRunning(_ target: URL, amongRunning running: [URL]) -> Bool {
+        let t = target.standardizedFileURL.path
+        return running.contains { $0.standardizedFileURL.path == t }
+    }
+
+    /// True when something occupies `destPath` that ISN'T the install this launcher recorded for the
+    /// slot (`ourPath`) — i.e. replacing it would destroy a stranger. Nothing at dest → not a stranger.
+    static func isStranger(destExists: Bool, destPath: String, ourPath: String?) -> Bool {
+        destExists && ourPath != destPath
     }
 }
 
@@ -159,10 +186,8 @@ final class InstallManager {
 
         // Each variant is its own install slot (Standard and Full can coexist), keyed by the app id for
         // the default variant and `<id>@<variant>` otherwise. Only the previous install of THIS slot is
-        // removed — it may be in a different location if the setting changed.
+        // touched — it may be in a different location if the setting changed.
         let key = app.installKey(variantId: variant)
-        if let old = manifest()[key] { try? fm.removeItem(at: URL(fileURLWithPath: old.path)) }
-
         let destDir = toApplications ? applicationsInstallDir() : appsDir
         try? fm.createDirectory(at: destDir, withIntermediateDirectories: true)
         // A non-default variant's bundle is renamed (e.g. "NDI Tools (Full).app") so it can sit next to
@@ -172,7 +197,20 @@ final class InstallManager {
             ? bundle.lastPathComponent
             : bundle.deletingPathExtension().lastPathComponent + suffix + ".app"
         let dest = destDir.appendingPathComponent(bundleName)
-        try? fm.removeItem(at: dest)
+        let ourPath = manifest()[key]?.path
+
+        let running = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
+        // F4: never replace a bundle that's currently running — our old install, or whatever sits at dest.
+        for candidate in ([ourPath.map { URL(fileURLWithPath: $0) }, dest].compactMap { $0 }) {
+            if InstallGuard.isRunning(candidate, amongRunning: running) { throw InstallError.appRunning(app.name) }
+        }
+        // F6: a bundle at dest that we didn't install is a stranger — surface it, don't destroy it.
+        if InstallGuard.isStranger(destExists: fm.fileExists(atPath: dest.path), destPath: dest.path, ourPath: ourPath) {
+            throw InstallError.destinationOccupied(dest.path)
+        }
+        // Remove our old install (may be elsewhere if the location setting changed) and our own dest copy.
+        if let ourPath, ourPath != dest.path { try? fm.removeItem(at: URL(fileURLWithPath: ourPath)) }
+        if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }   // reached only for our own copy
         try fm.moveItem(at: bundle, to: dest)
 
         var m = manifest()
@@ -215,7 +253,18 @@ final class InstallManager {
         let targetDir = toApplications ? applicationsInstallDir() : appsDir
         try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
         let dest = targetDir.appendingPathComponent(current.lastPathComponent)
-        if dest.standardizedFileURL.path != current.standardizedFileURL.path { try? fm.removeItem(at: dest) }
+        let running = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
+        // F4: don't move a bundle that's currently running (breaks the live process).
+        if InstallGuard.isRunning(current, amongRunning: running) {
+            throw InstallError.appRunning(installedDisplayName(appId) ?? appId)
+        }
+        if dest.standardizedFileURL.path != current.standardizedFileURL.path {
+            // F6: don't destroy a stranger already sitting at the destination.
+            if InstallGuard.isStranger(destExists: fm.fileExists(atPath: dest.path), destPath: dest.path, ourPath: rec.path) {
+                throw InstallError.destinationOccupied(dest.path)
+            }
+            if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
+        }
         let wasPinned = Dock.isPinned(rec.path)
         try fm.moveItem(at: current, to: dest)
         // A Dock tile stores the absolute path, so re-pin at the new location (one Dock restart).

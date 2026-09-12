@@ -35,7 +35,7 @@ built by James Breedon & Claude Code.
 | Show Control Tools | `JAMEZJB/ShowControlTools` | `ShowControlTools-macOS.zip`, `ShowControlTools-Windows-{x64,arm64}.exe` |
 | ShowNet Scanner | `JAMEZJB/ShowNetScanner` | `ShowNetScanner-macOS.zip`, `ShowNetScanner-Windows-{x64,arm64}.exe` |
 | Timecode Tools | `JAMEZJB/TimecodeTools` | `TimecodeTools-macOS.zip`, `TimecodeTools-Windows-{x64,arm64}.exe` |
-| PDF Tools | `JAMEZJB/PDFTools` | `PDFTools-macOS.zip`, `PDFTools-Windows-x64.exe` (no arm64 yet) |
+| PDF Tools | `JAMEZJB/PDFTools` | Light: `PDFTools-macOS.zip`, `PDFTools-Windows-x64.exe` · Full: `PDFTools-Full-macOS-{arm64,x64}.zip` (no Windows Full yet) |
 
 Asset names differ per app, so the launcher resolves the right one for the current OS/arch. An app listed
 ahead of its first release shows "No release" and becomes installable once a build ships.

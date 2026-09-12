@@ -170,10 +170,11 @@ final class AppState: ObservableObject {
 
     /// User-invisible relay-URL override (defaults key only, no UI) — an escape hatch if the
     /// built-in catalog URL ever has to move for machines on an old build.
+    /// User-invisible relay-URL override (defaults key only, no UI) — an escape hatch if the built-in
+    /// catalog URL ever has to move for machines on an old build. Validated (https + a jamesbreedon.com
+    /// host) so a stray defaults write can't redirect the passphrase to an attacker (audit F2).
     nonisolated static var serverOverride: String? {
-        let s = (UserDefaults.standard.string(forKey: "theatre.serverURL") ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return s.isEmpty ? nil : s
+        RelayPolicy.validatedOverride(UserDefaults.standard.string(forKey: "theatre.serverURL"))
     }
 
     /// Credentials for the ACTIVE mode are present — drives the "can download at all" UI state.
@@ -322,10 +323,25 @@ final class AppState: ObservableObject {
         // Clear a stale network/credential error from a previous run (but keep a catalog-load error,
         // which leaves `rows` empty).
         if !rows.isEmpty { globalError = nil }
-        for i in rows.indices {
-            await refresh(index: i, client: client)
+        // Iterate a snapshot of ids and address each row BY ID (not index): a refresh suspends on the
+        // network, during which a drag / Move Up-Down can permute `rows` (audit F3).
+        for id in rows.map(\.id) {
+            await refresh(id: id, client: client)
         }
         hasRefreshed = true
+    }
+
+    /// Applies `body` to the row with this id, re-finding it each call — the reorder-safe way to write a
+    /// row after an `await` (a concurrent drag/Move may have permuted `rows`). See `Self.write` for the
+    /// pure, unit-tested core.
+    private func update(_ id: String, _ body: (inout Row) -> Void) {
+        Self.write(into: &rows, id: id, body)
+    }
+
+    /// Writes to the row with `id` in `rows` (no-op if absent). Pure + nonisolated so a regression test
+    /// can prove it hits the right row even after `rows` is reordered (audit F3).
+    nonisolated static func write(into rows: inout [Row], id: String, _ body: (inout Row) -> Void) {
+        if let j = rows.firstIndex(where: { $0.id == id }) { body(&rows[j]) }
     }
 
     /// True once a refresh has run and the token reached no apps (and nothing is installed locally) —
@@ -563,44 +579,42 @@ final class AppState: ObservableObject {
         for id in ids { await install(id) }
     }
 
-    private func refresh(index: Int, client: GitHubClient) async {
-        let app = rows[index].app
-        rows[index].status = .checking
+    private func refresh(id: String, client: GitHubClient) async {
+        guard let app = rows.first(where: { $0.id == id })?.app else { return }
         let slot = installKey(for: app)
-        rows[index].installed = InstallManager.shared.installedVersion(slot)
-        rows[index].resolvedName = InstallManager.shared.installedDisplayName(slot)
+        update(id) {
+            $0.status = .checking
+            $0.installed = InstallManager.shared.installedVersion(slot)
+            $0.resolvedName = InstallManager.shared.installedDisplayName(slot)
+        }
         do {
             let all = try await client.releases(owner: app.owner, repo: app.repo)
-            rows[index].releases = all
             guard let latest = Self.latest(from: all) else {
-                rows[index].latest = nil
-                rows[index].latestAssetId = nil
-                rows[index].status = .noRelease
+                update(id) { $0.releases = all; $0.latest = nil; $0.latestAssetId = nil; $0.status = .noRelease }
                 return
             }
             let assetId = latest.assets.first { $0.name == macAsset(for: app) }?.id
-            rows[index].latest = latest.tagName
-            rows[index].latestAssetId = assetId
-            rows[index].status = Self.status(installed: rows[index].installed, latest: latest.tagName, hasAsset: assetId != nil)
+            let installedNow = InstallManager.shared.installedVersion(slot)
+            update(id) {
+                $0.releases = all
+                $0.latest = latest.tagName
+                $0.latestAssetId = assetId
+                $0.status = Self.status(installed: installedNow, latest: latest.tagName, hasAsset: assetId != nil)
+            }
         } catch GitHubError.notAccessible {
             // Token can't see this repo → hide the row from the list.
-            rows[index].latest = nil
-            rows[index].latestAssetId = nil
-            rows[index].releases = []
-            rows[index].status = .noAccess
+            update(id) { $0.latest = nil; $0.latestAssetId = nil; $0.releases = []; $0.status = .noAccess }
         } catch GitHubError.unauthorized {
             // The credential itself is bad — surface one clear message instead of 10 broken rows.
-            rows[index].status = .noAccess
+            update(id) { $0.status = .noAccess }
             globalError = Self.authMode == .token
                 ? "Your GitHub token is invalid or expired. Open Settings to paste a new one."
                 : "The download server rejected the passphrase. Check it in Settings."
             AppLog.shared.log("refresh: credentials rejected (\(Self.authMode.rawValue) mode)")
         } catch GitHubError.noRelease {
-            rows[index].latest = nil
-            rows[index].releases = []
-            rows[index].status = .noRelease
+            update(id) { $0.latest = nil; $0.releases = []; $0.status = .noRelease }
         } catch {
-            rows[index].status = .error(error.localizedDescription)
+            update(id) { $0.status = .error(error.localizedDescription) }
             AppLog.shared.log("refresh \(app.id) error: \(error.localizedDescription)")
         }
     }
@@ -663,7 +677,7 @@ final class AppState: ObservableObject {
             throw InstallError.sizeMismatch(expected: asset.size, got: size)
         }
         guard let sumsAsset = release.assets.first(where: { $0.name == "SHA256SUMS" }) else { return .noManifest }
-        let sumsURL = InstallManager.shared.cacheDir.appendingPathComponent("\(app.id)-\(release.tagName)-SHA256SUMS")
+        let sumsURL = InstallManager.shared.cacheDir.appendingPathComponent("\(app.id)-\(PathSafe.component(release.tagName))-SHA256SUMS")
         try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: sumsAsset.id, to: sumsURL)
         let sumsData = (try? Data(contentsOf: sumsURL)) ?? Data()
         try? fm.removeItem(at: sumsURL)
@@ -674,7 +688,7 @@ final class AppState: ObservableObject {
         // but invalid signature is always fatal; an absent one downgrades the outcome to `.unsigned`.
         var signed = false
         if let sigAsset = release.assets.first(where: { $0.name == "SHA256SUMS.minisig" }) {
-            let sigURL = InstallManager.shared.cacheDir.appendingPathComponent("\(app.id)-\(release.tagName)-SHA256SUMS.minisig")
+            let sigURL = InstallManager.shared.cacheDir.appendingPathComponent("\(app.id)-\(PathSafe.component(release.tagName))-SHA256SUMS.minisig")
             try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: sigAsset.id, to: sigURL)
             let sigText = (try? String(contentsOf: sigURL, encoding: .utf8)) ?? ""
             try? fm.removeItem(at: sigURL)
@@ -713,35 +727,37 @@ final class AppState: ObservableObject {
 
     /// Installs an app — the latest release, or a specific `tag` (for installing older versions).
     func install(_ id: String, tag: String? = nil) async {
-        guard let i = rows.firstIndex(where: { $0.id == id }) else { return }
+        guard let app = rows.first(where: { $0.id == id })?.app else { return }
         await ensureKeychainExplained()
         guard let client = activeClient() else { return }
-        let app = rows[i].app
-        rows[i].busy = true
-        rows[i].progress = 0
-        defer { rows[i].busy = false }
-        if rows[i].releases.isEmpty {
-            do { rows[i].releases = try await client.releases(owner: app.owner, repo: app.repo) }
-            catch { rows[i].status = .error(error.localizedDescription); return }
+        // Address the row BY ID after every `await` — a concurrent drag/Move can permute `rows` while
+        // this runs, so a captured index would write to the wrong app (audit F3).
+        update(id) { $0.busy = true; $0.progress = 0 }
+        defer { update(id) { $0.busy = false } }
+        var releases = rows.first(where: { $0.id == id })?.releases ?? []
+        if releases.isEmpty {
+            do { releases = try await client.releases(owner: app.owner, repo: app.repo) }
+            catch { update(id) { $0.status = .error(error.localizedDescription) }; return }
+            update(id) { $0.releases = releases }
         }
 
-        let release = tag != nil
-            ? rows[i].releases.first { $0.tagName == tag }
-            : Self.latest(from: rows[i].releases)
-        guard let rel = release else { rows[i].status = .error("Version \(tag ?? "latest") not found."); return }
+        let release = tag != nil ? releases.first { $0.tagName == tag } : Self.latest(from: releases)
+        guard let rel = release else { update(id) { $0.status = .error("Version \(tag ?? "latest") not found.") }; return }
         let variantId = selectedVariantId(app)
         guard let asset = rel.assets.first(where: { $0.name == macAsset(for: app) }) else {
-            rows[i].status = .error("No macOS asset in \(rel.tagName)."); return
+            update(id) { $0.status = .error("No macOS asset in \(rel.tagName).") }; return
         }
 
-        let zipDest = InstallManager.shared.cacheDir.appendingPathComponent("\(app.id)-\(rel.tagName).zip")
+        let zipDest = InstallManager.shared.cacheDir.appendingPathComponent("\(app.id)-\(PathSafe.component(rel.tagName)).zip")
         let appId = id
         do {
             try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: asset.id, to: zipDest) { p in
                 Task { @MainActor [weak self] in
-                    guard let self = self,
-                          let j = self.rows.firstIndex(where: { $0.id == appId }) else { return }
-                    self.rows[j].progress = p
+                    guard let self = self else { return }
+                    // Throttle: only republish `rows` on a ≥1% change (or completion). Every byte otherwise
+                    // re-renders all 16 rows (and each AppIconImage), so a 200 MB download would trigger
+                    // thousands of synchronous disk reads on the main actor (audit F12).
+                    self.update(appId) { if p >= 1.0 || abs(p - $0.progress) >= 0.01 { $0.progress = p } }
                 }
             }
             let verification = try await Self.verifyDownload(zipDest, asset: asset, release: rel, app: app, client: client)
@@ -765,12 +781,15 @@ final class AppState: ObservableObject {
             let toApps = UserDefaults.standard.bool(forKey: "theatre.installToApplications")
             try InstallManager.shared.install(app: app, version: rel.tagName, downloadedZip: zipDest, toApplications: toApps, variant: variantId)
             try? FileManager.default.removeItem(at: zipDest)
-            rows[i].installed = rel.tagName
-            rows[i].resolvedName = InstallManager.shared.installedDisplayName(app.installKey(variantId: variantId))
-            rows[i].status = Self.status(installed: rel.tagName, latest: rows[i].latest ?? rel.tagName, hasAsset: true)
+            let name = InstallManager.shared.installedDisplayName(app.installKey(variantId: variantId))
+            update(id) {
+                $0.installed = rel.tagName
+                $0.resolvedName = name
+                $0.status = Self.status(installed: rel.tagName, latest: $0.latest ?? rel.tagName, hasAsset: true)
+            }
             AppLog.shared.log("installed \(app.id) \(rel.tagName)\(variantId.map { " [\($0)]" } ?? "")\(toApps ? " (Applications)" : "")")
         } catch {
-            rows[i].status = .error(error.localizedDescription)
+            update(id) { $0.status = .error(error.localizedDescription) }
             AppLog.shared.log("install \(app.id) FAILED: \(error.localizedDescription)")
         }
     }
@@ -891,7 +910,7 @@ final class AppState: ObservableObject {
                 return
             }
             let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
-            let dest = downloads.appendingPathComponent(asset.name)
+            let dest = downloads.appendingPathComponent(PathSafe.component(asset.name))
             try await client.downloadAsset(owner: s.owner, repo: s.repo, assetId: asset.id, to: dest)
             // Strict verify (this is a current release): size + suite-signed SHA256SUMS + hash, through
             // the same path every app install uses. A bad hash or bad signature throws (and deletes the

@@ -27,6 +27,9 @@ enum GitHubError: LocalizedError {
     case http(Int)
     case assetNotFound(String)
     case badResponse
+    /// The request URL couldn't be formed (e.g. a malformed relay base). Guards against a force-unwrap
+    /// crash on a bad `apiBase` (audit F2).
+    case badURL
 
     var errorDescription: String? {
         switch self {
@@ -36,6 +39,7 @@ enum GitHubError: LocalizedError {
         case .http(let c): return "GitHub returned HTTP \(c)."
         case .assetNotFound(let n): return "Release has no asset named “\(n)”."
         case .badResponse: return "Unexpected response from GitHub."
+        case .badURL: return "The download-server address is invalid. Check it in Settings."
         }
     }
 }
@@ -57,11 +61,19 @@ final class GitHubClient: NSObject {
     private let lock = NSLock()
     private var contexts: [Int: DownloadContext] = [:]
 
+    private var sessionCreated = false
     private lazy var session: URLSession = {
+        sessionCreated = true
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 1
         return URLSession(configuration: .default, delegate: self, delegateQueue: queue)
     }()
+
+    /// A `URLSession` with a delegate strongly retains that delegate (this client) until it's invalidated;
+    /// AppState builds a fresh client per refresh/install/self-check, so without this each client + its
+    /// session + connection pool would live for the whole process (audit F7). Only touch `session` if it
+    /// was actually created (don't spin one up just to tear it down).
+    deinit { if sessionCreated { session.finishTasksAndInvalidate() } }
 
     /// Direct GitHub access. `token` may be nil for unauthenticated calls against public repos
     /// (e.g. the self-update check).
@@ -96,7 +108,7 @@ final class GitHubClient: NSObject {
 
     /// Fetches the latest (non-prerelease) release. Throws `.noRelease` on 404.
     func latestRelease(owner: String, repo: String) async throws -> ReleaseInfo {
-        let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases/latest")!
+        guard let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases/latest") else { throw GitHubError.badURL }
         let req = apiRequest(url, accept: "application/vnd.github+json")
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw GitHubError.badResponse }
@@ -110,7 +122,7 @@ final class GitHubClient: NSObject {
     /// releases and `404` only when the token can't see the repo, so a 404 here means **no access**
     /// (not "no release") and a 401 means the token itself is bad.
     func releases(owner: String, repo: String) async throws -> [ReleaseInfo] {
-        let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases?per_page=50")!
+        guard let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases?per_page=50") else { throw GitHubError.badURL }
         let req = apiRequest(url, accept: "application/vnd.github+json")
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw GitHubError.badResponse }
@@ -123,7 +135,7 @@ final class GitHubClient: NSObject {
     /// Downloads a release asset by id to `dest`, reporting fractional progress (0…1).
     func downloadAsset(owner: String, repo: String, assetId: Int, to dest: URL,
                        progress: (@Sendable (Double) -> Void)? = nil) async throws {
-        let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases/assets/\(assetId)")!
+        guard let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases/assets/\(assetId)") else { throw GitHubError.badURL }
         let req = apiRequest(url, accept: "application/octet-stream")
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             let task = session.downloadTask(with: req)

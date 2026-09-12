@@ -175,7 +175,10 @@ public sealed class InstallManager
         try
         {
             // A non-default variant's shortcuts carry its label (" (Full)") so they sit beside the default's.
-            var name = Shortcuts.SafeName((TryProductName(dest) ?? app.Name) + app.VariantSuffix(variant));
+            // F10: name the shortcut from the CATALOG (trusted), not the downloaded exe's ProductName — a
+            // hostile exe could otherwise declare ProductName "Google Chrome" and clobber the user's real
+            // Google Chrome.lnk (which Uninstall would then delete).
+            var name = Shortcuts.SafeName(app.Name + app.VariantSuffix(variant));
             if (toApplications || hadStart) { Shortcuts.CreateStartMenu(name, dest); startName = name; }
             if (toApplications || hadDesktop) { Shortcuts.CreateDesktop(name, dest); desktopName = name; }
         }
@@ -195,16 +198,6 @@ public sealed class InstallManager
         };
         WriteManifest(m);
         return dest;
-    }
-
-    internal static string? TryProductName(string exe)
-    {
-        try
-        {
-            var n = System.Diagnostics.FileVersionInfo.GetVersionInfo(exe).ProductName;
-            return string.IsNullOrWhiteSpace(n) ? null : n.Trim();
-        }
-        catch { return null; }
     }
 
     /// <summary>Launches the app's default-variant slot (CLI / single-variant apps).</summary>

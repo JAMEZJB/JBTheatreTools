@@ -84,6 +84,15 @@ struct SettingsView: View {
                             }
                             Spacer()
                         }
+
+                        // Surface the effective relay host read-only (audit F2), so a non-default override
+                        // is visible rather than silent.
+                        if let base = state.serverBase, let host = URL(string: base)?.host {
+                            Text("Relay: \(host)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
                     }
                 }
                 .padding(8)

@@ -23,23 +23,17 @@ struct Catalog: Decodable {
     }
 
     private static func loadData(explicitPath: String?) throws -> Data {
-        let fm = FileManager.default
         if let p = explicitPath {
             return try Data(contentsOf: URL(fileURLWithPath: p))
         }
         if let url = Bundle.main.url(forResource: "catalog", withExtension: "json") {
             return try Data(contentsOf: url)
         }
-        var dir = URL(fileURLWithPath: fm.currentDirectoryPath)
-        for _ in 0..<6 {
-            let candidate = dir.appendingPathComponent("catalog.json")
-            if fm.fileExists(atPath: candidate.path) {
-                return try Data(contentsOf: candidate)
-            }
-            dir.deleteLastPathComponent()
-        }
+        // No walking up from the CWD (audit F9): trusting the first catalog.json found in a parent of an
+        // arbitrary working directory would let a downloaded folder's catalog dictate owners/repos/relay.
+        // The shipped .app always has it bundled; bare-binary / dev use must pass --catalog explicitly.
         throw CocoaError(.fileNoSuchFile, userInfo: [
-            NSLocalizedDescriptionKey: "catalog.json not found (not bundled and not in any parent of the working directory)."
+            NSLocalizedDescriptionKey: "catalog.json is not bundled; pass --catalog <path>."
         ])
     }
 }
