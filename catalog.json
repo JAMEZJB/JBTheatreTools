@@ -262,8 +262,8 @@
       "id": "pdftools",
       "name": "PDF Tools",
       "blurb": "A private, offline PDF toolbox — merge, split, convert, redact and more.",
-      "whatsNew": "First release — 26 offline PDF tools; your files never leave the machine.",
-      "whatsNewVersion": "v0.1.0",
+      "whatsNew": "Chain several tools in one run; visual organise, crop, annotate, form-fill.",
+      "whatsNewVersion": "v0.2.0",
       "owner": "JAMEZJB",
       "repo": "PDFTools",
       "assets": {
