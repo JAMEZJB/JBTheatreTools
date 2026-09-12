@@ -222,7 +222,7 @@ public sealed class MainForm : Form
         // UseMnemonic=false so the literal "&" renders (default true treats it as an Alt-shortcut
         // prefix, eating the "&" and the following space → a double space).
         _credit.UseMnemonic = false;
-        _credit.Text = "Created by: James Breedon & Claude Code";
+        _credit.Text = $"Created by: James Breedon & Claude Code  ·  v{CurrentVersion()}";
         _credit.ForeColor = SystemColors.GrayText;
         _credit.AutoSize = true;
         _credit.Anchor = AnchorStyles.None;
@@ -484,10 +484,13 @@ public sealed class MainForm : Form
         var target = _rows.FirstOrDefault(r => r.Visible && r.Bounds.Contains(pt));
         if (target == null || target == dragged) return;
         if (IsPinned(dragged.App.Id) != IsPinned(target.App.Id)) return;   // don't cross the pin boundary
-        bool below = pt.Y > target.Top + target.Height / 2;
+        // Grid tiles flow left-to-right (wrap), so decide insert side by X; the vertical list uses Y.
+        bool after = _settings.ViewMode == "grid"
+            ? pt.X > target.Left + target.Width / 2
+            : pt.Y > target.Top + target.Height / 2;
         _rows.Remove(dragged);
         int ti = _rows.IndexOf(target);
-        _rows.Insert(below ? ti + 1 : ti, dragged);
+        _rows.Insert(after ? ti + 1 : ti, dragged);
         PersistOrder();
         ReindexList();
         Log.Write($"dragged {dragged.App.Id} into place");

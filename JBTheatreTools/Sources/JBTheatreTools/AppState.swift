@@ -484,6 +484,22 @@ final class AppState: ObservableObject {
         AppLog.shared.log("moved \(id) \(up ? "up" : "down")")
     }
 
+    /// Drag-reorder for the grid: drop `draggedId`'s tile onto `targetId`'s. Moves within the same pin
+    /// group only (change groups via Pin/Unpin, like the list). Dragging forward lands the tile after the
+    /// target, dragging backward lands it before — so a drop feels like "put it here".
+    func moveRow(_ draggedId: String, onto targetId: String) {
+        guard draggedId != targetId,
+              pinnedIds.contains(draggedId) == pinnedIds.contains(targetId),
+              let di = rows.firstIndex(where: { $0.id == draggedId }),
+              let tiOrig = rows.firstIndex(where: { $0.id == targetId }) else { return }
+        let draggedWasBefore = di < tiOrig
+        let moved = rows.remove(at: di)
+        guard let ti = rows.firstIndex(where: { $0.id == targetId }) else { return }
+        rows.insert(moved, at: draggedWasBefore ? ti + 1 : ti)
+        persistOrder()
+        AppLog.shared.log("grid-reordered \(draggedId) onto \(targetId)")
+    }
+
     /// Restores the catalog's default order (Settings → Reset App Order). Pins/hides are left as-is.
     func resetAppOrder() {
         UserDefaults.standard.removeObject(forKey: Self.appOrderKey)

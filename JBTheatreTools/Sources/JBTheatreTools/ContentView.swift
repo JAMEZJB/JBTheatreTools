@@ -276,7 +276,7 @@ struct ContentView: View {
     }
 
     private var credit: some View {
-        Text("Created by: James Breedon & Claude Code")
+        Text("Created by: James Breedon & Claude Code  ·  v\(state.currentVersion)")
             .font(.caption2)
             .foregroundColor(.secondary)
             .frame(maxWidth: .infinity, alignment: .center)
@@ -627,6 +627,16 @@ struct AppGridTile: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { primaryAction() }
+        // Drag a tile onto another to reorder (within its pin group) — the grid's equivalent of the
+        // list's drag-to-reorder. Cross-group moves are via Pin/Unpin, same as the list.
+        .draggable(row.id) {
+            AppIconImage(id: row.id, displayName: row.displayName, size: 54)
+        }
+        .dropDestination(for: String.self) { items, _ in
+            guard let dragged = items.first else { return false }
+            state.moveRow(dragged, onto: row.id)
+            return true
+        }
         .contextMenu { AppMenuButtons(row: row, requestUninstall: { confirmingUninstall = true }) }
         .confirmationDialog("Uninstall \(row.displayName)?",
                             isPresented: $confirmingUninstall, titleVisibility: .visible) {
