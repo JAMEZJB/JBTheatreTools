@@ -30,11 +30,19 @@ public static class VersionCompare
 
     private static long[] Parts(string s) => Norm(s).Split('.').Select(p =>
     {
+        // First contiguous digit run in the segment: skip any leading non-digits, take the digits, stop at
+        // the next non-digit. This handles date-style tags like "build-20260912" (→ 20260912) that a rolling
+        // app such as Convert uses, while staying identical for ordinary semver segments ("2", "0-rc1" → 0).
         long n = 0;
+        bool started = false;
         foreach (var c in p)
         {
-            if (!char.IsDigit(c)) break;
-            n = n > (long.MaxValue - 9) / 10 ? long.MaxValue : n * 10 + (c - '0');   // saturate, never wrap
+            if (char.IsDigit(c))
+            {
+                started = true;
+                n = n > (long.MaxValue - 9) / 10 ? long.MaxValue : n * 10 + (c - '0');   // saturate, never wrap
+            }
+            else if (started) break;
         }
         return n;
     }).ToArray();

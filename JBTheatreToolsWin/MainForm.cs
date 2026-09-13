@@ -14,7 +14,7 @@ public sealed class MainForm : Form
     private readonly Panel _updateBanner = new();
     private readonly Label _updateBannerText = new();
     private readonly Button _refresh = new();
-    private readonly Button _updateAll = new();
+    private readonly Button _downloadAll = new();
     private readonly Button _viewToggle = new();
     private readonly Button _settingsBtn = new();
     private readonly Label _title = new();
@@ -24,6 +24,10 @@ public sealed class MainForm : Form
     // Tray support for the "keep running" close behaviour.
     private readonly NotifyIcon _tray = new();
     private bool _reallyQuit;
+
+    // Custom grip drag-to-reorder: the row being dragged and the floating card that follows the cursor.
+    private AppRowControl? _dragRow;
+    private DragCardForm? _dragCard;
 
     // Notice-banner messages (the banner doubles as the no-creds / bad-creds / no-access notice).
     // Worded per auth mode: "token" = GitHub PAT, "server" = download-server relay + suite passphrase.
@@ -66,9 +70,9 @@ public sealed class MainForm : Form
         _list.WrapContents = false;
         _list.AutoScroll = true;
         _list.Padding = new Padding(10);
-        _list.AllowDrop = true;   // drag-to-reorder rows
-        _list.DragOver += (_, e) => e.Effect = DragDropEffects.Move;
-        _list.DragDrop += OnListDragDrop;
+        // Double-buffer the panel so the live drag-reorder reflow doesn't flicker.
+        typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?.SetValue(_list, true);
         root.Controls.Add(_list, 0, 3);
 
         root.Controls.Add(BuildFooter(), 0, 4);
@@ -114,11 +118,13 @@ public sealed class MainForm : Form
         _refresh.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _refresh.Click += async (_, _) => await RefreshAllAsync();
 
-        _updateAll.Text = "Update All";
-        _updateAll.AutoSize = true;
-        _updateAll.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        _updateAll.Visible = false;
-        _updateAll.Click += async (_, _) => await UpdateAllAsync();
+        // A single "Download All ▾" dropdown (parity with the macOS header menu): Update all (N),
+        // Download all apps, and — when any app ships a Full edition — Download all incl. Full editions.
+        _downloadAll.Text = "Download All  ▾";
+        _downloadAll.AutoSize = true;
+        _downloadAll.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _downloadAll.Visible = false;
+        _downloadAll.Click += (_, _) => ShowDownloadAllMenu();
 
         _viewToggle.AutoSize = true;
         _viewToggle.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -129,13 +135,13 @@ public sealed class MainForm : Form
         _settingsBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _settingsBtn.Click += (_, _) => OpenSettings();
 
-        header.Controls.AddRange(new Control[] { _title, _subtitle, _updateAll, _viewToggle, _refresh, _settingsBtn });
+        header.Controls.AddRange(new Control[] { _title, _subtitle, _downloadAll, _viewToggle, _refresh, _settingsBtn });
         header.Resize += (_, _) =>
         {
             _settingsBtn.Location = new Point(header.Width - _settingsBtn.Width - 14, 16);
             _refresh.Location = new Point(_settingsBtn.Left - _refresh.Width - 8, 16);
             _viewToggle.Location = new Point(_refresh.Left - _viewToggle.Width - 8, 16);
-            _updateAll.Location = new Point(_viewToggle.Left - _updateAll.Width - 8, 16);
+            _downloadAll.Location = new Point(_viewToggle.Left - _downloadAll.Width - 8, 16);
         };
         return header;
     }
@@ -256,6 +262,9 @@ public sealed class MainForm : Form
             row.UninstallRequested += Uninstall;
             row.LaunchRequested += Launch;
             row.MoveRequested += MoveRow;
+            row.ReorderStart += OnReorderStart;
+            row.ReorderMove += OnReorderMove;
+            row.ReorderEnd += OnReorderEnd;
             row.CanMove = CanMoveRow;
             row.ShortcutToggleRequested += ToggleShortcut;
             row.HasDesktopShortcut = r => InstallManager.Shared.HasDesktopShortcut(InstallKey(r.App));
@@ -459,7 +468,7 @@ public sealed class MainForm : Form
         _settings.Save();
         row.SetPinned(IsPinned(id));
         ReindexList();
-        RefreshUpdateAllButton();
+        RefreshDownloadAllButton();
         Log.Write($"{(IsPinned(id) ? "pinned" : "unpinned")} {id}");
     }
 
@@ -472,25 +481,55 @@ public sealed class MainForm : Form
         Log.Write($"hid {row.App.Id}");
     }
 
-    /// <summary>Drop handler for drag-to-reorder: moves the dragged row next to the drop target within
-    /// the same pin group, persists, and re-lays out. Cross-group drops are ignored (use Pin/Unpin).</summary>
-    private void OnListDragDrop(object? sender, DragEventArgs e)
+    // ── Custom grip drag-to-reorder (web-style): a floating card follows the cursor, the rows rearrange
+    // live underneath, and the order persists on mouse-up. Mirrors the macOS build's feel. ──────────────
+
+    /// <summary>Drag started on a row's grip: mark it as the dashed placeholder and spawn the floating card.</summary>
+    private void OnReorderStart(AppRowControl row)
     {
-        if (e.Data?.GetData(typeof(AppRowControl)) is not AppRowControl dragged) return;
-        var pt = _list.PointToClient(new Point(e.X, e.Y));
-        var target = _rows.FirstOrDefault(r => r.Visible && r.Bounds.Contains(pt));
-        if (target == null || target == dragged) return;
-        if (IsPinned(dragged.App.Id) != IsPinned(target.App.Id)) return;   // don't cross the pin boundary
-        // Grid tiles flow left-to-right (wrap), so decide insert side by X; the vertical list uses Y.
+        _dragRow = row;
+        row.SetDragPlaceholder(true);
+        _dragCard?.Dispose();
+        _dragCard = new DragCardForm(row.CurrentIcon, row.DisplayName, Theme.IsDark(_settings.Appearance));
+        _dragCard.MoveTo(Cursor.Position);
+        _dragCard.Show();
+    }
+
+    /// <summary>Cursor moved mid-drag: reposition the floating card and, when the cursor crosses into a new
+    /// slot within the same pin group, reorder the rows live (no thrash — only when the index changes).</summary>
+    private void OnReorderMove(Point screenPt)
+    {
+        if (_dragRow == null) return;
+        _dragCard?.MoveTo(screenPt);
+
+        var pt = _list.PointToClient(screenPt);
+        var target = _rows.FirstOrDefault(r => r.Visible && r != _dragRow && r.Bounds.Contains(pt));
+        if (target == null || IsPinned(target.App.Id) != IsPinned(_dragRow.App.Id)) return;
+
         bool after = _settings.ViewMode == "grid"
             ? pt.X > target.Left + target.Width / 2
             : pt.Y > target.Top + target.Height / 2;
-        _rows.Remove(dragged);
+        int di = _rows.IndexOf(_dragRow);
         int ti = _rows.IndexOf(target);
-        _rows.Insert(after ? ti + 1 : ti, dragged);
-        PersistOrder();
+        int insert = after ? ti + 1 : ti;
+        if (di < insert) insert--;          // removing the dragged row first shifts later indices down
+        if (insert == di) return;           // already in place → no reflow (avoids flicker/thrash)
+        _rows.RemoveAt(di);
+        _rows.Insert(insert, _dragRow);
         ReindexList();
-        Log.Write($"dragged {dragged.App.Id} into place");
+    }
+
+    /// <summary>Drag released: clear the placeholder, remove the floating card, and persist the new order.</summary>
+    private void OnReorderEnd()
+    {
+        if (_dragRow == null) return;
+        _dragRow.SetDragPlaceholder(false);
+        _dragRow = null;
+        _dragCard?.Close();
+        _dragCard?.Dispose();
+        _dragCard = null;
+        PersistOrder();
+        Log.Write("reordered by drag");
     }
 
     /// <summary>Per-app shortcut toggle from the row menu (desktop: true=Desktop, false=Start Menu).</summary>
@@ -517,12 +556,12 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             Log.Write($"refresh: credential resolution failed: {ex.Message}");
-            ResetRowsNoToken(); ShowNotice(NoCredsMsg); RefreshUpdateAllButton();
+            ResetRowsNoToken(); ShowNotice(NoCredsMsg); RefreshDownloadAllButton();
             return;
         }
         // No credentials (e.g. just removed in Settings): reset every row to its installed/unknown state
         // and clear stale latest/releases, so no row keeps a live — but silently no-op — Install button.
-        if (active == null) { ResetRowsNoToken(); ShowNotice(NoCredsMsg); RefreshUpdateAllButton(); return; }
+        if (active == null) { ResetRowsNoToken(); ShowNotice(NoCredsMsg); RefreshDownloadAllButton(); return; }
         ShowNotice(null);
 
         _refresh.Enabled = false;
@@ -590,16 +629,86 @@ public sealed class MainForm : Form
         finally
         {
             _refresh.Enabled = true;
-            RefreshUpdateAllButton();
+            RefreshDownloadAllButton();
         }
     }
 
-    private void RefreshUpdateAllButton()
+    /// <summary>Shows the "Download All ▾" dropdown only when there's real work to do — some app (as
+    /// shown) isn't installed or has an update — so it disappears once everything is downloaded and up to
+    /// date. The per-item Update-all count lives inside the menu, built fresh on each open.</summary>
+    private void RefreshDownloadAllButton()
     {
+        bool show = _rows.Any(r => r.Visible)
+                    && AuthClient.HasCredentials(_settings, _catalog.DownloadServer)
+                    && HasAnyToDownload(false);
+        _downloadAll.Visible = show;
+        _downloadAll.Location = new Point(_viewToggle.Left - _downloadAll.Width - 8, 16);
+    }
+
+    /// <summary>True if any app has a slot to fetch — a not-installed or updatable default slot (and Full
+    /// slots when <paramref name="includeFull"/>). Mirrors the macOS hasAnyToDownload.</summary>
+    private bool HasAnyToDownload(bool includeFull) => _rows.Any(r => SlotsToDownload(r, includeFull).Any());
+
+    /// <summary>Builds and drops the Download All menu below the button: Update all (N) when any update is
+    /// pending, Download all apps, and — when any app ships a Full edition — Download all incl. Full.</summary>
+    private void ShowDownloadAllMenu()
+    {
+        var menu = new ContextMenuStrip();
         int n = _rows.Count(r => r.Status == RowStatus.UpdateAvailable);
-        _updateAll.Text = n > 0 ? $"Update All ({n})" : "Update All";
-        _updateAll.Visible = n > 0;
-        _updateAll.Location = new Point(_refresh.Left - _updateAll.Width - 8, 16);
+        if (n > 0)
+        {
+            var upd = new ToolStripMenuItem($"Update all ({n})");
+            upd.Click += async (_, _) => await UpdateAllAsync();
+            menu.Items.Add(upd);
+            menu.Items.Add(new ToolStripSeparator());
+        }
+        var all = new ToolStripMenuItem("Download all apps");
+        all.Click += async (_, _) => await DownloadAllAsync(false);
+        menu.Items.Add(all);
+        if (HasFullVariants)
+        {
+            var full = new ToolStripMenuItem("Download all — including Full editions");
+            full.Click += async (_, _) => await DownloadAllAsync(true);
+            menu.Items.Add(full);
+        }
+        menu.Show(_downloadAll, new Point(0, _downloadAll.Height));
+    }
+
+    private bool HasFullVariants => _rows.Any(r => (r.App.Variants?.Count ?? 0) > 1);
+
+    /// <summary>Which variant slots of an app need fetching now: the default slot (and Full slots when
+    /// includeFull) whose asset exists in the latest release and isn't already installed at the latest
+    /// version. Mirrors the macOS slotsToDownload.</summary>
+    private IEnumerable<string?> SlotsToDownload(AppRowControl row, bool includeFull)
+    {
+        var latest = Versions.Latest(row.Releases);
+        if (latest == null) yield break;
+        var variants = new List<string?> { row.App.HasVariants ? row.App.Variants?.FirstOrDefault()?.Id : null };
+        if (includeFull && row.App.Variants != null)
+            variants.AddRange(row.App.Variants.Skip(1).Select(v => (string?)v.Id));
+        foreach (var vid in variants)
+        {
+            var name = row.App.WindowsAsset(vid);
+            if (name == null || !latest.Assets.Any(a => a.Name == name)) continue;   // no asset for this arch → skip
+            var installed = InstallManager.Shared.InstalledVersion(row.App.InstallKey(vid));
+            if (installed == null || Versions.IsNewer(latest.TagName, installed)) yield return vid;
+        }
+    }
+
+    /// <summary>Download All: install/update every app. <paramref name="includeFull"/> also fetches Full
+    /// editions into their own slots (Standard and Full side by side). Skips anything current or with no
+    /// asset for this arch.</summary>
+    private async Task DownloadAllAsync(bool includeFull)
+    {
+        _downloadAll.Enabled = false;
+        try
+        {
+            foreach (var row in _rows.ToList())
+                foreach (var vid in SlotsToDownload(row, includeFull).ToList())
+                    await InstallSlotAsync(row, null, vid);
+            Log.Write($"download all{(includeFull ? " (incl. Full)" : "")} complete");
+        }
+        finally { _downloadAll.Enabled = true; RefreshDownloadAllButton(); }
     }
 
     /// <summary>Reverts every row to its pre-refresh state (installed → Installed, else Unknown) and
@@ -624,9 +733,9 @@ public sealed class MainForm : Form
         var targets = _rows.Where(r => r.Status == RowStatus.UpdateAvailable).ToList();
         if (targets.Count == 0) return;
         Log.Write($"update all: {targets.Count} app(s)");
-        _updateAll.Enabled = false;
+        _downloadAll.Enabled = false;
         try { foreach (var r in targets) await InstallVersionAsync(r, null); }
-        finally { _updateAll.Enabled = true; RefreshUpdateAllButton(); }
+        finally { _downloadAll.Enabled = true; RefreshDownloadAllButton(); }
     }
 
     /// <summary>Shows the notice banner with <paramref name="text"/>, or hides it when null.</summary>
@@ -676,11 +785,19 @@ public sealed class MainForm : Form
 
     private Task InstallAsync(AppRowControl row) => InstallVersionAsync(row, null);
 
-    private async Task InstallVersionAsync(AppRowControl row, string? tag)
+    /// <summary>Row-driven install (event target): installs the row's selected variant at <paramref
+    /// name="tag"/> (null = latest).</summary>
+    private Task InstallVersionAsync(AppRowControl row, string? tag) => InstallSlotAsync(row, tag, null);
+
+    /// <summary>Installs one app slot. <paramref name="variantOverride"/> installs a specific variant slot
+    /// regardless of the row's on-screen selection (used by Download All to fetch Standard and/or Full);
+    /// null = the row's selected variant. The row's displayed state is only updated for the SELECTED
+    /// variant, so a background Full-edition install doesn't hijack the row's display.</summary>
+    private async Task InstallSlotAsync(AppRowControl row, string? tag, string? variantOverride)
     {
         var active = AuthClient.Active(_settings, _catalog.DownloadServer);
         if (active == null) return;
-        var variantId = SelectedVariant(row.App);
+        var variantId = variantOverride ?? SelectedVariant(row.App);
         var assetName = row.App.WindowsAsset(variantId);
         if (assetName == null) return;
 
@@ -715,9 +832,14 @@ public sealed class MainForm : Form
             }
             InstallManager.Shared.Install(row.App, rel.TagName, cache, assetName, _settings.InstallToApplications, variantId);
             InstallManager.TryDelete(cache);   // verified copy is now installed; mirror the macOS zip cleanup
-            var latest = row.Latest ?? rel.TagName;
-            row.SetState(rel.TagName, row.Latest, row.LatestAssetId, ComputeStatus(rel.TagName, latest, true));
-            row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.InstallKey(variantId)));
+            // Only reflect the install in the row when it's the variant currently shown — a Download All
+            // that fetches a non-selected Full edition into its own slot mustn't hijack the row's display.
+            if (variantId == SelectedVariant(row.App))
+            {
+                var latest = row.Latest ?? rel.TagName;
+                row.SetState(rel.TagName, row.Latest, row.LatestAssetId, ComputeStatus(rel.TagName, latest, true));
+                row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(row.App.InstallKey(variantId)));
+            }
             Log.Write(verification switch
             {
                 VerifyResult.Verified => $"verified {row.App.Id} {rel.TagName} (signed sha256)",
@@ -736,7 +858,7 @@ public sealed class MainForm : Form
         finally
         {
             row.SetBusy(false);
-            RefreshUpdateAllButton();
+            RefreshDownloadAllButton();
         }
     }
 
@@ -754,7 +876,7 @@ public sealed class MainForm : Form
             row.SetState(null, row.Latest, row.LatestAssetId, status);
             row.SetResolvedName(null);
             Log.Write($"uninstalled {row.App.Id}");
-            RefreshUpdateAllButton();
+            RefreshDownloadAllButton();
         }
         catch (Exception ex)
         {

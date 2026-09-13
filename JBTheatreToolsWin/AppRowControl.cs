@@ -1,9 +1,61 @@
+using System.ComponentModel;
 using System.Drawing.Drawing2D;
 using System.Reflection;
 
 namespace JBTheatreTools;
 
 public enum RowStatus { Unknown, Checking, NoRelease, MissingAsset, NotInstalled, Installed, UpToDate, UpdateAvailable, Error }
+
+/// <summary>A status badge drawn as a rounded "pill": a tinted rounded background with the label on top,
+/// hugging the text and centred within the control's bounds. Parity with the macOS capsule badge.</summary>
+public sealed class PillLabel : Label
+{
+    private Color _pill = Color.Transparent;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public Color PillBack { get => _pill; set { _pill = value; Invalidate(); } }
+
+    public PillLabel()
+    {
+        BackColor = Color.Transparent;
+        SetStyle(ControlStyles.SupportsTransparentBackColor | ControlStyles.OptimizedDoubleBuffer
+                 | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+    }
+
+    public override Size GetPreferredSize(Size proposed)
+    {
+        var s = TextRenderer.MeasureText(Text, Font);
+        return new Size(s.Width + 18, s.Height + 6);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        if (string.IsNullOrEmpty(Text)) return;
+        var sz = TextRenderer.MeasureText(Text, Font);
+        int pw = sz.Width + 16, ph = sz.Height + 4;
+        int px = Math.Max(0, (Width - pw) / 2), py = Math.Max(0, (Height - ph) / 2);
+        var rect = new Rectangle(px, py, pw, ph);
+        if (_pill.A > 0)
+        {
+            using var b = new SolidBrush(_pill);
+            using var path = PillPath(rect, ph / 2);
+            g.FillPath(b, path);
+        }
+        TextRenderer.DrawText(g, Text, Font, rect, ForeColor,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+    }
+
+    private static GraphicsPath PillPath(Rectangle r, int radius)
+    {
+        int d = Math.Max(2, radius * 2);
+        var p = new GraphicsPath();
+        p.AddArc(r.X, r.Y, d, d, 90, 180);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 180);
+        p.CloseFigure();
+        return p;
+    }
+}
 
 /// <summary>A single catalog row: name, blurb, version line, status badge, and action buttons.</summary>
 public sealed class AppRowControl : UserControl
@@ -18,6 +70,9 @@ public sealed class AppRowControl : UserControl
     public string? ResolvedName { get; private set; }
     /// <summary>Name to show: the installed app's own name when available, else the catalog name.</summary>
     public string DisplayName => string.IsNullOrEmpty(ResolvedName) ? App.Name : ResolvedName!;
+    /// <summary>The row's current icon image (installed app icon / bundled / monogram) — used by the
+    /// floating drag card so it shows the same icon as the row.</summary>
+    public Image? CurrentIcon => _icon.Image;
 
     private readonly PictureBox _icon = new();
     private readonly Label _name = new();
@@ -26,16 +81,27 @@ public sealed class AppRowControl : UserControl
     private readonly Label _version = new();
     private readonly Label _whatsNew = new();
     private readonly ComboBox _variant = new();
-    private readonly Label _badge = new();
+    private readonly PillLabel _badge = new();
     private bool _compact;
     private bool _suppressVariantEvent;
     private readonly Button _install = new();
     private readonly Button _launch = new();
     private readonly Button _more = new();
     private readonly ProgressBar _progress = new();
-    private Point _mouseDownScreen;
+    // Custom grip drag (web-style reorder): a floating card follows the cursor, rows rearrange live, commit
+    // on mouse-up. Started only from the grip zone (left edge), driven by mouse capture on this row.
+    private Point _downScreen;
+    private bool _gripDown;
+    private bool _dragging;
+    private readonly Panel _placeholder = new() { Visible = false, Dock = DockStyle.Fill };
+    private bool _hover;
+    private bool _dark;
 
     public event Func<AppRowControl, Task>? InstallRequested;
+    /// <summary>Grip drag lifecycle for reorder (MainForm drives the floating card + live reorder).</summary>
+    public event Action<AppRowControl>? ReorderStart;
+    public event Action<Point>? ReorderMove;   // carries the current screen point
+    public event Action? ReorderEnd;
     public event Func<AppRowControl, string, Task>? InstallVersionRequested;
     public event Action<AppRowControl>? UninstallRequested;
     public event Action<AppRowControl>? LaunchRequested;
@@ -146,16 +212,31 @@ public sealed class AppRowControl : UserControl
         _progress.Visible = false;
         _progress.Size = new Size(220, 6);
 
+        DoubleBuffered = true;
+        ResizeRedraw = true;   // repaint the grip / hairline / drop line when the row resizes
+
+        // Placeholder overlay shown while this row is the one being dragged: an opaque card-coloured panel
+        // (hides the row content) with a dashed accent outline — the "slot" where the item will land.
+        _placeholder.Paint += PaintPlaceholder;
+        Controls.Add(_placeholder);   // added last → top of the z-order, so it covers the row content
+
         Controls.AddRange(new Control[] { _icon, _name, _pin, _blurb, _version, _whatsNew, _variant, _badge, _install, _launch, _more, _progress });
         Resize += (_, _) => LayoutControls();
-        // Drag-to-reorder (list mode): a press-and-drag on the row body starts a move. Right-click opens
-        // the action menu (needed for grid tiles); double-click launches/installs.
+        // Drag-to-reorder: press-and-drag on the GRIP zone (left edge) starts a custom reorder (MainForm
+        // drives a floating card + live reorder). Right-click opens the action menu; double-click launches.
         foreach (Control c in new Control[] { this, _icon, _name, _blurb, _version, _whatsNew })
         {
             c.MouseDown += Row_MouseDown;
             c.MouseMove += Row_MouseMove;
-            c.MouseUp += Row_RightClick;
+            c.MouseUp += Row_MouseUp;
             c.DoubleClick += (_, _) => PrimaryAction();
+        }
+        // Hover highlight (parity with the macOS row hover): recompute from the real cursor position on
+        // every enter/leave of the row or any child, so moving across children doesn't flicker it off.
+        foreach (Control c in new Control[] { this, _icon, _name, _pin, _blurb, _version, _whatsNew, _variant, _badge, _install, _launch, _more, _progress })
+        {
+            c.MouseEnter += (_, _) => RecomputeHover();
+            c.MouseLeave += (_, _) => RecomputeHover();
         }
         LayoutControls();
         UpdateVisual();
@@ -169,23 +250,100 @@ public sealed class AppRowControl : UserControl
         _pin.Location = new Point(_name.Right + 4, 12);
     }
 
+    /// <summary>Recomputes the hover state from the actual cursor position (robust across child controls)
+    /// and repaints the soft highlight + grip.</summary>
+    private void RecomputeHover()
+    {
+        bool h = ClientRectangle.Contains(PointToClient(Cursor.Position));
+        if (h == _hover) return;
+        _hover = h;
+        BackColor = _hover ? Theme.CardHover(_dark) : Theme.Card(_dark);
+        Invalidate();
+    }
+
+    /// <summary>Shows/hides the dashed placeholder over this row while it's the one being dragged (the row
+    /// content is hidden behind it). MainForm toggles this at drag start/end; the row keeps it as it moves.</summary>
+    public void SetDragPlaceholder(bool on)
+    {
+        if (_placeholder.Visible == on) return;
+        _placeholder.BackColor = Theme.Card(_dark);   // opaque → hides the row content beneath the slot
+        _placeholder.Visible = on;
+        if (on) _placeholder.BringToFront();
+    }
+
+    private void PaintPlaceholder(object? sender, PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var r = _placeholder.ClientRectangle;
+        r.Inflate(-4, -3);
+        r.Width -= 1; r.Height -= 1;
+        using var fill = new SolidBrush(Color.FromArgb(24, Theme.Accent));
+        using var path = RoundedRect(r, 10);
+        g.FillPath(fill, path);
+        using var pen = new Pen(Theme.Accent, 2) { DashStyle = DashStyle.Dash };
+        g.DrawPath(pen, path);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        if (_compact) return;
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        // Grip handle (2×3 dots) at the left margin — the drag affordance (grab here to reorder).
+        int gx = 6, gy = Height / 2 - 8;
+        using var dot = new SolidBrush(Color.FromArgb(_hover ? 210 : 150, Theme.Selector));
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 2; c++)
+                g.FillEllipse(dot, gx + c * 5, gy + r * 6, 3, 3);
+
+        // Hairline separator along the bottom (inset past the icon), hidden while hovered.
+        if (!_hover)
+        {
+            using var pen = new Pen(Theme.Line(_dark));
+            g.DrawLine(pen, 60, Height - 1, Width - 12, Height - 1);
+        }
+    }
+
+    // ── Custom grip drag: press-and-drag the grip zone (whole tile in grid mode) to reorder. Mouse capture
+    // routes the move/up here even over other rows; MainForm draws the floating card and reorders live. ──
     private void Row_MouseDown(object? sender, MouseEventArgs e)
     {
-        if (e.Button == MouseButtons.Left) _mouseDownScreen = Cursor.Position;
+        if (e.Button != MouseButtons.Left) return;
+        // List mode: only the left-edge grip zone starts a drag (the icon starts at x=14). Grid tiles are
+        // draggable anywhere. Don't capture yet — a plain click/double-click must be unaffected; capture is
+        // taken only once a real drag begins (below), so clicks that never cross the threshold are normal.
+        if (!_compact && PointToClient(Cursor.Position).X >= 14) return;
+        _gripDown = true;
+        _dragging = false;
+        _downScreen = Cursor.Position;
     }
 
     private void Row_MouseMove(object? sender, MouseEventArgs e)
     {
-        if (e.Button != MouseButtons.Left) return;
-        var d = SystemInformation.DragSize;
-        if (Math.Abs(Cursor.Position.X - _mouseDownScreen.X) < d.Width &&
-            Math.Abs(Cursor.Position.Y - _mouseDownScreen.Y) < d.Height) return;
-        DoDragDrop(this, DragDropEffects.Move);   // MainForm's list handles the drop + reorder
+        if (!_gripDown || (e.Button & MouseButtons.Left) == 0) return;
+        if (!_dragging)
+        {
+            var d = SystemInformation.DragSize;
+            if (Math.Abs(Cursor.Position.X - _downScreen.X) < d.Width &&
+                Math.Abs(Cursor.Position.Y - _downScreen.Y) < d.Height) return;
+            _dragging = true;
+            Capture = true;                 // now route moves here even over other rows
+            ReorderStart?.Invoke(this);
+        }
+        ReorderMove?.Invoke(Cursor.Position);
     }
 
-    private void Row_RightClick(object? sender, MouseEventArgs e)
+    private void Row_MouseUp(object? sender, MouseEventArgs e)
     {
-        if (e.Button == MouseButtons.Right) ShowMoreMenu();
+        if (e.Button == MouseButtons.Right) { ShowMoreMenu(); return; }
+        if (!_gripDown) return;
+        bool wasDragging = _dragging;
+        _gripDown = false;
+        _dragging = false;
+        if (wasDragging) { Capture = false; ReorderEnd?.Invoke(); }
     }
 
     /// <summary>Double-click / grid-tile click: install the selected variant when it differs from the
@@ -483,6 +641,7 @@ public sealed class AppRowControl : UserControl
         };
         _badge.Text = text;
         _badge.ForeColor = color;
+        _badge.PillBack = string.IsNullOrEmpty(text) ? Color.Transparent : Color.FromArgb(38, color);   // ~15% tint
 
         bool installed = Installed != null;
         _install.Visible = Status is RowStatus.NotInstalled or RowStatus.UpdateAvailable or RowStatus.Error;
@@ -497,7 +656,8 @@ public sealed class AppRowControl : UserControl
 
     public void ApplyTheme(bool dark)
     {
-        BackColor = Theme.Card(dark);
+        _dark = dark;
+        BackColor = _hover ? Theme.CardHover(dark) : Theme.Card(dark);
         _name.ForeColor = Theme.Fg(dark);
         _blurb.ForeColor = Theme.Sub(dark);
         _version.ForeColor = Theme.Sub(dark);

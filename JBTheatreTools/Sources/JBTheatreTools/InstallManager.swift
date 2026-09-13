@@ -106,10 +106,26 @@ final class InstallManager {
 
     // MARK: - Manifest
 
+    /// In-memory cache of the manifest. `manifest()` is on the hot path — the launcher UI calls
+    /// `installedPath` / `installedVersion` from `AppIconImage` and every row on each redraw, and a
+    /// drag-reorder redraws all rows per frame. Reading + JSON-decoding `installed.json` from disk on
+    /// every one of those calls was blocking the main thread and making drag-reorder stutter. This app
+    /// is the only writer of the file, so an in-memory copy (kept in sync by `writeManifest`, guarded by
+    /// a lock for the off-main-actor CLI callers) is authoritative for the process's lifetime.
+    private let manifestLock = NSLock()
+    private var manifestCache: [String: InstalledRecord]?
+
     func manifest() -> [String: InstalledRecord] {
-        guard let data = try? Data(contentsOf: manifestURL),
-              let m = try? JSONDecoder().decode([String: InstalledRecord].self, from: data)
-        else { return [:] }
+        manifestLock.lock(); defer { manifestLock.unlock() }
+        if let cached = manifestCache { return cached }
+        let m: [String: InstalledRecord]
+        if let data = try? Data(contentsOf: manifestURL),
+           let decoded = try? JSONDecoder().decode([String: InstalledRecord].self, from: data) {
+            m = decoded
+        } else {
+            m = [:]
+        }
+        manifestCache = m
         return m
     }
 
@@ -117,6 +133,7 @@ final class InstallManager {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let data = try? enc.encode(m) { try? data.write(to: manifestURL) }
+        manifestLock.lock(); manifestCache = m; manifestLock.unlock()   // keep the in-memory copy in sync
     }
 
     func installedVersion(_ appId: String) -> String? {

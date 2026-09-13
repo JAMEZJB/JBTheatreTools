@@ -30,4 +30,14 @@ public class VersionCompareTests
         Assert.True(VersionCompare.Equal("v1.2.3", "1.2.3"));
         Assert.Equal("1.2.3", VersionCompare.Norm("V1.2.3"));
     }
+
+    [Fact]
+    public void DateTaggedBuildsCompareByDate()
+    {
+        // Convert ships date-style rolling tags (build-YYYYMMDD), not semver — the digit run inside the
+        // segment must order them so a fortnightly build is seen as newer.
+        Assert.True(VersionCompare.IsNewer("build-20260926", "build-20260912"));
+        Assert.False(VersionCompare.IsNewer("build-20260912", "build-20260926"));
+        Assert.False(VersionCompare.IsNewer("build-20260912", "build-20260912"));
+    }
 }

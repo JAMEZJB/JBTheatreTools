@@ -353,6 +353,9 @@ final class AppState: ObservableObject {
     /// Number of installed apps with an update available — drives the header "Update All" button.
     var updatesAvailable: Int { rows.filter { $0.status == .updateAvailable }.count }
 
+    /// True when any catalog app ships a Full edition (a second variant) — gates the "incl. Full" option.
+    var hasFullVariants: Bool { rows.contains { ($0.app.variants?.count ?? 0) > 1 } }
+
     // MARK: - Row ordering (per-machine, persisted)
 
     /// Reorders `rows` to the user's saved order: saved ids first (in saved order), then any ids the
@@ -500,20 +503,79 @@ final class AppState: ObservableObject {
         AppLog.shared.log("moved \(id) \(up ? "up" : "down")")
     }
 
-    /// Drag-reorder for the grid: drop `draggedId`'s tile onto `targetId`'s. Moves within the same pin
-    /// group only (change groups via Pin/Unpin, like the list). Dragging forward lands the tile after the
-    /// target, dragging backward lands it before — so a drop feels like "put it here".
-    func moveRow(_ draggedId: String, onto targetId: String) {
+    /// Pure in-place drag-reorder (list & grid): moves `draggedId` next to `targetId` within the same pin
+    /// group, WITHOUT persisting or logging. The live drag calls this on every row/tile the cursor passes
+    /// (so the dashed slot tracks where it'll land), then `commitReorder()` once when the drop completes.
+    /// Moves within the same pin group only (change groups via Pin/Unpin). Dragging forward lands after the
+    /// target, dragging backward before — so a drop feels like "put it here". Returns whether it moved.
+    @discardableResult
+    func reorder(_ draggedId: String, onto targetId: String) -> Bool {
         guard draggedId != targetId,
               pinnedIds.contains(draggedId) == pinnedIds.contains(targetId),
               let di = rows.firstIndex(where: { $0.id == draggedId }),
-              let tiOrig = rows.firstIndex(where: { $0.id == targetId }) else { return }
+              let tiOrig = rows.firstIndex(where: { $0.id == targetId }) else { return false }
         let draggedWasBefore = di < tiOrig
         let moved = rows.remove(at: di)
-        guard let ti = rows.firstIndex(where: { $0.id == targetId }) else { return }
+        guard let ti = rows.firstIndex(where: { $0.id == targetId }) else {
+            rows.insert(moved, at: min(di, rows.count)); return false   // target vanished mid-drag: put it back
+        }
         rows.insert(moved, at: draggedWasBefore ? ti + 1 : ti)
+        return true
+    }
+
+    /// Live drag-move: place `id` at `index` within its own display group (pinned or main), reassigning the
+    /// group members among the slots they occupy in `rows` — WITHOUT persisting. The gesture calls this
+    /// every frame the target slot changes; `commitReorder()` persists once on drop. Returns whether it
+    /// actually moved (so a frame where nothing changes is a no-op and triggers no re-render).
+    @discardableResult
+    func dragMove(_ id: String, toGroupIndex index: Int) -> Bool {
+        let pinned = pinnedIds.contains(id)
+        var groupIds = (pinned ? pinnedDisplayRows : mainDisplayRows).map(\.id)
+        guard let cur = groupIds.firstIndex(of: id) else { return false }
+        let clamped = max(0, min(index, groupIds.count - 1))
+        guard clamped != cur else { return false }
+        groupIds.move(fromOffsets: IndexSet(integer: cur), toOffset: clamped > cur ? clamped + 1 : clamped)
+        let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        let slots = rows.indices.filter {
+            let rowPinned = pinnedIds.contains(rows[$0].id)
+            return rowPinned == pinned && rows[$0].isVisible && !hiddenIds.contains(rows[$0].id)
+        }
+        for (k, slot) in slots.enumerated() where k < groupIds.count {
+            if let row = byId[groupIds[k]] { rows[slot] = row }
+        }
+        return true
+    }
+
+    /// Persists the row order after a drag reorder — called once when the drop lands.
+    func commitReorder() {
         persistOrder()
-        AppLog.shared.log("grid-reordered \(draggedId) onto \(targetId)")
+        AppLog.shared.log("reordered apps by drag")
+    }
+
+    /// Commits a full drag reorder (called once, on drop): reassigns the visible pinned rows to follow
+    /// `pinnedOrder` and the visible main rows to follow `mainOrder`, among the slots they occupy in `rows`,
+    /// then persists. The drag itself reorders a LOCAL copy of these arrays and never touches `rows`, so the
+    /// app doesn't re-render mid-drag — this applies the result once at the end.
+    func applyDragOrder(pinnedOrder: [String], mainOrder: [String]) {
+        applyGroupOrder(pinnedOrder, pinned: true)
+        applyGroupOrder(mainOrder, pinned: false)
+        persistOrder()
+        AppLog.shared.log("reordered apps by drag")
+    }
+
+    private func applyGroupOrder(_ orderIds: [String], pinned: Bool) {
+        let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        let slots = rows.indices.filter {
+            pinnedIds.contains(rows[$0].id) == pinned && rows[$0].isVisible && !hiddenIds.contains(rows[$0].id)
+        }
+        for (k, slot) in slots.enumerated() where k < orderIds.count {
+            if let r = byId[orderIds[k]] { rows[slot] = r }
+        }
+    }
+
+    /// One-shot drag-reorder where a single drop is the whole gesture: reorder + persist together.
+    func moveRow(_ draggedId: String, onto targetId: String) {
+        if reorder(draggedId, onto: targetId) { commitReorder() }
     }
 
     /// Restores the catalog's default order (Settings → Reset App Order). Pins/hides are left as-is.
@@ -577,6 +639,42 @@ final class AppState: ObservableObject {
         let ids = rows.filter { $0.status == .updateAvailable }.map(\.id)
         AppLog.shared.log("update all: \(ids.count) app(s)")
         for id in ids { await install(id) }
+    }
+
+    /// True if any app has something to fetch — a not-installed or updatable slot (drives the Download All
+    /// button's enabled state). Checks the default variant, and Full editions when `includeFull`.
+    func hasAnyToDownload(includeFull: Bool) -> Bool {
+        rows.contains { row in
+            slotsToDownload(row.app, includeFull: includeFull).isEmpty == false
+        }
+    }
+
+    /// Which variant slots of an app need fetching now: a slot whose asset exists in the latest release
+    /// (so it's reachable on this OS/arch) and that isn't already installed at the latest version.
+    private func slotsToDownload(_ app: CatalogApp, includeFull: Bool) -> [String?] {
+        guard let row = rows.first(where: { $0.id == app.id }),
+              let latest = Self.latest(from: row.releases) else { return [] }
+        var variants: [String?] = [app.hasVariants ? app.variants?.first?.id : nil]
+        if includeFull, let vs = app.variants { variants += vs.dropFirst().map { $0.id } }
+        return variants.filter { vid in
+            guard let name = app.macAssetName(variantId: vid),
+                  latest.assets.contains(where: { $0.name == name }) else { return false }   // no asset for this arch → skip
+            let installed = InstallManager.shared.installedVersion(app.installKey(variantId: vid))
+            return installed == nil || Self.versionIsNewer(latest.tagName, than: installed!)
+        }
+    }
+
+    /// Download All: install/update every app. `includeFull` also fetches Full editions (their own slots,
+    /// so Standard and Full end up installed side by side). Skips anything already current or with no
+    /// asset for this OS/arch.
+    func downloadAll(includeFull: Bool) async {
+        for id in rows.map(\.id) {
+            guard let app = rows.first(where: { $0.id == id })?.app else { continue }
+            for vid in slotsToDownload(app, includeFull: includeFull) {
+                await install(id, variantOverride: vid)
+            }
+        }
+        AppLog.shared.log("download all\(includeFull ? " (incl. Full)" : "") complete")
     }
 
     private func refresh(id: String, client: GitHubClient) async {
@@ -648,8 +746,19 @@ final class AppState: ObservableObject {
 
     /// True if `a` is a strictly newer version string than `b` (component-wise numeric compare).
     nonisolated static func versionIsNewer(_ a: String, than b: String) -> Bool {
+        // First contiguous digit run per segment: skip leading non-digits, take the digits, stop at the next
+        // non-digit. Handles date-style tags like "build-20260912" (→ 20260912) for a rolling app such as
+        // Convert, while staying identical for ordinary semver segments ("2", "0-rc1" → 0).
+        func firstNumber(_ seg: Substring) -> Int {
+            var run = ""
+            for ch in seg {
+                if ch.isNumber { run.append(ch) }
+                else if !run.isEmpty { break }
+            }
+            return Int(run) ?? 0
+        }
         func parts(_ s: String) -> [Int] {
-            norm(s).split(separator: ".").map { Int($0.prefix { $0.isNumber }) ?? 0 }
+            norm(s).split(separator: ".").map(firstNumber)
         }
         let pa = parts(a), pb = parts(b)
         for i in 0..<max(pa.count, pb.count) {
@@ -726,7 +835,9 @@ final class AppState: ObservableObject {
     // MARK: - Install / update / uninstall / launch
 
     /// Installs an app — the latest release, or a specific `tag` (for installing older versions).
-    func install(_ id: String, tag: String? = nil) async {
+    /// `variantOverride` installs a specific variant slot regardless of the row's on-screen selection
+    /// (used by Download All to fetch Standard and/or Full); nil = the row's selected variant.
+    func install(_ id: String, tag: String? = nil, variantOverride: String? = nil) async {
         guard let app = rows.first(where: { $0.id == id })?.app else { return }
         await ensureKeychainExplained()
         guard let client = activeClient() else { return }
@@ -743,8 +854,8 @@ final class AppState: ObservableObject {
 
         let release = tag != nil ? releases.first { $0.tagName == tag } : Self.latest(from: releases)
         guard let rel = release else { update(id) { $0.status = .error("Version \(tag ?? "latest") not found.") }; return }
-        let variantId = selectedVariantId(app)
-        guard let asset = rel.assets.first(where: { $0.name == macAsset(for: app) }) else {
+        let variantId = variantOverride ?? selectedVariantId(app)
+        guard let asset = rel.assets.first(where: { $0.name == app.macAssetName(variantId: variantId) }) else {
             update(id) { $0.status = .error("No macOS asset in \(rel.tagName).") }; return
         }
 
@@ -781,11 +892,15 @@ final class AppState: ObservableObject {
             let toApps = UserDefaults.standard.bool(forKey: "theatre.installToApplications")
             try InstallManager.shared.install(app: app, version: rel.tagName, downloadedZip: zipDest, toApplications: toApps, variant: variantId)
             try? FileManager.default.removeItem(at: zipDest)
-            let name = InstallManager.shared.installedDisplayName(app.installKey(variantId: variantId))
-            update(id) {
-                $0.installed = rel.tagName
-                $0.resolvedName = name
-                $0.status = Self.status(installed: rel.tagName, latest: $0.latest ?? rel.tagName, hasAsset: true)
+            // Only reflect the install in the row when it's the variant currently shown — a Download All
+            // that fetches a non-selected Full edition into its own slot mustn't hijack the row's display.
+            if variantId == selectedVariantId(app) {
+                let name = InstallManager.shared.installedDisplayName(app.installKey(variantId: variantId))
+                update(id) {
+                    $0.installed = rel.tagName
+                    $0.resolvedName = name
+                    $0.status = Self.status(installed: rel.tagName, latest: $0.latest ?? rel.tagName, hasAsset: true)
+                }
             }
             AppLog.shared.log("installed \(app.id) \(rel.tagName)\(variantId.map { " [\($0)]" } ?? "")\(toApps ? " (Applications)" : "")")
         } catch {

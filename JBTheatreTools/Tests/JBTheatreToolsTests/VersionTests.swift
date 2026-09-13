@@ -21,6 +21,17 @@ final class VersionTests: XCTestCase {
         XCTAssertTrue(AppState.versionIsNewer("1.1.0-beta", than: "1.0.0")) // numeric prefix of each segment
     }
 
+    /// Date-style rolling tags (Convert ships `build-YYYYMMDD`, not semver): the digit run inside the
+    /// segment must order them, and `latest(...)` must pick the newest build (not an arbitrary one).
+    func testDateTaggedBuildsCompareByDate() {
+        XCTAssertTrue(AppState.versionIsNewer("build-20260926", than: "build-20260912"))
+        XCTAssertFalse(AppState.versionIsNewer("build-20260912", than: "build-20260926"))
+        XCTAssertFalse(AppState.versionIsNewer("build-20260912", than: "build-20260912"))
+        XCTAssertEqual(
+            AppState.latest(from: [rel("build-20260912"), rel("build-20260926"), rel("build-20260826")])?.tagName,
+            "build-20260926")
+    }
+
     func testLatestPrefersHighestStableRegardlessOfOrder() {
         let latest = AppState.latest(from: [rel("v1.2.0"), rel("v1.10.0"), rel("v1.9.0"), rel("v2.0.0", pre: true)])
         XCTAssertEqual(latest?.tagName, "v1.10.0")   // highest STABLE; the newer prerelease is ignored

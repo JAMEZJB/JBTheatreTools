@@ -8,6 +8,12 @@ extension Color {
     /// Shared house "selector" colour (slate-blue #6E8299) for pop-up dropdowns & overflow menus, so the
     /// purple accent stays reserved for primary actions / header / icon (house-style rule 21).
     static let selectorBlue = Color(red: 110 / 255, green: 130 / 255, blue: 153 / 255)
+    /// Subtle fill behind a hovered row (adapts to light & dark via the primary label colour).
+    static let jbRowHover = Color.primary.opacity(0.06)
+    /// Hairline separator drawn between rows.
+    static let jbHairline = Color.primary.opacity(0.10)
+    /// A raised "card" surface for grid tiles — the window's control background (light card / dark card).
+    static let jbSurface = Color(nsColor: .controlBackgroundColor)
 }
 
 /// User-selectable window appearance. `.system` follows macOS.
@@ -79,6 +85,7 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var refreshing = false
     @State private var updatingAll = false
+    @State private var downloadingAll = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -129,15 +136,31 @@ struct ContentView: View {
                 .fixedSize()
                 .help("Switch between list and grid view")
             }
-            if state.updatesAvailable > 0 {
-                Button {
-                    Task { await updateAllAction() }
+            if state.hasVisibleRows, state.hasCredentials, state.hasAnyToDownload(includeFull: false) {
+                Menu {
+                    if state.updatesAvailable > 0 {
+                        Button {
+                            Task { await updateAllAction() }
+                        } label: { Label("Update all (\(state.updatesAvailable))", systemImage: "arrow.up.circle") }
+                        Divider()
+                    }
+                    Button {
+                        Task { await downloadAllAction(includeFull: false) }
+                    } label: { Label("Download all apps", systemImage: "square.and.arrow.down") }
+                    if state.hasFullVariants {
+                        Button {
+                            Task { await downloadAllAction(includeFull: true) }
+                        } label: { Label("Download all — including Full editions", systemImage: "square.and.arrow.down.on.square") }
+                    }
                 } label: {
-                    if updatingAll { ProgressView().controlSize(.small) }
-                    else { Label("Update All (\(state.updatesAvailable))", systemImage: "arrow.down.circle.fill") }
+                    if downloadingAll || updatingAll { ProgressView().controlSize(.small) }
+                    else { Label("Download All", systemImage: "arrow.down.circle.fill") }
                 }
+                .menuStyle(.button)
                 .buttonStyle(.borderedProminent)
-                .disabled(updatingAll || refreshing)
+                .fixedSize()
+                .disabled(downloadingAll || updatingAll || refreshing)
+                .help("Install or update every app in one go")
             }
             Button {
                 Task { await refreshAll() }
@@ -182,38 +205,27 @@ struct ContentView: View {
         }
     }
 
-    /// Detailed list layout (two groups: pinned floats to the top; each group drag-reorders on its own —
-    /// drag a row within its group; move a row between groups with Pin / Unpin).
+    /// Detailed list layout — a custom gesture-driven reorderable list (see `ReorderableList`). Uses a
+    /// `DragGesture` rather than the drag-and-drop system: the dragged row lifts and tracks the cursor at
+    /// the display's frame rate, and other rows slide aside. (The drag-and-drop system delivered hover
+    /// events only ~7×/sec and trailed a system drag image, which is what felt laggy.)
     private var listView: some View {
-        List {
-            if !state.pinnedDisplayRows.isEmpty {
-                Section("Pinned") {
-                    ForEach(state.pinnedDisplayRows) { row in
-                        AppRowView(row: row)
-                    }
-                    .onMove { state.moveInList(pinned: true, from: $0, to: $1) }
-                }
-            }
-            Section {
-                ForEach(state.mainDisplayRows) { row in
-                    AppRowView(row: row)
-                }
-                .onMove { state.moveInList(pinned: false, from: $0, to: $1) }
-            }
-        }
-        .listStyle(.plain)
+        ReorderableList()
     }
 
-    /// Compact icon-grid layout: an icon + name tile per app, pinned apps first. Per-app actions live in
-    /// the tile's right-click menu; a click launches (installed) or installs. Drag-reorder is list-only.
+    /// Compact icon-grid layout: an icon + name tile per app, pinned apps first. Tiles drag-reorder on
+    /// drop (a lifted card + drop-target highlight); a click launches (when installed) or installs; the
+    /// full action set lives in the tile's right-click menu.
     private var gridView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                if !state.pinnedDisplayRows.isEmpty {
-                    gridSection("Pinned", rows: state.pinnedDisplayRows)
-                    gridSection("All apps", rows: state.mainDisplayRows)
+                let pinned = state.pinnedDisplayRows
+                let main = state.mainDisplayRows
+                if !pinned.isEmpty {
+                    gridSection("Pinned", rows: pinned)
+                    gridSection("All apps", rows: main)
                 } else {
-                    gridSection(nil, rows: state.mainDisplayRows)
+                    gridSection(nil, rows: main)
                 }
             }
             .padding(16)
@@ -225,15 +237,25 @@ struct ContentView: View {
     private func gridSection(_ title: String?, rows: [AppState.Row]) -> some View {
         if !rows.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                if let title {
-                    Text(title).font(.caption).bold().foregroundStyle(.secondary)
-                }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 128), spacing: 14)],
-                          alignment: .leading, spacing: 14) {
+                if let title { groupLabel(title) }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 12)],
+                          alignment: .leading, spacing: 12) {
                     ForEach(rows) { row in AppGridTile(row: row) }
                 }
             }
         }
+    }
+
+    /// Uppercase slate-blue section heading (matches the signed-off prototype's group labels).
+    private func groupLabel(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.system(size: 10.5, weight: .bold))
+            .tracking(0.8)
+            .foregroundStyle(Color.selectorBlue)
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+            .padding(.bottom, 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func launcherBanner(_ version: String) -> some View {
@@ -310,40 +332,195 @@ struct ContentView: View {
         await state.updateAll()
         updatingAll = false
     }
+
+    private func downloadAllAction(includeFull: Bool) async {
+        downloadingAll = true
+        await state.downloadAll(includeFull: includeFull)
+        downloadingAll = false
+    }
 }
 
-/// A single catalog row: name, blurb, version line, status badge, and action buttons.
+/// A small 2×3 dotted drag handle (the "grip"), shown on row hover — grab it to reorder.
+struct DragGrip: View {
+    var body: some View {
+        VStack(spacing: 3) {
+            ForEach(0..<3, id: \.self) { _ in
+                HStack(spacing: 3) {
+                    Circle().frame(width: 3, height: 3)
+                    Circle().frame(width: 3, height: 3)
+                }
+            }
+        }
+        .foregroundStyle(Color.selectorBlue)
+    }
+}
+
+/// The lifted card that follows the cursor during a drag (the `.onDrag` preview) — a compact,
+/// shadowed chip with the app's icon and name, shared by the list and grid.
+struct DragPreviewCard: View {
+    let id: String
+    let displayName: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            AppIconImage(id: id, displayName: displayName, size: 30)
+            Text(displayName).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(.regularMaterial))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Color.jbHairline))
+        .shadow(color: .black.opacity(0.30), radius: 14, y: 7)
+        .frame(minWidth: 200, alignment: .leading)
+    }
+}
+
+/// Holds the live cursor point during a drag. A reference type kept in `@State` (which does NOT subscribe to
+/// its `objectWillChange`), so updating `point` 60×/sec re-renders ONLY the floating card that observes it —
+/// never the list, rows, or header. That isolation is what keeps the card glued to the pointer.
+final class DragCursor: ObservableObject {
+    @Published var point: CGPoint = .zero
+    /// Each visible row's global frame. Plain (not published) and written from `onPreferenceChange`, so
+    /// updating it — which happens on every scroll frame — never re-renders the list (that was the "slow
+    /// scroll" bug). The drag gesture reads it to map the cursor to a target slot.
+    var frames: [String: CGRect] = [:]
+}
+
+/// The working row order during a drag. Reordered LOCALLY (this array only), so the shared model isn't
+/// mutated mid-drag — nothing outside the list re-renders, so the drag never janks. Committed on drop.
+struct DragOrder { var pinned: [String]; var main: [String] }
+
+/// Reports each visible row's global frame so the drag can map the cursor's Y to a target slot.
+struct RowFrameKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
+/// The detailed list, modelled on the web prototype (SortableJS): during a drag the rows are reordered in a
+/// LOCAL array — the shared model is never touched until drop — so nothing outside this view re-renders and
+/// the drag stays smooth; a separate floating card follows the cursor. A plain `VStack` (only 17 rows, so
+/// non-lazy is fine) sidesteps the known LazyVStack-in-ScrollView stutter.
+struct ReorderableList: View {
+    @EnvironmentObject var state: AppState
+    @State private var cursor = DragCursor()
+    @State private var draggingId: String?
+    @State private var order: DragOrder?
+
+    private var pinnedIds: [String] { order?.pinned ?? state.pinnedDisplayRows.map(\.id) }
+    private var mainIds: [String] { order?.main ?? state.mainDisplayRows.map(\.id) }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                if !pinnedIds.isEmpty {
+                    label("Pinned")
+                    ForEach(pinnedIds, id: \.self) { rowView($0) }
+                    label("All apps")
+                }
+                ForEach(mainIds, id: \.self) { rowView($0) }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+        }
+        // The floating card is drawn over the (non-scrolling) viewport; everything is measured in GLOBAL
+        // space so the gesture, the frames and the card agree. `origin` converts the global cursor to local.
+        .overlay {
+            GeometryReader { geo in
+                FloatingCard(cursor: cursor, draggingId: draggingId, origin: geo.frame(in: .global).origin)
+            }
+            .allowsHitTesting(false)
+        }
+        // Store frames on the (non-observed) cursor object — writing them never re-renders the list, so this
+        // fires freely on scroll without bogging it, and the frames are always current when a drag starts.
+        .onPreferenceChange(RowFrameKey.self) { cursor.frames = $0 }
+    }
+
+    @ViewBuilder
+    private func rowView(_ id: String) -> some View {
+        if let row = state.rows.first(where: { $0.id == id }) {
+            AppRowView(row: row, cursor: cursor, draggingId: $draggingId, order: $order)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(key: RowFrameKey.self, value: [id: geo.frame(in: .global)])
+                    }
+                )
+        }
+    }
+
+    private func label(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.system(size: 10.5, weight: .bold)).tracking(0.8)
+            .foregroundStyle(Color.selectorBlue)
+            .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The lifted card that follows the cursor. Observes only `DragCursor`, and its position is never animated,
+/// so it stays glued to the pointer. `cursor.point` is global; `origin` is this overlay's global top-left.
+struct FloatingCard: View {
+    @EnvironmentObject var state: AppState
+    @ObservedObject var cursor: DragCursor
+    let draggingId: String?
+    let origin: CGPoint
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if let id = draggingId, let row = state.rows.first(where: { $0.id == id }) {
+                DragPreviewCard(id: id, displayName: row.displayName)
+                    .offset(x: cursor.point.x - origin.x - 16, y: cursor.point.y - origin.y - 22)
+                    .transaction { $0.animation = nil }   // never ease the card — keep it glued to the cursor
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+/// A single catalog row: grip, icon, name/blurb/version, status pill, and action buttons. Grabbing the grip
+/// starts the drag: the floating card follows the cursor, this row becomes a dashed placeholder, and the
+/// other rows slide aside — driven by reordering a LOCAL array, so there's no shared-state churn and it
+/// stays smooth. The order is committed to the model on drop.
 struct AppRowView: View {
     @EnvironmentObject var state: AppState
     let row: AppState.Row
+    let cursor: DragCursor
+    @Binding var draggingId: String?
+    @Binding var order: DragOrder?
+    @State private var hovering = false
     @State private var confirmingUninstall = false
 
+    private var isDragging: Bool { draggingId == row.id }
+
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            iconView
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
-                    Text(row.displayName).font(.body).bold()
-                    if state.isPinned(row.id) {
-                        Image(systemName: "pin.fill").font(.caption2).foregroundStyle(Color.selectorBlue)
-                    }
-                }
-                Text(row.app.blurb).font(.caption).foregroundStyle(.secondary)
-                versionLine
-                whatsNewLine
-                variantToggle
-                if row.busy {
-                    ProgressView(value: row.progress)
-                        .frame(maxWidth: 240)
-                        .controlSize(.small)
-                }
-            }
-            Spacer()
+        HStack(alignment: .center, spacing: 11) {
+            grip
+            AppIconImage(id: row.id, displayName: row.displayName, size: 38)
+            infoColumn
+            Spacer(minLength: 8)
             statusBadge
             actions
         }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 4)
+        .opacity(isDragging ? 0 : 1)
+        .padding(.vertical, 9)
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(hovering && !isDragging ? Color.jbRowHover : Color.clear)
+        )
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.jbHairline)
+                .frame(height: 1)
+                .padding(.leading, 57)
+                .padding(.trailing, 10)
+                .opacity(hovering || isDragging ? 0 : 1)
+        }
+        .overlay { if isDragging { dropSlot } }
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
         .confirmationDialog("Uninstall \(row.displayName)?",
                             isPresented: $confirmingUninstall, titleVisibility: .visible) {
             Button("Uninstall", role: .destructive) { state.uninstall(row.id) }
@@ -353,10 +530,78 @@ struct AppRowView: View {
         }
     }
 
-    /// Leading icon: the installed app's REAL icon once installed; else the bundled per-app icon; else
-    /// a tinted monogram tile. (Shared with the grid tile via `AppIconImage`.)
-    private var iconView: some View {
-        AppIconImage(id: row.id, displayName: row.displayName, size: 40)
+    /// The dashed accent placeholder shown in this row's slot while it's the one being dragged.
+    private var dropSlot: some View {
+        RoundedRectangle(cornerRadius: 11, style: .continuous)
+            .strokeBorder(Color.jbAccent, style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
+            .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.jbAccent.opacity(0.08)))
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+    }
+
+    /// Grip handle: fades in on hover, and carries the reorder `DragGesture`. On macOS a click-drag doesn't
+    /// scroll (scrolling is wheel/trackpad), so a plain gesture here doesn't fight the ScrollView.
+    private var grip: some View {
+        DragGrip()
+            .frame(width: 16)
+            .opacity(hovering || isDragging ? 0.85 : 0.0)
+            .contentShape(Rectangle())
+            .gesture(reorderGesture)
+            .help("Drag to reorder")
+    }
+
+    private var reorderGesture: some Gesture {
+        DragGesture(minimumDistance: 3, coordinateSpace: .global)
+            .onChanged { value in
+                if draggingId != row.id {
+                    draggingId = row.id
+                    order = DragOrder(pinned: state.pinnedDisplayRows.map(\.id),
+                                      main: state.mainDisplayRows.map(\.id))
+                }
+                cursor.point = value.location           // moves ONLY the floating card (isolated re-render)
+                reorderLocally(toY: value.location.y)   // reorders the LOCAL array — no shared-state churn
+            }
+            .onEnded { _ in
+                if let o = order { state.applyDragOrder(pinnedOrder: o.pinned, mainOrder: o.main) }
+                order = nil
+                draggingId = nil
+            }
+    }
+
+    /// Moves the dragged row within its group in the LOCAL order to the slot the cursor is over.
+    private func reorderLocally(toY y: CGFloat) {
+        guard var o = order else { return }
+        let pinned = state.isPinned(row.id)
+        var ids = pinned ? o.pinned : o.main
+        guard let cur = ids.firstIndex(of: row.id) else { return }
+        var target = ids.count - 1
+        for (i, id) in ids.enumerated() {
+            if let f = cursor.frames[id], y < f.midY { target = i; break }
+        }
+        guard target != cur else { return }
+        ids.move(fromOffsets: IndexSet(integer: cur), toOffset: target > cur ? target + 1 : target)
+        if pinned { o.pinned = ids } else { o.main = ids }
+        withAnimation(.easeOut(duration: 0.10)) { order = o }
+    }
+
+    private var infoColumn: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 5) {
+                Text(row.displayName).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
+                if state.isPinned(row.id) {
+                    Image(systemName: "pin.fill").font(.system(size: 9)).foregroundStyle(Color.selectorBlue)
+                }
+            }
+            Text(row.app.blurb).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+            versionLine
+            whatsNewLine
+            variantToggle
+            if row.busy {
+                ProgressView(value: row.progress)
+                    .frame(maxWidth: 240)
+                    .controlSize(.small)
+            }
+        }
     }
 
     private var versionLine: some View {
@@ -447,7 +692,7 @@ struct AppRowView: View {
     private func badge(_ text: String, color: Color) -> some View {
         Text(text)
             .font(.caption2).bold()
-            .padding(.horizontal, 8).padding(.vertical, 3)
+            .padding(.horizontal, 9).padding(.vertical, 3)
             .background(color.opacity(0.15))
             .foregroundStyle(color)
             .clipShape(Capsule())
@@ -471,6 +716,7 @@ struct AppRowView: View {
             if row.installed != nil { launchButton }
             rowMenu   // every visible row has the ⋯ menu (reordering is always available)
         }
+        .controlSize(.small)
     }
 
     /// Overflow menu: pin/hide/reorder, pick a variant, install a specific (older) version, or uninstall.
@@ -497,6 +743,7 @@ struct AppRowView: View {
 
     private var launchButton: some View {
         Button("Launch") { state.launch(row.id) }
+            .buttonStyle(.bordered)
             .disabled(row.busy)
     }
 }
@@ -540,9 +787,16 @@ struct AppIconImage: View {
         }
     }
 
+    /// Cache decoded bundled icons too (audit F12 cached only the installed-app icon) — otherwise a
+    /// not-installed row re-reads and re-decodes its PNG from the app bundle on every redraw, which during
+    /// a drag-reorder (all rows redraw per frame) stutters the main thread.
+    private static let bundledCache = NSCache<NSString, NSImage>()
     static func bundledIcon(_ id: String) -> NSImage? {
-        guard let url = Bundle.main.url(forResource: id, withExtension: "png") else { return nil }
-        return NSImage(contentsOf: url)
+        if let hit = bundledCache.object(forKey: id as NSString) { return hit }
+        guard let url = Bundle.main.url(forResource: id, withExtension: "png"),
+              let img = NSImage(contentsOf: url) else { return nil }
+        bundledCache.setObject(img, forKey: id as NSString)
+        return img
     }
 }
 
@@ -602,19 +856,21 @@ struct AppMenuButtons: View {
     }
 }
 
-/// One tile in the grid view: a large icon + name, with a compact status line. A click launches the
-/// app (if installed) or installs it; the full action set lives in the right-click menu (shared with
-/// the list row). Drag-reorder stays a list-view feature; reordering here is via the menu's Move Up/Down.
+/// One tile in the grid view: a large icon + name and a compact status line, on a raised card. A click
+/// launches the app (if installed) or installs it; the full action set lives in the right-click menu.
+/// Dragging a tile lifts a card and reorders it within its pin group on drop (the drop target highlights).
 struct AppGridTile: View {
     @EnvironmentObject var state: AppState
     let row: AppState.Row
+    @State private var hovering = false
+    @State private var isDropTarget = false
     @State private var confirmingUninstall = false
 
     var body: some View {
         VStack(spacing: 8) {
-            AppIconImage(id: row.id, displayName: row.displayName, size: 54)
+            AppIconImage(id: row.id, displayName: row.displayName, size: 52)
             Text(row.displayName)
-                .font(.caption).bold()
+                .font(.system(size: 12.5, weight: .semibold))
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
                 .frame(height: 30)
@@ -623,11 +879,19 @@ struct AppGridTile: View {
         .frame(maxWidth: .infinity)
         .frame(height: 140)
         .padding(8)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.secondary.opacity(0.06)))
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.jbSurface)
+                .shadow(color: .black.opacity(hovering ? 0.14 : 0.05),
+                        radius: hovering ? 6 : 2, y: hovering ? 3 : 1)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.jbHairline)
+        )
         .overlay(alignment: .topTrailing) {
             if state.isPinned(row.id) {
                 Image(systemName: "pin.fill").font(.caption2)
-                    .foregroundStyle(Color.selectorBlue).padding(6)
+                    .foregroundStyle(Color.selectorBlue).padding(8)
             }
         }
         .overlay(alignment: .bottom) {
@@ -636,18 +900,26 @@ struct AppGridTile: View {
                     .padding(.horizontal, 12).padding(.bottom, 8)
             }
         }
+        .overlay {
+            if isDropTarget {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.jbAccent, style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
+                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.jbAccent.opacity(0.08)))
+            }
+        }
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
         .onTapGesture { primaryAction() }
-        // Drag a tile onto another to reorder (within its pin group) — the grid's equivalent of the
-        // list's drag-to-reorder. Cross-group moves are via Pin/Unpin, same as the list.
         .draggable(row.id) {
-            AppIconImage(id: row.id, displayName: row.displayName, size: 54)
+            DragPreviewCard(id: row.id, displayName: row.displayName)
         }
         .dropDestination(for: String.self) { items, _ in
             guard let dragged = items.first else { return false }
-            state.moveRow(dragged, onto: row.id)
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                state.moveRow(dragged, onto: row.id)
+            }
             return true
-        }
+        } isTargeted: { isDropTarget = $0 }
         .contextMenu { AppMenuButtons(row: row, requestUninstall: { confirmingUninstall = true }) }
         .confirmationDialog("Uninstall \(row.displayName)?",
                             isPresented: $confirmingUninstall, titleVisibility: .visible) {
