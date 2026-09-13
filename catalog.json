@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64 (plus optional per-arch macOS keys macos-arm64 / macos-x64, which the macOS launcher prefers over the universal `macos` key when present). macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Twenty apps (NDI Tools, PDF Tools and Surtitle Tools each ship two variants — a default and a batteries-included 'Full' — chosen by a per-row toggle; each app entry may carry an optional `variants` array [{id,label,assets}], and the Full variant uses the per-arch macOS keys macos-arm64 / macos-x64. Convert is date-tagged (build-YYYYMMDD, rolling) rather than semver, so it resolves against the latest release); Each app entry may carry optional `whatsNew` + `whatsNewVersion` strings (a one-line what's-new for its current release, shown under the app in both launchers; omitted for apps with no release yet). asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships).",
+  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64 (plus optional per-arch macOS keys macos-arm64 / macos-x64, which the macOS launcher prefers over the universal `macos` key when present). macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Twenty-one apps (NDI Tools, PDF Tools, Image Tools and Surtitle Tools each ship two variants — a default and a batteries-included 'Full' — chosen by a per-row toggle; each app entry may carry an optional `variants` array [{id,label,assets}], and the Full variant uses the per-arch macOS keys macos-arm64 / macos-x64. Convert is date-tagged (build-YYYYMMDD, rolling) rather than semver, so it resolves against the latest release); Each app entry may carry optional `whatsNew` + `whatsNewVersion` strings (a one-line what's-new for its current release, shown under the app in both launchers; omitted for apps with no release yet). asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships).",
   "downloadServer": "https://jbtheatretools.jamesbreedon.com/ghapi",
   "categories": [
     "Show control",
@@ -318,14 +318,33 @@
       "name": "Image Tools",
       "blurb": "A private, offline image toolbox — convert, resize, watermark & scrub EXIF/GPS.",
       "category": "Documents & media",
-      "whatsNew": "First release — convert, resize, watermark and scrub EXIF/GPS, all offline.",
-      "whatsNewVersion": "v0.1.0",
+      "whatsNew": "Now ~20 tool groups (adjust, effects, redact, EXIF/GPS and more); a new Full edition adds background removal, RAW decode and video↔GIF.",
+      "whatsNewVersion": "v0.3.1",
       "owner": "JAMEZJB",
       "repo": "ImageTools",
       "assets": {
         "macos": "ImageTools-macOS.zip",
-        "windows-x64": "ImageTools-Windows-x64.exe"
-      }
+        "windows-x64": "ImageTools-Windows-x64.exe",
+        "windows-arm64": "ImageTools-Windows-arm64.exe"
+      },
+      "variants": [
+        {
+          "id": "light",
+          "label": "Light",
+          "assets": {
+            "macos": "ImageTools-macOS.zip",
+            "windows-x64": "ImageTools-Windows-x64.exe",
+            "windows-arm64": "ImageTools-Windows-arm64.exe"
+          }
+        },
+        {
+          "id": "full",
+          "label": "Full",
+          "assets": {
+            "macos-arm64": "ImageTools-Full-macOS-arm64.zip"
+          }
+        }
+      ]
     },
     {
       "id": "surtitletools",
@@ -372,6 +391,21 @@
         "macos": "convert-macOS.zip",
         "windows-x64": "convert-Windows-x64.exe",
         "windows-arm64": "convert-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "renametools",
+      "name": "Rename Tools",
+      "blurb": "Bulk-rename lots of files and folders at once with reusable rules.",
+      "category": "Documents & media",
+      "whatsNew": "First release — batch-rename files and folders in bulk.",
+      "whatsNewVersion": "v0.1.0",
+      "owner": "JAMEZJB",
+      "repo": "RenameTools",
+      "assets": {
+        "macos": "RenameTools-macOS.zip",
+        "windows-x64": "RenameTools-Windows-x64.exe",
+        "windows-arm64": "RenameTools-Windows-arm64.exe"
       }
     }
   ]
