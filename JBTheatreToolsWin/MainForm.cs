@@ -29,6 +29,14 @@ public sealed class MainForm : Form
     private AppRowControl? _dragRow;
     private DragCardForm? _dragCard;
 
+    // Category sections: one header control per group (Pinned + each category), and the set of app ids
+    // currently eligible to show (installed or reachable). Displayed visibility = eligible && !hidden &&
+    // section not collapsed — computed centrally in ReindexList.
+    private readonly Dictionary<string, SectionHeaderControl> _headers = new();
+    private readonly HashSet<string> _eligible = new();
+    private const string PinnedKey = "pinned";
+    private const string Uncategorised = "Other";
+
     // Notice-banner messages (the banner doubles as the no-creds / bad-creds / no-access notice).
     // Worded per auth mode: "token" = GitHub PAT, "server" = download-server relay + suite passphrase.
     private string NoCredsMsg => _settings.AuthMode == "server"
@@ -280,16 +288,19 @@ public sealed class MainForm : Form
             row.SetState(installed, null, null, installed != null ? RowStatus.Installed : RowStatus.Unknown);
             row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(slot));
             row.SetPinned(IsPinned(app.Id));
-            // Installed apps show immediately (launchable pre-refresh); not-installed rows stay hidden
+            // Installed apps are eligible immediately (launchable pre-refresh); not-installed rows stay hidden
             // until a refresh confirms the token can reach them, so inaccessible apps never flash in.
-            // Hidden apps never show.
-            row.Visible = installed != null && !IsHidden(app.Id);
+            if (installed != null) _eligible.Add(app.Id);
+            row.Visible = false;   // ReindexList sets displayed visibility from eligibility + collapse
             _rows.Add(row);
             _list.Controls.Add(row);
         }
         _list.Resize += (_, _) =>
         {
-            if (_settings.ViewMode == "grid") return;   // grid tiles are fixed-size; don't stretch them
+            // Section headers are full-width in BOTH modes (in grid a full-width header forces a wrap, so it
+            // reads as a section break); grid tiles themselves are fixed-size and don't stretch.
+            foreach (var h in _headers.Values) h.Width = _list.ClientSize.Width - 30;
+            if (_settings.ViewMode == "grid") return;
             foreach (var r in _rows) r.Width = _list.ClientSize.Width - 30;
         };
         ApplyRowOrder();
@@ -312,12 +323,12 @@ public sealed class MainForm : Form
             if (!ordered.Contains(row)) ordered.Add(row);
         _rows.Clear();
         _rows.AddRange(ordered);
-        // Reflect pin + hidden state (they may have changed in Settings — e.g. "Show all hidden").
+        // Reflect pin state + refresh installed-eligibility (may have changed in Settings — e.g. "Show all
+        // hidden"). Displayed visibility is computed centrally in ReindexList (eligibility + collapse).
         foreach (var r in _rows)
         {
             r.SetPinned(IsPinned(r.App.Id));
-            if (IsHidden(r.App.Id)) r.Visible = false;
-            else if (!r.Visible && InstallManager.Shared.InstalledVersion(InstallKey(r.App)) != null) r.Visible = true;
+            if (InstallManager.Shared.InstalledVersion(InstallKey(r.App)) != null) _eligible.Add(r.App.Id);
         }
         ReindexList();
     }
@@ -434,9 +445,9 @@ public sealed class MainForm : Form
     {
         int i = _rows.IndexOf(row);
         if (i < 0) return -1;
-        bool pinned = IsPinned(row.App.Id);
-        if (up) { for (int k = i - 1; k >= 0; k--) if (_rows[k].Visible && IsPinned(_rows[k].App.Id) == pinned) return k; }
-        else { for (int k = i + 1; k < _rows.Count; k++) if (_rows[k].Visible && IsPinned(_rows[k].App.Id) == pinned) return k; }
+        var key = GroupKeyOf(row);   // same section (Pinned, or one category) only
+        if (up) { for (int k = i - 1; k >= 0; k--) if (_rows[k].Visible && GroupKeyOf(_rows[k]) == key) return k; }
+        else { for (int k = i + 1; k < _rows.Count; k++) if (_rows[k].Visible && GroupKeyOf(_rows[k]) == key) return k; }
         return -1;
     }
 
@@ -446,16 +457,129 @@ public sealed class MainForm : Form
         _settings.Save();
     }
 
-    /// <summary>Sets the FlowLayoutPanel child order: visible PINNED rows first, then visible unpinned,
-    /// then the hidden/invisible ones (which take no space). <c>_rows</c> stays the master order.</summary>
+    // ── Category sections (Pinned floats to the top; the rest group under their catalog category) ──────
+
+    private string CategoryOf(CatalogApp app)
+    {
+        var c = app.Category?.Trim() ?? "";
+        return c.Length == 0 ? Uncategorised : c;
+    }
+
+    private bool IsCollapsed(string key) => _settings.CollapsedCategories.Contains(key);
+
+    /// <summary>A row is eligible to show (installed or reachable) and not user-hidden — "would show",
+    /// ignoring collapse. Drives the no-access / empty-state notices and the download-all button.</summary>
+    private bool WouldShow(AppRowControl row) => _eligible.Contains(row.App.Id) && !IsHidden(row.App.Id);
+
+    /// <summary>The effective category order: the user's saved order first, then the catalog's order for any
+    /// not covered, then leftover categories alphabetically.</summary>
+    private List<string> EffectiveCategoryOrder(IEnumerable<AppRowControl> mainRows)
+    {
+        var order = new List<string>();
+        void Add(string c) { if (!order.Contains(c)) order.Add(c); }
+        foreach (var c in _settings.CategoryOrder) Add(c);
+        foreach (var c in _catalog.Categories ?? new()) Add(c);
+        foreach (var c in mainRows.Select(r => CategoryOf(r.App)).Distinct().OrderBy(c => c)) Add(c);
+        return order;
+    }
+
+    /// <summary>The render groups in order: Pinned first (if any), then each non-empty category. Rows are in
+    /// <c>_rows</c> order, restricted to "would show" rows.</summary>
+    private List<(string key, string title, List<AppRowControl> rows)> DisplayGroups()
+    {
+        var groups = new List<(string, string, List<AppRowControl>)>();
+        var shown = _rows.Where(WouldShow).ToList();
+        var pinned = shown.Where(r => IsPinned(r.App.Id)).ToList();
+        if (pinned.Count > 0) groups.Add((PinnedKey, "Pinned", pinned));
+        var main = shown.Where(r => !IsPinned(r.App.Id)).ToList();
+        foreach (var cat in EffectiveCategoryOrder(main))
+        {
+            var rows = main.Where(r => CategoryOf(r.App) == cat).ToList();
+            if (rows.Count > 0) groups.Add((cat, cat, rows));
+        }
+        return groups;
+    }
+
+    /// <summary>Lays out the FlowLayoutPanel: for each group, its header then (unless collapsed) its rows;
+    /// collapsed/hidden rows and unused headers are hidden and parked at the end. <c>_rows</c> stays the
+    /// master order, and each row's displayed visibility is (would-show AND section not collapsed).</summary>
     private void ReindexList()
     {
         _list.SuspendLayout();
+        var groups = DisplayGroups();
+        int firstCat = groups.FindIndex(x => x.key != PinnedKey);
+        int lastCat = groups.Count - 1;
+        var used = new HashSet<string>();
         int idx = 0;
-        foreach (var r in _rows.Where(r => r.Visible && IsPinned(r.App.Id))) _list.Controls.SetChildIndex(r, idx++);
-        foreach (var r in _rows.Where(r => r.Visible && !IsPinned(r.App.Id))) _list.Controls.SetChildIndex(r, idx++);
-        foreach (var r in _rows.Where(r => !r.Visible)) _list.Controls.SetChildIndex(r, idx++);
+
+        for (int gi = 0; gi < groups.Count; gi++)
+        {
+            var (key, title, rows) = groups[gi];
+            bool collapsed = IsCollapsed(key);
+            bool pinnedGroup = key == PinnedKey;
+            var header = HeaderFor(key);
+            header.Configure(key, title, rows.Count, collapsed, pinnedGroup, Theme.IsDark(_settings.Appearance));
+            header.SetMoveEnabled(!pinnedGroup && gi > firstCat, !pinnedGroup && gi < lastCat);
+            header.Width = _list.ClientSize.Width - 30;
+            header.Visible = true;
+            _list.Controls.SetChildIndex(header, idx++);
+            used.Add(key);
+
+            foreach (var r in rows)
+            {
+                r.Visible = !collapsed;
+                if (!collapsed) _list.Controls.SetChildIndex(r, idx++);
+            }
+        }
+
+        // Not-shown rows (hidden, collapsed, not eligible) take no space; park them + any unused header.
+        foreach (var r in _rows.Where(r => !WouldShow(r) || IsCollapsed(GroupKeyOf(r))))
+        {
+            r.Visible = false;
+            _list.Controls.SetChildIndex(r, idx++);
+        }
+        foreach (var h in _headers.Values.Where(h => !used.Contains(h.Key)))
+        {
+            h.Visible = false;
+            _list.Controls.SetChildIndex(h, idx++);
+        }
         _list.ResumeLayout();
+    }
+
+    private string GroupKeyOf(AppRowControl row) => IsPinned(row.App.Id) ? PinnedKey : CategoryOf(row.App);
+
+    /// <summary>The header control for a group key, created on demand and wired to collapse/move handlers.</summary>
+    private SectionHeaderControl HeaderFor(string key)
+    {
+        if (_headers.TryGetValue(key, out var h)) return h;
+        h = new SectionHeaderControl();
+        h.CollapseToggleRequested += ToggleCollapsed;
+        h.MoveSectionRequested += MoveSection;
+        _headers[key] = h;
+        _list.Controls.Add(h);
+        return h;
+    }
+
+    private void ToggleCollapsed(string key)
+    {
+        if (!_settings.CollapsedCategories.Remove(key)) _settings.CollapsedCategories.Add(key);
+        _settings.Save();
+        ReindexList();
+        Log.Write($"{(IsCollapsed(key) ? "collapsed" : "expanded")} section {key}");
+    }
+
+    private void MoveSection(string key, bool up)
+    {
+        if (key == PinnedKey) return;
+        var order = DisplayGroups().Select(g => g.key).Where(k => k != PinnedKey).ToList();
+        int i = order.IndexOf(key);
+        int j = up ? i - 1 : i + 1;
+        if (i < 0 || j < 0 || j >= order.Count) return;
+        (order[i], order[j]) = (order[j], order[i]);
+        _settings.CategoryOrder = order;
+        _settings.Save();
+        ReindexList();
+        Log.Write("reordered category sections");
     }
 
     // --- Pin / hide toggles + drag-to-reorder ---
@@ -476,8 +600,7 @@ public sealed class MainForm : Form
     {
         if (!_settings.HiddenApps.Contains(row.App.Id)) _settings.HiddenApps.Add(row.App.Id);
         _settings.Save();
-        row.Visible = false;
-        ReindexList();
+        ReindexList();   // recomputes displayed visibility from eligibility + hidden + collapse
         Log.Write($"hid {row.App.Id}");
     }
 
@@ -504,7 +627,7 @@ public sealed class MainForm : Form
 
         var pt = _list.PointToClient(screenPt);
         var target = _rows.FirstOrDefault(r => r.Visible && r != _dragRow && r.Bounds.Contains(pt));
-        if (target == null || IsPinned(target.App.Id) != IsPinned(_dragRow.App.Id)) return;
+        if (target == null || GroupKeyOf(target) != GroupKeyOf(_dragRow)) return;   // reorder within a section only
 
         bool after = _settings.ViewMode == "grid"
             ? pt.X > target.Left + target.Width / 2
@@ -542,6 +665,9 @@ public sealed class MainForm : Form
 
     // --- Actions ---
 
+    private enum FetchKind { Releases, NoAccess, Unauthorized, NoRelease, Error }
+    private sealed record FetchResult(AppRowControl Row, FetchKind Kind, List<ReleaseInfo>? Releases, string? ErrorMsg);
+
     private async Task RefreshAllAsync()
     {
         // These handlers run as `async void` (Shown / Refresh.Click), so an exception that escapes here —
@@ -569,61 +695,70 @@ public sealed class MainForm : Form
         try
         {
             using var client = active;
+
+            // Mark every row "checking" up front, then fetch all apps CONCURRENTLY (HttpClient handles
+            // parallel requests; the OS caps connections per host, so this self-throttles). The old
+            // sequential loop did ~one network round-trip × 20 in series — seconds of lag on boot.
             foreach (var row in _rows)
             {
-                // Don't force the row visible here — leave it as-is during the check so a not-installed
-                // row that turns out inaccessible never flashes into view. We set visibility from the
-                // outcome at the end of the iteration.
                 row.SetChecking();
-                var slot = InstallKey(row.App);
-                var installed = InstallManager.Shared.InstalledVersion(slot);
-                row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(slot));
-                bool accessible = false;
+                row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(InstallKey(row.App)));
+            }
+
+            var results = await Task.WhenAll(_rows.Select(async row =>
+            {
                 try
                 {
                     var all = await client.ReleasesAsync(row.App.Owner, row.App.Repo);
-                    accessible = true;
-                    row.SetReleases(all);
-                    var latest = Versions.Latest(all);
-                    if (latest == null)
-                    {
-                        row.SetState(installed, null, null, RowStatus.NoRelease);
-                    }
-                    else
-                    {
-                        var asset = latest.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAsset(SelectedVariant(row.App)));
-                        row.SetState(installed, latest.TagName, asset?.Id, ComputeStatus(installed, latest.TagName, asset != null));
-                    }
+                    return new FetchResult(row, FetchKind.Releases, all, null);
                 }
                 catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.NotAccessible)
-                {
-                    accessible = false;   // token can't see this repo
-                }
+                    { return new FetchResult(row, FetchKind.NoAccess, null, null); }
                 catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.Unauthorized)
-                {
-                    unauthorized = true;
-                    accessible = false;
-                }
+                    { return new FetchResult(row, FetchKind.Unauthorized, null, null); }
                 catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.NoRelease)
-                {
-                    accessible = true;
-                    row.SetReleases(new List<ReleaseInfo>());
-                    row.SetState(installed, null, null, RowStatus.NoRelease);
-                }
+                    { return new FetchResult(row, FetchKind.NoRelease, null, null); }
                 catch (Exception ex)
+                    { return new FetchResult(row, FetchKind.Error, null, ex.Message); }
+            }));
+
+            // Apply outcomes on the UI thread (we're back on it after the await).
+            foreach (var res in results)
+            {
+                var row = res.Row;
+                var installed = InstallManager.Shared.InstalledVersion(InstallKey(row.App));
+                bool accessible;
+                switch (res.Kind)
                 {
-                    accessible = true;   // transient error — show it so the user can Retry
-                    row.SetState(installed, null, null, RowStatus.Error);
-                    Log.Write($"refresh {row.App.Id} error: {ex.Message}");
+                    case FetchKind.Releases:
+                        accessible = true;
+                        row.SetReleases(res.Releases!);
+                        var latest = Versions.Latest(res.Releases!);
+                        if (latest == null) { row.SetState(installed, null, null, RowStatus.NoRelease); }
+                        else
+                        {
+                            var asset = latest.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAsset(SelectedVariant(row.App)));
+                            row.SetState(installed, latest.TagName, asset?.Id, ComputeStatus(installed, latest.TagName, asset != null));
+                        }
+                        break;
+                    case FetchKind.Unauthorized: unauthorized = true; accessible = false; break;
+                    case FetchKind.NoRelease:
+                        accessible = true; row.SetReleases(new List<ReleaseInfo>());
+                        row.SetState(installed, null, null, RowStatus.NoRelease); break;
+                    case FetchKind.Error:
+                        accessible = true; row.SetState(installed, null, null, RowStatus.Error);
+                        Log.Write($"refresh {row.App.Id} error: {res.ErrorMsg}"); break;
+                    default: accessible = false; break;   // NoAccess: token can't see this repo → hidden
                 }
-                // Visible iff (installed locally OR the token reached the repo) AND not hidden by the user.
-                row.Visible = (installed != null || accessible) && !IsHidden(row.App.Id);
+                // Eligible iff installed locally OR the token reached the repo. ReindexList turns that (minus
+                // hidden/collapsed) into displayed visibility.
+                if (installed != null || accessible) _eligible.Add(row.App.Id); else _eligible.Remove(row.App.Id);
             }
-            ReindexList();   // re-group pinned-first now that visibility settled
+            ReindexList();   // re-group and set displayed visibility now that eligibility settled
 
             // One clear notice for the whole-credential states instead of rows full of errors.
             if (unauthorized) { ShowNotice(BadCredsMsg); Log.Write($"refresh: credentials rejected ({_settings.AuthMode} mode)"); }
-            else if (_rows.All(r => !r.Visible)) ShowNotice(NoAccessMsg);
+            else if (!_rows.Any(WouldShow)) ShowNotice(NoAccessMsg);
             else ShowNotice(null);
         }
         finally
@@ -638,7 +773,7 @@ public sealed class MainForm : Form
     /// date. The per-item Update-all count lives inside the menu, built fresh on each open.</summary>
     private void RefreshDownloadAllButton()
     {
-        bool show = _rows.Any(r => r.Visible)
+        bool show = _rows.Any(WouldShow)
                     && AuthClient.HasCredentials(_settings, _catalog.DownloadServer)
                     && HasAnyToDownload(false);
         _downloadAll.Visible = show;
@@ -723,7 +858,7 @@ public sealed class MainForm : Form
             row.SetReleases(new List<ReleaseInfo>());
             row.SetState(installed, null, null, installed != null ? RowStatus.Installed : RowStatus.Unknown);
             row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(slot));
-            row.Visible = installed != null && !IsHidden(row.App.Id);
+            if (installed != null) _eligible.Add(row.App.Id); else _eligible.Remove(row.App.Id);
         }
         ReindexList();
     }

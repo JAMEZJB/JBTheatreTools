@@ -114,9 +114,24 @@ final class InstallManager {
     /// a lock for the off-main-actor CLI callers) is authoritative for the process's lifetime.
     private let manifestLock = NSLock()
     private var manifestCache: [String: InstalledRecord]?
+    /// Resolution caches for the render hot path. `installedPath`/`installedVersion` (called by every row and
+    /// icon on EVERY redraw) used to `fileExists`-stat the disk each call, and `installedDisplayName` re-read
+    /// and re-parsed the bundle Info.plist each call — so a boot update-check (dozens of list re-renders ×
+    /// dozens of apps) fired hundreds of synchronous disk hits on the main thread. These cache the resolved
+    /// path (existence checked once) and display name per app id; both are cleared on any manifest write
+    /// (install/uninstall/relocate), which is the only thing that can change what's on disk here.
+    private var resolvedPath: [String: URL] = [:]
+    private var resolvedPathDone = Set<String>()
+    private var resolvedName: [String: String] = [:]
+    private var resolvedNameDone = Set<String>()
 
     func manifest() -> [String: InstalledRecord] {
         manifestLock.lock(); defer { manifestLock.unlock() }
+        return manifestUnlocked()
+    }
+
+    /// The manifest without taking the lock — for callers that already hold `manifestLock`.
+    private func manifestUnlocked() -> [String: InstalledRecord] {
         if let cached = manifestCache { return cached }
         let m: [String: InstalledRecord]
         if let data = try? Data(contentsOf: manifestURL),
@@ -133,31 +148,53 @@ final class InstallManager {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let data = try? enc.encode(m) { try? data.write(to: manifestURL) }
-        manifestLock.lock(); manifestCache = m; manifestLock.unlock()   // keep the in-memory copy in sync
+        manifestLock.lock()
+        manifestCache = m                       // keep the in-memory copy in sync
+        resolvedPath.removeAll(); resolvedPathDone.removeAll()   // installs/removals change what's on disk
+        resolvedName.removeAll(); resolvedNameDone.removeAll()
+        manifestLock.unlock()
+    }
+
+    /// The installed path if the recorded bundle still exists — existence checked once, then cached (the lock
+    /// makes it safe for off-main-actor CLI callers too). `manifestLock` is non-recursive, so this resolves
+    /// everything under a single lock via `manifestUnlocked()`.
+    func installedPath(_ appId: String) -> URL? {
+        manifestLock.lock(); defer { manifestLock.unlock() }
+        return resolvedPathUnlocked(appId)
+    }
+
+    private func resolvedPathUnlocked(_ appId: String) -> URL? {
+        if resolvedPathDone.contains(appId) { return resolvedPath[appId] }
+        resolvedPathDone.insert(appId)
+        guard let rec = manifestUnlocked()[appId] else { return nil }
+        let url = URL(fileURLWithPath: rec.path)
+        guard fm.fileExists(atPath: url.path) else { return nil }
+        resolvedPath[appId] = url
+        return url
     }
 
     func installedVersion(_ appId: String) -> String? {
-        guard let rec = manifest()[appId], fm.fileExists(atPath: rec.path) else { return nil }
-        return rec.version
+        manifestLock.lock(); defer { manifestLock.unlock() }
+        guard let rec = manifestUnlocked()[appId] else { return nil }
+        return resolvedPathUnlocked(appId) != nil ? rec.version : nil
     }
 
-    func installedPath(_ appId: String) -> URL? {
-        guard let rec = manifest()[appId] else { return nil }
-        let url = URL(fileURLWithPath: rec.path)
-        return fm.fileExists(atPath: url.path) ? url : nil
-    }
-
-    /// The installed app's own display name, read live from its bundle `Info.plist`.
-    /// This is the authoritative "what this app calls itself" — so an installed row is never wrong.
+    /// The installed app's own display name, read from its bundle `Info.plist` (the authoritative "what this
+    /// app calls itself" — so an installed row is never wrong). Parsed once per app id, then cached.
     func installedDisplayName(_ appId: String) -> String? {
-        guard let appURL = installedPath(appId) else { return nil }
+        manifestLock.lock(); defer { manifestLock.unlock() }
+        if resolvedNameDone.contains(appId) { return resolvedName[appId] }
+        resolvedNameDone.insert(appId)
+        guard let appURL = resolvedPathUnlocked(appId) else { return nil }
         let plistURL = appURL.appendingPathComponent("Contents/Info.plist")
         guard let data = try? Data(contentsOf: plistURL),
               let obj = try? PropertyListSerialization.propertyList(from: data, format: nil),
               let dict = obj as? [String: Any] else { return nil }
         let name = (dict["CFBundleDisplayName"] as? String) ?? (dict["CFBundleName"] as? String)
         let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (trimmed?.isEmpty == false) ? trimmed : nil
+        let resolved = (trimmed?.isEmpty == false) ? trimmed : nil
+        if let resolved { resolvedName[appId] = resolved }
+        return resolved
     }
 
     // MARK: - Install / launch

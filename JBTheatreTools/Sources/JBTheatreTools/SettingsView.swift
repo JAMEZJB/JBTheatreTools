@@ -69,6 +69,11 @@ struct SettingsView: View {
                         SecureField("Suite passphrase…", text: $serverPassField)
                             .textFieldStyle(.roundedBorder)
 
+                        Text("Capitalisation and spaces don't matter — type the phrase however you like.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
                         HStack {
                             Button("Save") {
                                 state.setServerPassphrase(serverPassField)

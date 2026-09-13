@@ -5,7 +5,7 @@ import XCTest
 /// captured index would write to the wrong app. `AppState.write` re-finds by id.
 final class RowUpdateTests: XCTestCase {
     private func app(_ id: String) -> CatalogApp {
-        CatalogApp(id: id, name: id, blurb: "", whatsNew: nil, whatsNewVersion: nil,
+        CatalogApp(id: id, name: id, blurb: "", category: nil, whatsNew: nil, whatsNewVersion: nil,
                    owner: "o", repo: id, assets: [:], variants: nil)
     }
 

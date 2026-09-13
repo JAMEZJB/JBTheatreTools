@@ -111,7 +111,10 @@ public sealed class GitHubClient : IDisposable
     public GitHubClient(string serverBase, string passphrase)
     {
         _apiBase = serverBase.Trim().TrimEnd('/');
-        _authValue = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"suite:{passphrase}"));
+        // Normalise before auth so entry is case- and spacing-insensitive; the relay recognises the same
+        // normalised phrases. (An empty result — e.g. all-punctuation — just won't match.)
+        var pass = Passphrase.Normalize(passphrase);
+        _authValue = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"suite:{pass}"));
         _http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
         {
             Timeout = TimeSpan.FromMinutes(10)

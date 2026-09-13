@@ -14,6 +14,8 @@ public sealed class AppSettings
     public List<string> AppOrder { get; set; } = new();   // user's row order (app ids); empty = catalog order
     public List<string> PinnedApps { get; set; } = new(); // app ids pinned to the top of the list
     public List<string> HiddenApps { get; set; } = new(); // app ids hidden from the list
+    public List<string> CategoryOrder { get; set; } = new();       // user's category section order; empty = catalog order
+    public List<string> CollapsedCategories { get; set; } = new(); // category keys the user collapsed
     public Dictionary<string, string> AppVariants { get; set; } = new(); // app id → selected variant id (e.g. NDI standard/full)
     public string ServerUrl { get; set; } = "";           // user-INVISIBLE relay-URL override (settings.json only, no UI); normally
                                                           // empty — the URL comes from the catalog's downloadServer

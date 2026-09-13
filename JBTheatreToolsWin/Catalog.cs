@@ -16,6 +16,9 @@ public sealed class Catalog
     [JsonPropertyName("self")] public SelfInfo? Self { get; set; }
     /// <summary>Built-in download-relay base URL for the default (passphrase) auth mode.</summary>
     [JsonPropertyName("downloadServer")] public string? DownloadServer { get; set; }
+    /// <summary>Category section order for the launcher list/grid (apps carry a matching <c>category</c>).
+    /// A category an app uses that isn't listed here is appended after these, alphabetically.</summary>
+    [JsonPropertyName("categories")] public List<string>? Categories { get; set; }
 
     /// <summary>Loads from (1) an explicit path, (2) the embedded resource, or (3) a parent dir of CWD.</summary>
     public static Catalog Load(string? explicitPath = null)
@@ -51,6 +54,8 @@ public sealed class CatalogApp
     [JsonPropertyName("id")] public string Id { get; set; } = "";
     [JsonPropertyName("name")] public string Name { get; set; } = "";
     [JsonPropertyName("blurb")] public string Blurb { get; set; } = "";
+    /// <summary>Which launcher section this app appears under (e.g. "Show control"). Optional for older catalogs.</summary>
+    [JsonPropertyName("category")] public string? Category { get; set; }
     /// <summary>Optional one-line "what's new" for this app's current release (shown under the row when present).</summary>
     [JsonPropertyName("whatsNew")] public string? WhatsNew { get; set; }
     /// <summary>Optional version the whatsNew line refers to (e.g. "v1.5.0"), used to label it "New in vX.Y.Z:".</summary>

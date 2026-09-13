@@ -74,6 +74,23 @@ enum AppViewMode: String, CaseIterable, Identifiable {
     var symbol: String { self == .list ? "list.bullet" : "square.grid.2x2" }
 }
 
+/// Drag timing shared by the row and section drops.
+enum DragTiming {
+    /// The drop-settle glide (floating card → landing slot). `easeOut` over this exact duration finishes with
+    /// no tail/overshoot, so the real row/section is revealed the instant the card lands — no perceptible gap.
+    static let dropSettle: Double = 0.16
+}
+
+/// Drag payload for reordering whole category SECTIONS. Prefixed with a control char so a section-header
+/// drag can never be confused with a row/tile drag (which carry a bare app id) sharing the `String` type.
+enum CategoryDrag {
+    static let prefix = "\u{2}cat\u{2}"
+    static func token(_ key: String) -> String { prefix + key }
+    static func key(_ token: String) -> String? {
+        token.hasPrefix(prefix) ? String(token.dropFirst(prefix.count)) : nil
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var state: AppState
     @AppStorage("theatre.appearance") private var appearance: AppAppearance = .system
@@ -218,44 +235,22 @@ struct ContentView: View {
     /// full action set lives in the tile's right-click menu.
     private var gridView: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                let pinned = state.pinnedDisplayRows
-                let main = state.mainDisplayRows
-                if !pinned.isEmpty {
-                    gridSection("Pinned", rows: pinned)
-                    gridSection("All apps", rows: main)
-                } else {
-                    gridSection(nil, rows: main)
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(state.displayGroups) { group in
+                    VStack(alignment: .leading, spacing: 10) {
+                        CategorySectionHeader(group: group)
+                        if !state.isCollapsed(group.key) {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 12)],
+                                      alignment: .leading, spacing: 12) {
+                                ForEach(group.rows) { row in AppGridTile(row: row) }
+                            }
+                        }
+                    }
                 }
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-
-    @ViewBuilder
-    private func gridSection(_ title: String?, rows: [AppState.Row]) -> some View {
-        if !rows.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                if let title { groupLabel(title) }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 12)],
-                          alignment: .leading, spacing: 12) {
-                    ForEach(rows) { row in AppGridTile(row: row) }
-                }
-            }
-        }
-    }
-
-    /// Uppercase slate-blue section heading (matches the signed-off prototype's group labels).
-    private func groupLabel(_ text: String) -> some View {
-        Text(text.uppercased())
-            .font(.system(size: 10.5, weight: .bold))
-            .tracking(0.8)
-            .foregroundStyle(Color.selectorBlue)
-            .padding(.horizontal, 10)
-            .padding(.top, 8)
-            .padding(.bottom, 1)
-            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func launcherBanner(_ version: String) -> some View {
@@ -380,15 +375,22 @@ struct DragPreviewCard: View {
 /// never the list, rows, or header. That isolation is what keeps the card glued to the pointer.
 final class DragCursor: ObservableObject {
     @Published var point: CGPoint = .zero
+    /// True only during the brief drop-settle: the card is animating from the release point into the
+    /// landing slot. While dragging it's false, so `point` changes stay un-eased (card glued to the cursor).
+    @Published var settling = false
     /// Each visible row's global frame. Plain (not published) and written from `onPreferenceChange`, so
     /// updating it — which happens on every scroll frame — never re-renders the list (that was the "slow
     /// scroll" bug). The drag gesture reads it to map the cursor to a target slot.
     var frames: [String: CGRect] = [:]
+    /// Each section header's global frame (keyed by group key). Same rationale as `frames`; the live section
+    /// drag reads these + the section's row frames to compute each section's midpoint.
+    var headerFrames: [String: CGRect] = [:]
 }
 
-/// The working row order during a drag. Reordered LOCALLY (this array only), so the shared model isn't
-/// mutated mid-drag — nothing outside the list re-renders, so the drag never janks. Committed on drop.
-struct DragOrder { var pinned: [String]; var main: [String] }
+/// The one group being dragged: its key (Pinned sentinel or a category) and its live-reordered ids.
+/// Reordered LOCALLY during a drag — the shared model isn't touched until drop, so nothing outside the list
+/// re-renders and the drag never janks.
+struct DragGroupOrder { var key: String; var ids: [String] }
 
 /// Reports each visible row's global frame so the drag can map the cursor's Y to a target slot.
 struct RowFrameKey: PreferenceKey {
@@ -398,28 +400,102 @@ struct RowFrameKey: PreferenceKey {
     }
 }
 
+/// Reports each section header's global frame (keyed by group key), so a live section drag can map the
+/// cursor's Y to a target section.
+struct HeaderFrameKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
+/// The lifted chip that follows the cursor while dragging a whole category SECTION (shown by `FloatingCard`).
+struct CategoryDragChip: View {
+    let title: String
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "line.3.horizontal").font(.system(size: 12, weight: .bold))
+            Text(title.uppercased()).font(.system(size: 11, weight: .bold)).tracking(0.6)
+            Text("\(count)").font(.system(size: 10, weight: .semibold)).opacity(0.6)
+        }
+        .foregroundStyle(Color.selectorBlue)
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.regularMaterial))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.jbHairline))
+        .shadow(color: .black.opacity(0.28), radius: 12, y: 6)
+    }
+}
+
+/// One line in the flattened list: a section header (by group key) or an app row (by id). Flattening the
+/// whole list into ONE `ForEach` with stable per-item identity is what lets a row *glide* when it changes
+/// section (e.g. on Pin) rather than teleporting: the `.row(id)` identity survives the move between sections,
+/// so SwiftUI animates the position change instead of removing-and-reinserting it.
+enum ListItem: Hashable {
+    case header(String)   // group key
+    case row(String)      // app id
+}
+
 /// The detailed list, modelled on the web prototype (SortableJS): during a drag the rows are reordered in a
 /// LOCAL array — the shared model is never touched until drop — so nothing outside this view re-renders and
-/// the drag stays smooth; a separate floating card follows the cursor. A plain `VStack` (only 17 rows, so
+/// the drag stays smooth; a separate floating card follows the cursor. A plain `VStack` (only ~17 rows, so
 /// non-lazy is fine) sidesteps the known LazyVStack-in-ScrollView stutter.
 struct ReorderableList: View {
     @EnvironmentObject var state: AppState
     @State private var cursor = DragCursor()
     @State private var draggingId: String?
-    @State private var order: DragOrder?
+    @State private var order: DragGroupOrder?
+    @State private var draggingCategory: String?
+    @State private var catOrder: [String]?
 
-    private var pinnedIds: [String] { order?.pinned ?? state.pinnedDisplayRows.map(\.id) }
-    private var mainIds: [String] { order?.main ?? state.mainDisplayRows.map(\.id) }
+    /// Groups in render order — reordered by the live section-drag order while a section is dragged (Pinned
+    /// always stays first), else the model order.
+    private func orderedGroups(_ groups: [AppState.DisplayGroup]) -> [AppState.DisplayGroup] {
+        guard let co = catOrder else { return groups }
+        let byKey = Dictionary(groups.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
+        var out: [AppState.DisplayGroup] = []
+        if let pinned = groups.first(where: { $0.key == AppState.pinnedGroupKey }) { out.append(pinned) }
+        for k in co { if let g = byKey[k] { out.append(g) } }
+        for g in groups where g.key != AppState.pinnedGroupKey && !co.contains(g.key) { out.append(g) }
+        return out
+    }
+
+    /// The flattened render order: each group's header, then (unless collapsed) its rows — in the live row
+    /// drag order for the group currently being row-dragged, else model order.
+    private func items(_ groups: [AppState.DisplayGroup]) -> [ListItem] {
+        var out: [ListItem] = []
+        for g in groups {
+            out.append(.header(g.key))
+            guard !state.isCollapsed(g.key) else { continue }
+            let ids = (order?.key == g.key) ? (order?.ids ?? g.rows.map(\.id)) : g.rows.map(\.id)
+            out.append(contentsOf: ids.map { ListItem.row($0) })
+        }
+        return out
+    }
 
     var body: some View {
-        ScrollView {
+        let groups = orderedGroups(state.displayGroups)
+        let byKey = Dictionary(groups.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
+        return ScrollView {
             VStack(alignment: .leading, spacing: 2) {
-                if !pinnedIds.isEmpty {
-                    label("Pinned")
-                    ForEach(pinnedIds, id: \.self) { rowView($0) }
-                    label("All apps")
+                ForEach(items(groups), id: \.self) { item in
+                    switch item {
+                    case .header(let key):
+                        if let g = byKey[key] {
+                            ListSectionHeader(group: g, cursor: cursor,
+                                              draggingCategory: $draggingCategory, catOrder: $catOrder)
+                                .background(
+                                    GeometryReader { geo in
+                                        Color.clear.preference(key: HeaderFrameKey.self,
+                                                               value: [key: geo.frame(in: .global)])
+                                    }
+                                )
+                        }
+                    case .row(let id):
+                        rowView(id).transition(.opacity)
+                    }
                 }
-                ForEach(mainIds, id: \.self) { rowView($0) }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
@@ -428,13 +504,15 @@ struct ReorderableList: View {
         // space so the gesture, the frames and the card agree. `origin` converts the global cursor to local.
         .overlay {
             GeometryReader { geo in
-                FloatingCard(cursor: cursor, draggingId: draggingId, origin: geo.frame(in: .global).origin)
+                FloatingCard(cursor: cursor, draggingId: draggingId, draggingCategory: draggingCategory,
+                             origin: geo.frame(in: .global).origin)
             }
             .allowsHitTesting(false)
         }
         // Store frames on the (non-observed) cursor object — writing them never re-renders the list, so this
         // fires freely on scroll without bogging it, and the frames are always current when a drag starts.
         .onPreferenceChange(RowFrameKey.self) { cursor.frames = $0 }
+        .onPreferenceChange(HeaderFrameKey.self) { cursor.headerFrames = $0 }
     }
 
     @ViewBuilder
@@ -448,13 +526,184 @@ struct ReorderableList: View {
                 )
         }
     }
+}
 
-    private func label(_ text: String) -> some View {
-        Text(text.uppercased())
-            .font(.system(size: 10.5, weight: .bold)).tracking(0.8)
-            .foregroundStyle(Color.selectorBlue)
-            .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 1)
-            .frame(maxWidth: .infinity, alignment: .leading)
+/// The tap-to-collapse part of a section header: a disclosure chevron + title + app count. Shared by the
+/// list and grid headers; clicking it folds/unfolds the section (persisted, per-machine).
+struct SectionCollapseLabel: View {
+    @EnvironmentObject var state: AppState
+    let group: AppState.DisplayGroup
+    private var collapsed: Bool { state.isCollapsed(group.key) }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 9, weight: .black))
+                .rotationEffect(.degrees(collapsed ? 0 : 90))
+                .foregroundStyle(Color.selectorBlue)
+            Text(group.title.uppercased())
+                .font(.system(size: 10.5, weight: .bold)).tracking(0.8)
+                .foregroundStyle(Color.selectorBlue)
+            Text("\(group.rows.count)")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color.selectorBlue.opacity(0.6))
+                .padding(.horizontal, 5).padding(.vertical, 0.5)
+                .background(Capsule().fill(Color.selectorBlue.opacity(0.12)))
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { state.toggleCollapsed(group.key) }
+        }
+        .help(collapsed ? "Show \(group.title)" : "Hide \(group.title)")
+    }
+}
+
+/// The always-visible "REORDER ⣿" grip pill (visual only) — the caller attaches the drag (custom gesture in
+/// the list, `.draggable` in the grid). Always shown so it's clearly grab-able, and the sole drag source so
+/// dragging a section never fights the collapse tap.
+struct ReorderPill: View {
+    let hovering: Bool
+    var body: some View {
+        HStack(spacing: 5) {
+            Text("REORDER")
+                .font(.system(size: 8.5, weight: .bold)).tracking(0.6)
+                .foregroundStyle(Color.selectorBlue.opacity(hovering ? 0.9 : 0.45))
+            DragGrip().frame(width: 14).opacity(hovering ? 0.95 : 0.55)
+        }
+        .padding(.horizontal, 7).padding(.vertical, 3)
+        .background(Capsule().fill(Color.selectorBlue.opacity(hovering ? 0.12 : 0.06)))
+        .contentShape(Capsule())
+    }
+}
+
+/// The GRID's section header — collapse label + a `.draggable` REORDER pill; the whole header is a drop
+/// target. (The grid keeps the system drag-and-drop; the LIST uses the custom live drag below.)
+struct CategorySectionHeader: View {
+    @EnvironmentObject var state: AppState
+    let group: AppState.DisplayGroup
+    @State private var hovering = false
+    @State private var isDropTarget = false
+    private var isPinned: Bool { group.key == AppState.pinnedGroupKey }
+
+    var body: some View {
+        let bar = HStack(spacing: 6) {
+            SectionCollapseLabel(group: group)
+            Spacer(minLength: 8)
+            if !isPinned {
+                ReorderPill(hovering: hovering)
+                    .draggable(CategoryDrag.token(group.key)) {
+                        CategoryDragChip(title: group.title, count: group.rows.count)
+                    }
+                    .help("Drag onto another section to move “\(group.title)”")
+            }
+        }
+        .padding(.horizontal, 10).padding(.top, 9).padding(.bottom, 3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(isDropTarget ? Color.jbAccent.opacity(0.14) : Color.clear))
+        .onHover { hovering = $0 }
+
+        if isPinned {
+            bar
+        } else {
+            bar.dropDestination(for: String.self) { dropped, _ in
+                guard let src = dropped.first.flatMap(CategoryDrag.key) else { return false }
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    state.moveCategory(src, onto: group.key)
+                }
+                return true
+            } isTargeted: { isDropTarget = $0 }
+        }
+    }
+}
+
+/// The LIST's section header — same visual, but the REORDER pill carries the SAME custom live-drag as the app
+/// rows: a floating chip follows the cursor and the sections reorder live as you pass each one's midpoint
+/// (no need to hit the header line), committing on drop with a settle animation.
+struct ListSectionHeader: View {
+    @EnvironmentObject var state: AppState
+    let group: AppState.DisplayGroup
+    let cursor: DragCursor
+    @Binding var draggingCategory: String?
+    @Binding var catOrder: [String]?
+    @State private var hovering = false
+
+    private var isPinned: Bool { group.key == AppState.pinnedGroupKey }
+    private var isDragging: Bool { draggingCategory == group.key }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            SectionCollapseLabel(group: group)
+            Spacer(minLength: 8)
+            if !isPinned {
+                ReorderPill(hovering: hovering)
+                    .gesture(reorderGesture)
+                    .help("Drag to move the “\(group.title)” section")
+            }
+        }
+        .padding(.horizontal, 10).padding(.top, 9).padding(.bottom, 3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .opacity(isDragging ? 0 : 1)
+        .overlay { if isDragging { dropSlot } }
+        .onHover { hovering = $0 }
+    }
+
+    /// Dashed placeholder shown in this header's slot while its section is the one being dragged.
+    private var dropSlot: some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .strokeBorder(Color.jbAccent, style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.jbAccent.opacity(0.08)))
+            .padding(.horizontal, 2)
+    }
+
+    private var reorderGesture: some Gesture {
+        DragGesture(minimumDistance: 3, coordinateSpace: .global)
+            .onChanged { value in
+                if draggingCategory != group.key {
+                    draggingCategory = group.key
+                    catOrder = state.categoryOrderKeys
+                }
+                cursor.point = value.location          // moves ONLY the floating chip (isolated re-render)
+                reorderCategories(toY: value.location.y)
+            }
+            .onEnded { _ in
+                guard let order = catOrder else { draggingCategory = nil; return }
+                // Settle the chip into the section's header slot, THEN commit + reveal — so a drop anywhere
+                // floats home instead of snapping.
+                if let slot = cursor.headerFrames[group.key] {
+                    cursor.settling = true
+                    withAnimation(.easeOut(duration: DragTiming.dropSettle)) {
+                        cursor.point = CGPoint(x: slot.minX + 16, y: slot.minY + 14)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + DragTiming.dropSettle) {
+                        state.setCategoryOrder(order)
+                        catOrder = nil
+                        draggingCategory = nil
+                        cursor.settling = false
+                    }
+                } else {
+                    state.setCategoryOrder(order)
+                    catOrder = nil
+                    draggingCategory = nil
+                }
+            }
+    }
+
+    /// Reorders the LOCAL category order so the dragged section sits where the cursor is — comparing the
+    /// cursor Y to each section's vertical MIDPOINT (header top → its last row's bottom), so you don't have
+    /// to drag exactly to the header line.
+    private func reorderCategories(toY y: CGFloat) {
+        guard var order = catOrder, let cur = order.firstIndex(of: group.key) else { return }
+        func midY(_ key: String) -> CGFloat {
+            guard let h = cursor.headerFrames[key] else { return .greatestFiniteMagnitude }
+            let bottom = state.rowIds(inSection: key).compactMap { cursor.frames[$0]?.maxY }.max() ?? h.maxY
+            return (h.minY + bottom) / 2
+        }
+        var target = order.count - 1
+        for (i, key) in order.enumerated() where y < midY(key) { target = i; break }
+        guard target != cur else { return }
+        order.move(fromOffsets: IndexSet(integer: cur), toOffset: target > cur ? target + 1 : target)
+        withAnimation(.easeOut(duration: 0.14)) { catOrder = order }
     }
 }
 
@@ -464,6 +713,7 @@ struct FloatingCard: View {
     @EnvironmentObject var state: AppState
     @ObservedObject var cursor: DragCursor
     let draggingId: String?
+    let draggingCategory: String?
     let origin: CGPoint
 
     var body: some View {
@@ -471,7 +721,15 @@ struct FloatingCard: View {
             if let id = draggingId, let row = state.rows.first(where: { $0.id == id }) {
                 DragPreviewCard(id: id, displayName: row.displayName)
                     .offset(x: cursor.point.x - origin.x - 16, y: cursor.point.y - origin.y - 22)
-                    .transaction { $0.animation = nil }   // never ease the card — keep it glued to the cursor
+                    // Glue the card to the cursor while dragging (strip any inherited animation); but DON'T
+                    // strip it during the drop-settle, so the card springs into its landing slot.
+                    .transaction { if !cursor.settling { $0.animation = nil } }
+                    .allowsHitTesting(false)
+            } else if let key = draggingCategory,
+                      let g = state.displayGroups.first(where: { $0.key == key }) {
+                CategoryDragChip(title: g.title, count: g.rows.count)
+                    .offset(x: cursor.point.x - origin.x - 16, y: cursor.point.y - origin.y - 14)
+                    .transaction { if !cursor.settling { $0.animation = nil } }
                     .allowsHitTesting(false)
             }
         }
@@ -488,7 +746,7 @@ struct AppRowView: View {
     let row: AppState.Row
     let cursor: DragCursor
     @Binding var draggingId: String?
-    @Binding var order: DragOrder?
+    @Binding var order: DragGroupOrder?
     @State private var hovering = false
     @State private var confirmingUninstall = false
 
@@ -555,24 +813,46 @@ struct AppRowView: View {
             .onChanged { value in
                 if draggingId != row.id {
                     draggingId = row.id
-                    order = DragOrder(pinned: state.pinnedDisplayRows.map(\.id),
-                                      main: state.mainDisplayRows.map(\.id))
+                    let key = state.groupKey(row)   // Pinned, or this row's category — the only group that reorders
+                    let ids = state.displayGroups.first { $0.key == key }?.rows.map(\.id) ?? [row.id]
+                    order = DragGroupOrder(key: key, ids: ids)
                 }
                 cursor.point = value.location           // moves ONLY the floating card (isolated re-render)
                 reorderLocally(toY: value.location.y)   // reorders the LOCAL array — no shared-state churn
             }
             .onEnded { _ in
-                if let o = order { state.applyDragOrder(pinnedOrder: o.pinned, mainOrder: o.main) }
-                order = nil
-                draggingId = nil
+                guard let o = order else { draggingId = nil; return }
+                // The dragged row (drawn at opacity 0) still occupies its committed slot in the layout, so
+                // its reported frame IS the landing slot. Spring the floating card into that slot, THEN
+                // commit the order and reveal the row — so a drop from anywhere (even an invalid spot) floats
+                // home instead of snapping back.
+                if let slot = cursor.frames[row.id] {
+                    let key = o.key, ids = o.ids
+                    // `easeOut` (no spring tail/overshoot) finishes EXACTLY at `dropSettle`, so we reveal the
+                    // row the instant the card arrives — no post-flight "sit". Reveal + commit happen in one
+                    // synchronous block → the card vanishes and the row appears in the same frame, seamlessly.
+                    cursor.settling = true
+                    withAnimation(.easeOut(duration: DragTiming.dropSettle)) {
+                        cursor.point = CGPoint(x: slot.minX + 16, y: slot.minY + 22)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + DragTiming.dropSettle) {
+                        state.applyGroupOrder(key: key, orderedIds: ids)
+                        order = nil
+                        draggingId = nil
+                        cursor.settling = false
+                    }
+                } else {
+                    state.applyGroupOrder(key: o.key, orderedIds: o.ids)
+                    order = nil
+                    draggingId = nil
+                }
             }
     }
 
-    /// Moves the dragged row within its group in the LOCAL order to the slot the cursor is over.
+    /// Moves the dragged row within its group's LOCAL order to the slot the cursor is over.
     private func reorderLocally(toY y: CGFloat) {
         guard var o = order else { return }
-        let pinned = state.isPinned(row.id)
-        var ids = pinned ? o.pinned : o.main
+        var ids = o.ids
         guard let cur = ids.firstIndex(of: row.id) else { return }
         var target = ids.count - 1
         for (i, id) in ids.enumerated() {
@@ -580,7 +860,7 @@ struct AppRowView: View {
         }
         guard target != cur else { return }
         ids.move(fromOffsets: IndexSet(integer: cur), toOffset: target > cur ? target + 1 : target)
-        if pinned { o.pinned = ids } else { o.main = ids }
+        o.ids = ids
         withAnimation(.easeOut(duration: 0.10)) { order = o }
     }
 
@@ -810,12 +1090,20 @@ struct AppMenuButtons: View {
 
     var body: some View {
         Group {
-            Button(state.isPinned(row.id) ? "Unpin from Top" : "Pin to Top") { state.togglePin(row.id) }
-            Button("Move Up") { state.moveRow(row.id, up: true) }
-                .disabled(!state.canMove(row.id, up: true))
-            Button("Move Down") { state.moveRow(row.id, up: false) }
-                .disabled(!state.canMove(row.id, up: false))
-            Button("Hide from List") { state.setHidden(row.id, true) }
+            Button(state.isPinned(row.id) ? "Unpin from Top" : "Pin to Top") {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { state.togglePin(row.id) }
+            }
+            Button("Move Up") {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { state.moveRow(row.id, up: true) }
+            }
+            .disabled(!state.canMove(row.id, up: true))
+            Button("Move Down") {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { state.moveRow(row.id, up: false) }
+            }
+            .disabled(!state.canMove(row.id, up: false))
+            Button("Hide from List") {
+                withAnimation(.easeInOut(duration: 0.22)) { state.setHidden(row.id, true) }
+            }
             if row.app.hasVariants, let vs = row.app.variants {
                 Divider()
                 Picker("Variant", selection: Binding(
@@ -914,11 +1202,14 @@ struct AppGridTile: View {
             DragPreviewCard(id: row.id, displayName: row.displayName)
         }
         .dropDestination(for: String.self) { items, _ in
-            guard let dragged = items.first else { return false }
+            // Only a tile drag (a bare app id) reorders here — ignore a section-header drag (category token).
+            guard let dragged = items.first, CategoryDrag.key(dragged) == nil else { return false }
+            var moved = false
             withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                state.moveRow(dragged, onto: row.id)
+                moved = state.moveRow(dragged, onto: row.id)
             }
-            return true
+            // Return whether it moved: a drop onto another section is a no-op, so `false` floats the tile home.
+            return moved
         } isTargeted: { isDropTarget = $0 }
         .contextMenu { AppMenuButtons(row: row, requestUninstall: { confirmingUninstall = true }) }
         .confirmationDialog("Uninstall \(row.displayName)?",

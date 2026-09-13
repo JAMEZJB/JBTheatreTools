@@ -52,6 +52,16 @@ public sealed class InstallManager
     public string CacheDir { get; }
     public string ManifestPath { get; }
 
+    // Resolution caches for the read hot path. InstalledVersion/InstalledPath/InstalledDisplayName are called
+    // per app on every refresh; each used to deserialize installed.json from disk (and DisplayName re-read the
+    // exe's version info) every call. Cache a manifest snapshot + the resolved path/name per id, invalidated
+    // on any manifest write (the only thing that changes what's on disk). `lock` is re-entrant, so the
+    // resolution methods can call one another under one lock.
+    private readonly object _readLock = new();
+    private Dictionary<string, InstalledRecord>? _snapshot;
+    private readonly Dictionary<string, string?> _pathCache = new();
+    private readonly Dictionary<string, string?> _nameCache = new();
+
     public InstallManager()
     {
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -93,33 +103,59 @@ public sealed class InstallManager
                 JsonSerializer.Serialize(m, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch (Exception ex) { Log.Write($"manifest write failed: {ex.Message}"); }
+        // Installs/removals change what's on disk → drop the read caches so the next resolve re-reads.
+        lock (_readLock) { _snapshot = null; _pathCache.Clear(); _nameCache.Clear(); }
     }
+
+    /// <summary>A cached manifest snapshot for the read hot path (this app is the only writer, so a snapshot
+    /// is authoritative between writes). Caller holds <c>_readLock</c>.</summary>
+    private Dictionary<string, InstalledRecord> Snapshot() => _snapshot ??= Manifest();
 
     public string? InstalledVersion(string id)
     {
-        var m = Manifest();
-        return m.TryGetValue(id, out var r) && File.Exists(r.Path) ? r.Version : null;
+        lock (_readLock)
+        {
+            if (!Snapshot().TryGetValue(id, out var r)) return null;
+            return ResolvedPath(id) != null ? r.Version : null;
+        }
     }
 
     public string? InstalledPath(string id)
     {
-        var m = Manifest();
-        return m.TryGetValue(id, out var r) && File.Exists(r.Path) ? r.Path : null;
+        lock (_readLock) { return ResolvedPath(id); }
     }
 
+    /// <summary>The installed path if the recorded exe still exists — existence checked once, then cached.
+    /// Caller holds <c>_readLock</c>.</summary>
+    private string? ResolvedPath(string id)
+    {
+        if (_pathCache.TryGetValue(id, out var cached)) return cached;
+        var resolved = Snapshot().TryGetValue(id, out var r) && File.Exists(r.Path) ? r.Path : null;
+        _pathCache[id] = resolved;
+        return resolved;
+    }
 
-    /// <summary>The installed app's own display name, read live from the exe's version info
-    /// (ProductName) — the authoritative "what this app calls itself", so an installed row is never wrong.</summary>
+    /// <summary>The installed app's own display name, read from the exe's version info (ProductName) — the
+    /// authoritative "what this app calls itself", so an installed row is never wrong. Parsed once, cached.</summary>
     public string? InstalledDisplayName(string id)
     {
-        var path = InstalledPath(id);
-        if (path == null) return null;
-        try
+        lock (_readLock)
         {
-            var name = System.Diagnostics.FileVersionInfo.GetVersionInfo(path).ProductName;
-            return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+            if (_nameCache.TryGetValue(id, out var cached)) return cached;
+            string? resolved = null;
+            var path = ResolvedPath(id);
+            if (path != null)
+            {
+                try
+                {
+                    var name = System.Diagnostics.FileVersionInfo.GetVersionInfo(path).ProductName;
+                    resolved = string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+                }
+                catch { resolved = null; }
+            }
+            _nameCache[id] = resolved;
+            return resolved;
         }
-        catch { return null; }
     }
 
     /// <summary>Installs a downloaded self-contained .exe and records its version. When

@@ -15,6 +15,7 @@ public sealed class SettingsDialog : Form
     private readonly Label _tokenHelp = new();
     private readonly Label _serverState = new();
     private readonly TextBox _serverPass = new();
+    private readonly Label _serverHint = new();    // forgiving-entry note (case & spaces don't matter)
     private readonly Label _serverRelay = new();   // read-only effective relay host (audit F2)
     private readonly Button _serverSave = new();
     private readonly Button _serverRemove = new();
@@ -133,10 +134,16 @@ public sealed class SettingsDialog : Form
             UpdateServerState();
         };
 
+        // Forgiving-entry note: the passphrase is normalised (case- and spacing-insensitive) before it's sent.
+        _serverHint.AutoSize = true;
+        _serverHint.ForeColor = Color.Gray;
+        _serverHint.Location = new Point(16, 164);
+        _serverHint.Text = "Capitalisation and spaces don't matter — type the phrase however you like.";
+
         // Surface the effective relay host read-only (audit F2), so a non-default override is visible.
         _serverRelay.AutoSize = true;
         _serverRelay.ForeColor = Color.Gray;
-        _serverRelay.Location = new Point(16, 164);
+        _serverRelay.Location = new Point(16, 186);
         var relay = AuthClient.ResolveServerUrl(_settings, _downloadServer);
         _serverRelay.Text = Uri.TryCreate(relay, UriKind.Absolute, out var relayUri) ? $"Relay: {relayUri.Host}" : "";
 
@@ -272,7 +279,7 @@ public sealed class SettingsDialog : Form
         {
             tokenHeading, _authMode,
             _tokenState, _token, _save, _remove, _tokenLink, _tokenHelp,
-            _serverState, _serverPass, _serverSave, _serverRemove, _serverRelay,
+            _serverState, _serverPass, _serverHint, _serverSave, _serverRemove, _serverRelay,
             updatesHeading, _updateMode, _updateHint, versionLabel, _check, _viewRelease, _checkResult,
             appearanceHeading, _appearance, closeHeading, _closeBehavior, _installToApps, openLog, resetOrder, showHidden, done
         });
@@ -287,7 +294,7 @@ public sealed class SettingsDialog : Form
         bool server = _settings.AuthMode == "server";
         foreach (Control c in new Control[] { _tokenState, _token, _save, _remove, _tokenLink, _tokenHelp })
             c.Visible = !server;
-        foreach (Control c in new Control[] { _serverState, _serverPass, _serverSave, _serverRemove, _serverRelay })
+        foreach (Control c in new Control[] { _serverState, _serverPass, _serverHint, _serverSave, _serverRemove, _serverRelay })
             c.Visible = server;
         if (!server) UpdateTokenState(); else UpdateServerState();
     }

@@ -1,12 +1,12 @@
 import Foundation
 
-struct ReleaseAsset: Decodable {
+struct ReleaseAsset: Decodable, Sendable {
     let id: Int
     let name: String
     let size: Int
 }
 
-struct ReleaseInfo: Decodable, Identifiable {
+struct ReleaseInfo: Decodable, Identifiable, Sendable {
     let tagName: String
     let assets: [ReleaseAsset]
     let prerelease: Bool
@@ -51,7 +51,10 @@ enum GitHubError: LocalizedError {
 /// and **strip the Authorization header on that cross-host redirect** — S3 rejects a request
 /// that carries both a Bearer header and its own signed query params. We do that in the
 /// `willPerformHTTPRedirection` delegate below.
-final class GitHubClient: NSObject {
+/// `@unchecked Sendable`: `refreshAll` shares one client across concurrent `releases()` calls. Those use
+/// only `URLSession.data(for:)` (thread-safe) and never touch the mutable download state (`contexts`, which
+/// is `lock`-guarded and used only by the download-delegate path). So concurrent checks are safe.
+final class GitHubClient: NSObject, @unchecked Sendable {
     /// Base of the GitHub REST API — `https://api.github.com` for direct (PAT) access, or the
     /// download-server relay's API root in server mode (the relay forwards the same paths to GitHub
     /// with its own server-side token, so every endpoint shape below is identical in both modes).
@@ -91,7 +94,10 @@ final class GitHubClient: NSObject {
         var base = serverBase.trimmingCharacters(in: .whitespacesAndNewlines)
         while base.hasSuffix("/") { base.removeLast() }
         apiBase = base
-        authValue = "Basic " + Data("suite:\(passphrase)".utf8).base64EncodedString()
+        // Normalise the passphrase before auth so entry is case- and spacing-insensitive; the relay
+        // recognises the same normalised phrases. (An empty result — e.g. all-punctuation — just won't match.)
+        let pass = Passphrase.normalize(passphrase)
+        authValue = "Basic " + Data("suite:\(pass)".utf8).base64EncodedString()
         super.init()
     }
 

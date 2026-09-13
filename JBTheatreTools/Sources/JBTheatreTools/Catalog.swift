@@ -9,9 +9,12 @@ struct Catalog: Decodable {
     let selfInfo: SelfInfo?
     /// Built-in download-relay base URL for the default (passphrase) auth mode.
     let downloadServer: String?
+    /// Category section order for the launcher list/grid (apps carry a matching `category`). Any category
+    /// an app uses that isn't listed here is appended after these, alphabetically.
+    let categories: [String]?
 
     enum CodingKeys: String, CodingKey {
-        case schemaVersion, apps, downloadServer
+        case schemaVersion, apps, downloadServer, categories
         case selfInfo = "self"
     }
 
@@ -43,6 +46,8 @@ struct CatalogApp: Decodable, Identifiable {
     let id: String
     let name: String
     let blurb: String
+    /// Which launcher section this app appears under (e.g. "Show control"). Optional for older catalogs.
+    let category: String?
     /// Optional one-line "what's new" for this app's current release (shown under the row when present).
     let whatsNew: String?
     /// Optional version the whatsNew line refers to (e.g. "v1.5.0"), used to label it "New in vX.Y.Z:".
@@ -141,7 +146,7 @@ extension CatalogApp {
     /// A synthetic catalog entry for the launcher itself, so its self-update download goes through the
     /// same verification path (size + suite-signed SHA256SUMS + hash) as every app install.
     static func forSelf(_ s: SelfInfo) -> CatalogApp {
-        CatalogApp(id: "jbtheatretools", name: "JB Theatre Tools", blurb: "", whatsNew: nil, whatsNewVersion: nil,
-                   owner: s.owner, repo: s.repo, assets: s.assets, variants: nil)
+        CatalogApp(id: "jbtheatretools", name: "JB Theatre Tools", blurb: "", category: nil, whatsNew: nil,
+                   whatsNewVersion: nil, owner: s.owner, repo: s.repo, assets: s.assets, variants: nil)
     }
 }

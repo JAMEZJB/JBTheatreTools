@@ -15,6 +15,17 @@ enum AuthMode: String, CaseIterable, Identifiable {
     }
 }
 
+/// The Sendable result of one app's concurrent update check — categorised inside the child task (off the
+/// main actor) so only value data crosses back to the main actor (`any Error` isn't Sendable, so the error
+/// case carries its message string).
+enum FetchOutcome: Sendable {
+    case releases([ReleaseInfo])
+    case noAccess
+    case unauthorized
+    case noRelease
+    case error(String)
+}
+
 /// Observable view model backing the launcher UI. All work runs on the main actor;
 /// network calls suspend rather than block, so the UI stays responsive.
 @MainActor
@@ -100,6 +111,9 @@ final class AppState: ObservableObject {
     /// App ids the user hid from the list (per-machine). Hidden apps stay in `rows` (so unhiding
     /// restores their position) but are filtered out of every display group.
     @Published var hiddenIds: Set<String> = []
+    /// Category section keys the user collapsed (per-machine) — a collapsed section shows only its header.
+    /// Holds category names (and, if collapsed, the pinned sentinel); stale keys are harmless.
+    @Published var collapsedGroups: Set<String> = []
     /// Per-app selected variant id (per-machine), for apps that ship variants (e.g. NDI Standard/Full).
     /// Absent → the app's default (first) variant.
     @Published var variantSelection: [String: String] = [:]
@@ -110,12 +124,19 @@ final class AppState: ObservableObject {
     private(set) var serverBase: String?
     /// App ids in catalog order — the baseline the user's saved ordering is applied over.
     private var catalogOrder: [String] = []
+    /// Category section order from the catalog (drives the launcher's grouped list/grid).
+    private(set) var catalogCategories: [String] = []
+    /// Per-machine category section order — overrides the catalog order once the user drags a section.
+    /// Empty until the user reorders; categories not in it fall back to catalog order, then alphabetical.
+    private var categoryOrder: [String] = []
     private var explainerContinuation: CheckedContinuation<Void, Never>?
     private static let codeIDKey = "theatre.lastKeychainCodeID"
     private static let appOrderKey = "theatre.appOrder"
     private static let pinnedKey = "theatre.pinnedApps"
     private static let hiddenKey = "theatre.hiddenApps"
     private static let variantKey = "theatre.appVariants"
+    private static let categoryOrderKey = "theatre.categoryOrder"
+    private static let collapsedKey = "theatre.collapsedCategories"
 
     var currentVersion: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
@@ -141,6 +162,9 @@ final class AppState: ObservableObject {
                            resolvedName: InstallManager.shared.installedDisplayName(key))
             }
             catalogOrder = catalog.apps.map(\.id)
+            catalogCategories = catalog.categories ?? []
+            categoryOrder = UserDefaults.standard.stringArray(forKey: Self.categoryOrderKey) ?? []
+            collapsedGroups = Set(UserDefaults.standard.stringArray(forKey: Self.collapsedKey) ?? [])
             rows = Self.applyingSavedOrder(rows)
             pinnedIds = Set(UserDefaults.standard.stringArray(forKey: Self.pinnedKey) ?? []).intersection(known)
             hiddenIds = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? []).intersection(known)
@@ -323,12 +347,72 @@ final class AppState: ObservableObject {
         // Clear a stale network/credential error from a previous run (but keep a catalog-load error,
         // which leaves `rows` empty).
         if !rows.isEmpty { globalError = nil }
-        // Iterate a snapshot of ids and address each row BY ID (not index): a refresh suspends on the
-        // network, during which a drag / Move Up-Down can permute `rows` (audit F3).
-        for id in rows.map(\.id) {
-            await refresh(id: id, client: client)
+
+        // Mark every row "checking" in a SINGLE publish — mutate a local copy and assign `rows` once — so we
+        // don't re-render the whole list 20× just to show the spinners (that churn was the boot-time lag).
+        var snapshot = rows
+        for i in snapshot.indices {
+            let slot = installKey(for: snapshot[i].app)
+            snapshot[i].status = .checking
+            snapshot[i].installed = InstallManager.shared.installedVersion(slot)
+            snapshot[i].resolvedName = InstallManager.shared.installedDisplayName(slot)
+        }
+        rows = snapshot
+
+        // Check all apps CONCURRENTLY instead of one-at-a-time (URLSession caps ~6 connections per host, so
+        // this self-throttles). The sequential version took ~one network round-trip × 20 and re-rendered the
+        // list on each result — seconds of churn on boot. Results now land close together and SwiftUI
+        // coalesces them into far fewer renders. Each result addresses its row BY ID (audit F3, reorder-safe).
+        let apps = rows.map { (id: $0.id, owner: $0.app.owner, repo: $0.app.repo) }
+        await withTaskGroup(of: (String, FetchOutcome).self) { group in
+            for a in apps {
+                group.addTask {
+                    do { return (a.id, .releases(try await client.releases(owner: a.owner, repo: a.repo))) }
+                    catch GitHubError.notAccessible { return (a.id, .noAccess) }
+                    catch GitHubError.unauthorized { return (a.id, .unauthorized) }
+                    catch GitHubError.noRelease { return (a.id, .noRelease) }
+                    catch { return (a.id, .error(error.localizedDescription)) }
+                }
+            }
+            for await (id, outcome) in group { applyRefreshOutcome(id: id, outcome: outcome) }
         }
         hasRefreshed = true
+    }
+
+    /// Applies one concurrent check's outcome to its row (on the main actor), re-finding the row by id.
+    private func applyRefreshOutcome(id: String, outcome: FetchOutcome) {
+        guard let app = rows.first(where: { $0.id == id })?.app else { return }
+        let slot = installKey(for: app)
+        switch outcome {
+        case .releases(let all):
+            guard let latest = Self.latest(from: all) else {
+                update(id) { $0.releases = all; $0.latest = nil; $0.latestAssetId = nil; $0.status = .noRelease }
+                return
+            }
+            let assetId = latest.assets.first { $0.name == macAsset(for: app) }?.id
+            let installedNow = InstallManager.shared.installedVersion(slot)
+            update(id) {
+                $0.releases = all
+                $0.latest = latest.tagName
+                $0.latestAssetId = assetId
+                $0.status = Self.status(installed: installedNow, latest: latest.tagName, hasAsset: assetId != nil)
+            }
+        case .noAccess:
+            // Token can't see this repo → hide the row from the list.
+            update(id) { $0.latest = nil; $0.latestAssetId = nil; $0.releases = []; $0.status = .noAccess }
+        case .unauthorized:
+            // The credential itself is bad — surface one clear message instead of N broken rows.
+            update(id) { $0.status = .noAccess }
+            globalError = Self.authMode == .token
+                ? "Your GitHub token is invalid or expired. Open Settings to paste a new one."
+                : "The download server rejected the passphrase. Check it in Settings."
+            AppLog.shared.log("refresh: credentials rejected (\(Self.authMode.rawValue) mode)")
+        case .noRelease:
+            update(id) { $0.latest = nil; $0.releases = []; $0.status = .noRelease }
+        case .error(let msg):
+            update(id) { $0.status = .error(msg) }
+            AppLog.shared.log("refresh \(id) error: \(msg)")
+        }
     }
 
     /// Applies `body` to the row with this id, re-finding it each call — the reorder-safe way to write a
@@ -394,6 +478,106 @@ final class AppState: ObservableObject {
     var hasHiddenApps: Bool { !hiddenIds.isEmpty }
     /// True when at least one row is shown (drives the "everything's hidden" empty state).
     var hasVisibleRows: Bool { !pinnedDisplayRows.isEmpty || !mainDisplayRows.isEmpty }
+
+    // MARK: Category grouping (Pinned floats to the top; the rest group under their catalog category)
+
+    /// Sentinel key for the Pinned group (can't collide with a real category name).
+    static let pinnedGroupKey = "\u{1}pinned"
+    private static let uncategorised = "Other"
+
+    /// The category a row belongs to for grouping (falls back to "Other" for an app with no category).
+    func categoryOf(_ row: Row) -> String {
+        let c = row.app.category?.trimmingCharacters(in: .whitespaces) ?? ""
+        return c.isEmpty ? Self.uncategorised : c
+    }
+
+    /// The display GROUP a row is in: the Pinned group when pinned, else its category. Reorder/drag stay
+    /// within one group (moving an app between categories isn't a thing — category is a catalog property).
+    func groupKey(_ row: Row) -> String { pinnedIds.contains(row.id) ? Self.pinnedGroupKey : categoryOf(row) }
+    func groupKey(of id: String) -> String { rows.first { $0.id == id }.map { groupKey($0) } ?? "" }
+
+    /// One rendered section: a key (pinned sentinel or category name), its heading, and its rows in order.
+    struct DisplayGroup: Identifiable {
+        let key: String
+        let title: String
+        let rows: [Row]
+        var id: String { key }
+    }
+
+    /// The launcher's sections in render order: Pinned first (if any), then each category in the effective
+    /// order — the user's saved section order (if they've reordered), then the catalog's `categories` order
+    /// for any not covered, then any leftover category alphabetically. Empty categories are dropped.
+    var displayGroups: [DisplayGroup] {
+        var groups: [DisplayGroup] = []
+        let pinned = pinnedDisplayRows
+        if !pinned.isEmpty { groups.append(DisplayGroup(key: Self.pinnedGroupKey, title: "Pinned", rows: pinned)) }
+        let main = mainDisplayRows
+        var order: [String] = []
+        for c in categoryOrder where !order.contains(c) { order.append(c) }          // user's saved order first
+        for c in catalogCategories where !order.contains(c) { order.append(c) }       // then catalog order
+        for c in Set(main.map { categoryOf($0) }).sorted() where !order.contains(c) { order.append(c) }
+        for cat in order {
+            let rows = main.filter { categoryOf($0) == cat }
+            if !rows.isEmpty { groups.append(DisplayGroup(key: cat, title: cat, rows: rows)) }
+        }
+        return groups
+    }
+
+    /// Commits a drag reorder of ONE group (Pinned or a category): reassigns that group's visible rows to
+    /// follow `orderedIds`, among the slots they occupy in `rows`, then persists. Called once, on drop.
+    func applyGroupOrder(key: String, orderedIds: [String]) {
+        let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        let slots = rows.indices.filter { groupKey(rows[$0]) == key && rows[$0].isVisible && !hiddenIds.contains(rows[$0].id) }
+        for (k, slot) in slots.enumerated() where k < orderedIds.count {
+            if let r = byId[orderedIds[k]] { rows[slot] = r }
+        }
+        persistOrder()
+        AppLog.shared.log("reordered a group by drag")
+    }
+
+    // MARK: Collapse / reorder whole category sections (per-machine)
+
+    func isCollapsed(_ key: String) -> Bool { collapsedGroups.contains(key) }
+
+    /// Toggles a section's collapsed state (call inside `withAnimation` for the fold to animate) and persists.
+    func toggleCollapsed(_ key: String) {
+        if collapsedGroups.contains(key) { collapsedGroups.remove(key) } else { collapsedGroups.insert(key) }
+        UserDefaults.standard.set(Array(collapsedGroups), forKey: Self.collapsedKey)
+        AppLog.shared.log("\(collapsedGroups.contains(key) ? "collapsed" : "expanded") section \(key)")
+    }
+
+    /// The category section keys in their current display order (excluding Pinned) — the baseline a live
+    /// section drag reorders.
+    var categoryOrderKeys: [String] { displayGroups.map(\.key).filter { $0 != Self.pinnedGroupKey } }
+
+    /// Rows (ids) that render under a given section key — used by the list's live section drag to find each
+    /// section's vertical extent.
+    func rowIds(inSection key: String) -> [String] {
+        displayGroups.first { $0.key == key }?.rows.map(\.id) ?? []
+    }
+
+    /// Commits a full category-section order (from the list's live section drag), persisting it per-machine.
+    func setCategoryOrder(_ order: [String]) {
+        categoryOrder = order
+        UserDefaults.standard.set(order, forKey: Self.categoryOrderKey)
+        AppLog.shared.log("reordered category sections (drag)")
+    }
+
+    /// Reorders the CATEGORY sections: moves section `key` next to `target` (drag forward lands after, back
+    /// lands before — the same feel as a row drop), persisting the full new order. Pinned is never part of
+    /// this — it always floats to the top; a move touching it is a no-op.
+    func moveCategory(_ key: String, onto target: String) {
+        guard key != target, key != Self.pinnedGroupKey, target != Self.pinnedGroupKey else { return }
+        var order = displayGroups.map(\.key).filter { $0 != Self.pinnedGroupKey }   // current full category order
+        guard let from = order.firstIndex(of: key), let to = order.firstIndex(of: target) else { return }
+        let movedForward = from < to
+        order.remove(at: from)
+        guard let ti = order.firstIndex(of: target) else { return }
+        order.insert(key, at: movedForward ? ti + 1 : ti)
+        categoryOrder = order
+        UserDefaults.standard.set(order, forKey: Self.categoryOrderKey)
+        AppLog.shared.log("reordered category sections")
+    }
 
     // MARK: Pin / hide toggles
 
@@ -511,7 +695,7 @@ final class AppState: ObservableObject {
     @discardableResult
     func reorder(_ draggedId: String, onto targetId: String) -> Bool {
         guard draggedId != targetId,
-              pinnedIds.contains(draggedId) == pinnedIds.contains(targetId),
+              groupKey(of: draggedId) == groupKey(of: targetId),   // same group only (Pinned, or one category)
               let di = rows.firstIndex(where: { $0.id == draggedId }),
               let tiOrig = rows.firstIndex(where: { $0.id == targetId }) else { return false }
         let draggedWasBefore = di < tiOrig
@@ -573,26 +757,34 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// One-shot drag-reorder where a single drop is the whole gesture: reorder + persist together.
-    func moveRow(_ draggedId: String, onto targetId: String) {
-        if reorder(draggedId, onto: targetId) { commitReorder() }
+    /// One-shot drag-reorder where a single drop is the whole gesture: reorder + persist together. Returns
+    /// whether it actually moved — the grid drop returns this so an invalid drop (a different section) lets
+    /// the system float the drag image back home, instead of silently accepting a no-op.
+    @discardableResult
+    func moveRow(_ draggedId: String, onto targetId: String) -> Bool {
+        if reorder(draggedId, onto: targetId) { commitReorder(); return true }
+        return false
     }
 
-    /// Restores the catalog's default order (Settings → Reset App Order). Pins/hides are left as-is.
+    /// Restores the catalog's default order — both the app order within sections AND the section order
+    /// (Settings → Reset App Order). Pins, hides and collapsed sections are left as-is.
     func resetAppOrder() {
         UserDefaults.standard.removeObject(forKey: Self.appOrderKey)
+        UserDefaults.standard.removeObject(forKey: Self.categoryOrderKey)
+        categoryOrder = []
         let index = Dictionary(uniqueKeysWithValues: catalogOrder.enumerated().map { ($1, $0) })
         rows.sort { (index[$0.id] ?? .max) < (index[$1.id] ?? .max) }
-        AppLog.shared.log("app order reset to catalog default")
+        AppLog.shared.log("app + section order reset to catalog default")
     }
 
-    /// Nearest neighbour in the given direction that is visible, not hidden, and in the SAME pin group.
+    /// Nearest neighbour in the given direction that is visible, not hidden, and in the SAME group
+    /// (Pinned, or the same category) — so Move Up/Down never jumps a row across a section boundary.
     private func groupNeighbour(of id: String, up: Bool) -> Int? {
         guard let i = rows.firstIndex(where: { $0.id == id }) else { return nil }
-        let pinned = pinnedIds.contains(id)
+        let key = groupKey(of: id)
         let range = up ? Array((0..<i).reversed()) : Array((i + 1)..<rows.count)
         return range.first {
-            rows[$0].isVisible && !hiddenIds.contains(rows[$0].id) && pinnedIds.contains(rows[$0].id) == pinned
+            rows[$0].isVisible && !hiddenIds.contains(rows[$0].id) && groupKey(rows[$0]) == key
         }
     }
 
@@ -675,46 +867,6 @@ final class AppState: ObservableObject {
             }
         }
         AppLog.shared.log("download all\(includeFull ? " (incl. Full)" : "") complete")
-    }
-
-    private func refresh(id: String, client: GitHubClient) async {
-        guard let app = rows.first(where: { $0.id == id })?.app else { return }
-        let slot = installKey(for: app)
-        update(id) {
-            $0.status = .checking
-            $0.installed = InstallManager.shared.installedVersion(slot)
-            $0.resolvedName = InstallManager.shared.installedDisplayName(slot)
-        }
-        do {
-            let all = try await client.releases(owner: app.owner, repo: app.repo)
-            guard let latest = Self.latest(from: all) else {
-                update(id) { $0.releases = all; $0.latest = nil; $0.latestAssetId = nil; $0.status = .noRelease }
-                return
-            }
-            let assetId = latest.assets.first { $0.name == macAsset(for: app) }?.id
-            let installedNow = InstallManager.shared.installedVersion(slot)
-            update(id) {
-                $0.releases = all
-                $0.latest = latest.tagName
-                $0.latestAssetId = assetId
-                $0.status = Self.status(installed: installedNow, latest: latest.tagName, hasAsset: assetId != nil)
-            }
-        } catch GitHubError.notAccessible {
-            // Token can't see this repo → hide the row from the list.
-            update(id) { $0.latest = nil; $0.latestAssetId = nil; $0.releases = []; $0.status = .noAccess }
-        } catch GitHubError.unauthorized {
-            // The credential itself is bad — surface one clear message instead of 10 broken rows.
-            update(id) { $0.status = .noAccess }
-            globalError = Self.authMode == .token
-                ? "Your GitHub token is invalid or expired. Open Settings to paste a new one."
-                : "The download server rejected the passphrase. Check it in Settings."
-            AppLog.shared.log("refresh: credentials rejected (\(Self.authMode.rawValue) mode)")
-        } catch GitHubError.noRelease {
-            update(id) { $0.latest = nil; $0.releases = []; $0.status = .noRelease }
-        } catch {
-            update(id) { $0.status = .error(error.localizedDescription) }
-            AppLog.shared.log("refresh \(app.id) error: \(error.localizedDescription)")
-        }
     }
 
     private static func status(installed: String?, latest: String, hasAsset: Bool) -> Status {
