@@ -308,7 +308,8 @@
           "label": "Full",
           "assets": {
             "macos-arm64": "PDFTools-Full-macOS-arm64.zip",
-            "macos-x64": "PDFTools-Full-macOS-x64.zip"
+            "macos-x64": "PDFTools-Full-macOS-x64.zip",
+            "windows-x64": "PDFTools-Full-Windows-x64.zip"
           }
         }
       ]
@@ -341,7 +342,9 @@
           "id": "full",
           "label": "Full",
           "assets": {
-            "macos-arm64": "ImageTools-Full-macOS-arm64.zip"
+            "macos-arm64": "ImageTools-Full-macOS-arm64.zip",
+            "windows-x64": "ImageTools-Full-Windows-x64.zip",
+            "windows-arm64": "ImageTools-Full-Windows-arm64.zip"
           }
         }
       ]

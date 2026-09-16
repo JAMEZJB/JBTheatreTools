@@ -66,10 +66,16 @@ public sealed class AppRowControl : UserControl
     public string? Installed { get; private set; }
     public RowStatus Status { get; private set; } = RowStatus.Unknown;
     public List<ReleaseInfo> Releases { get; private set; } = new();
-    /// <summary>The installed app's self-declared name (from its exe); overrides the catalog name.</summary>
+    /// <summary>The installed app's self-declared exe name (kept for diagnostics only — NOT shown; see DisplayName).</summary>
     public string? ResolvedName { get; private set; }
-    /// <summary>Name to show: the installed app's own name when available, else the catalog name.</summary>
-    public string DisplayName => string.IsNullOrEmpty(ResolvedName) ? App.Name : ResolvedName!;
+    /// <summary>The selected variant id (from the row's combobox), or null for a non-variant app.</summary>
+    private string? CurrentVariantId =>
+        App.HasVariants && App.Variants != null && _variant.SelectedIndex >= 0 && _variant.SelectedIndex < App.Variants.Count
+            ? App.Variants[_variant.SelectedIndex].Id : null;
+    /// <summary>Name to show: the launcher's CURATED catalog name (James's naming) + the selected variant's
+    /// suffix. We do NOT use the installed exe's self-name — several diverge from the curated name (e.g. the
+    /// Convert app calls itself "Convert to it!", Network Port Map's exe is "Build Port Map").</summary>
+    public string DisplayName => App.Name + App.VariantSuffix(CurrentVariantId);
     /// <summary>The row's current icon image (installed app icon / bundled / monogram) — used by the
     /// floating drag card so it shows the same icon as the row.</summary>
     public Image? CurrentIcon => _icon.Image;
@@ -185,6 +191,7 @@ public sealed class AppRowControl : UserControl
             {
                 if (_suppressVariantEvent) return;
                 int idx = _variant.SelectedIndex;
+                _name.Text = DisplayName;   // reflect the new variant suffix immediately
                 if (idx >= 0 && app.Variants != null && idx < app.Variants.Count)
                     VariantChangeRequested?.Invoke(this, app.Variants[idx].Id);
             };
@@ -367,6 +374,7 @@ public sealed class AppRowControl : UserControl
         _suppressVariantEvent = true;
         _variant.SelectedIndex = idx;
         _suppressVariantEvent = false;
+        _name.Text = DisplayName;   // reflect the new variant suffix
     }
 
     private void ShowMoreMenu()

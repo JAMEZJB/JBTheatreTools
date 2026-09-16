@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -35,13 +36,18 @@ public sealed class InstalledRecord
     /// <summary>Which variant (e.g. "standard"/"full") is installed, for apps that ship variants
     /// (null = single-variant app or a manifest written before variants existed).</summary>
     public string? Variant { get; set; }
+    /// <summary>For a one-dir (.zip) install, the extracted folder to remove on uninstall. Null for a
+    /// single-file .exe install (older manifests have no field → treated as single-file).</summary>
+    public string? InstallDir { get; set; }
 }
 
 /// <summary>
 /// Installs / tracks / launches the downloaded Windows apps.
 ///
-/// Windows assets are self-contained single <c>.exe</c> files, so there is no archive to extract:
-/// install = place the exe under the apps dir and record its version in a JSON manifest.
+/// Most Windows assets are self-contained single <c>.exe</c> files (install = place the exe under the apps
+/// dir). Heavy "Full" editions instead ship as a one-dir PyInstaller build inside a <c>.zip</c> (a single
+/// huge onefile exe would start slowly) — those are extracted into a per-slot folder and the launcher .exe
+/// inside is recorded. Either way the version is tracked in a JSON manifest.
 /// </summary>
 public sealed class InstallManager
 {
@@ -184,19 +190,42 @@ public sealed class InstallManager
     {
         var dir = Path.Combine(AppsDir, app.Id);
         Directory.CreateDirectory(dir);
-        var dest = Path.Combine(dir, assetName);
-        // Copy (not move) so the verified download stays in the cache; the caller removes it after a
-        // successful install (mirroring the macOS zip cleanup). Moving would destroy the only copy, so a
-        // mid-install failure would leave nothing to recover from.
-        File.Copy(downloadedExe, dest, overwrite: true);
+        var key = app.InstallKey(variant);
+
+        string dest;          // the .exe to launch / point shortcuts at
+        string? installDir;   // the extracted folder to remove on uninstall (null = single-file .exe)
+        if (assetName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+        {
+            // Heavy "Full" editions ship as a one-dir PyInstaller build in a .zip. Extract into a per-slot
+            // folder (Standard/Full share apps/<id>/, so key the folder by the install slot) and record the
+            // launcher .exe inside. Copy/extract (not move) so the verified download survives a failure.
+            installDir = Path.Combine(dir, key.Replace('@', '-'));
+            if (Directory.Exists(installDir)) Directory.Delete(installDir, recursive: true);   // clean reinstall/update
+            Directory.CreateDirectory(installDir);
+            ZipFile.ExtractToDirectory(downloadedExe, installDir);
+            var stem = FullApp.ExpectedStem(app.Name, app.VariantLabel(variant));
+            var exes = Directory.EnumerateFiles(installDir, "*.exe", SearchOption.AllDirectories).ToList();
+            var mainExe = FullApp.PickMainExe(exes, stem);
+            if (mainExe == null)
+            {
+                try { Directory.Delete(installDir, recursive: true); } catch { /* best effort */ }
+                throw new InvalidOperationException($"No .exe found inside {assetName}.");
+            }
+            dest = mainExe;
+        }
+        else
+        {
+            // Single-file self-contained .exe: place it directly under apps/<id>/.
+            dest = Path.Combine(dir, assetName);
+            File.Copy(downloadedExe, dest, overwrite: true);
+            installDir = null;
+        }
 
         var m = Manifest();
         // Remove shortcuts from any previous install (the name may have changed), remembering which
-        // locations the user had so an update re-creates them.
+        // locations the user had so an update re-creates them. Each variant is its own install slot
+        // (Standard and Full coexist under apps/<id>/); only the previous install of THIS slot is replaced.
         bool hadStart = false, hadDesktop = false;
-        // Each variant is its own install slot (Standard and Full can coexist — their exes have different
-        // names, so they share apps/<id>/). Only the previous install of THIS slot is replaced.
-        var key = app.InstallKey(variant);
         if (m.TryGetValue(key, out var prev))
         {
             hadStart = prev.StartMenuShortcut != null;
@@ -230,7 +259,8 @@ public sealed class InstallManager
             InstalledAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
             StartMenuShortcut = startName,
             DesktopShortcut = desktopName,
-            Variant = variant
+            Variant = variant,
+            InstallDir = installDir
         };
         WriteManifest(m);
         return dest;
@@ -257,15 +287,23 @@ public sealed class InstallManager
         {
             if (rec.StartMenuShortcut != null) Shortcuts.RemoveStartMenu(rec.StartMenuShortcut);
             if (rec.DesktopShortcut != null) Shortcuts.RemoveDesktop(rec.DesktopShortcut);
-            try { if (File.Exists(rec.Path)) File.Delete(rec.Path); }
-            catch (Exception ex) { Log.Write($"uninstall {installKey}: could not delete {rec.Path}: {ex.Message}"); }
+            // Remove the payload: a whole extracted one-dir (.zip Full) install, or a single-file .exe.
             try
             {
-                var dir = Path.GetDirectoryName(rec.Path);
-                if (dir != null && Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any())
-                    Directory.Delete(dir);
+                if (rec.InstallDir != null && Directory.Exists(rec.InstallDir))
+                    Directory.Delete(rec.InstallDir, recursive: true);
+                else if (File.Exists(rec.Path))
+                    File.Delete(rec.Path);
             }
-            catch (Exception ex) { Log.Write($"uninstall {installKey}: could not remove empty dir: {ex.Message}"); }
+            catch (Exception ex) { Log.Write($"uninstall {installKey}: could not delete payload: {ex.Message}"); }
+            // Clean the app's base dir once no sibling slot's files remain (Standard/Full share apps/<id>/).
+            try
+            {
+                var appDir = Path.Combine(AppsDir, installKey.Split('@')[0]);
+                if (Directory.Exists(appDir) && !Directory.EnumerateFileSystemEntries(appDir).Any())
+                    Directory.Delete(appDir);
+            }
+            catch (Exception ex) { Log.Write($"uninstall {installKey}: could not remove empty app dir: {ex.Message}"); }
         }
         if (m.Remove(installKey)) WriteManifest(m);
     }

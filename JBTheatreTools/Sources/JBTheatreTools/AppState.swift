@@ -63,10 +63,16 @@ final class AppState: ObservableObject {
         var status: Status = .unknown
         var busy: Bool = false
         var progress: Double = 0
-        /// The installed app's self-declared name (read from its bundle); overrides the catalog name.
+        /// The installed app's self-declared bundle name (kept for diagnostics only — NOT shown; see displayName).
         var resolvedName: String?
-        /// Name to show: the installed app's own name when available, else the catalog name.
-        var displayName: String { resolvedName ?? app.name }
+        /// Suffix for the selected non-default variant (e.g. " (Full)"), appended to the curated name so a Full
+        /// install reads consistently regardless of what the app calls its own bundle.
+        var variantSuffix: String = ""
+        /// Name to show: the launcher's CURATED catalog name (James's naming) + the variant suffix. We do NOT
+        /// use the installed bundle's self-name — several bundles diverge from the curated name (e.g. the
+        /// Convert app calls itself "Convert to it!", Network Port Map's bundle is "Build Port Map", Show
+        /// Dashboard's is "ShowDashboard"), and the catalog name is what James curates for the suite.
+        var displayName: String { app.name + variantSuffix }
         /// Shown once we know a row is relevant: anything installed locally, or any app whose repo
         /// the token is confirmed to reach. Not-yet-checked / inaccessible not-installed rows stay
         /// hidden, so inaccessible apps never flash into view and back out during a refresh.
@@ -159,7 +165,8 @@ final class AppState: ObservableObject {
                 return Row(app: $0,
                            installed: installed,
                            status: installed != nil ? .installed : .unknown,
-                           resolvedName: InstallManager.shared.installedDisplayName(key))
+                           resolvedName: InstallManager.shared.installedDisplayName(key),
+                           variantSuffix: $0.variantSuffix(selectedVariantId($0)))
             }
             catalogOrder = catalog.apps.map(\.id)
             catalogCategories = catalog.categories ?? []
@@ -639,6 +646,7 @@ final class AppState: ObservableObject {
             let key = installKey(for: rows[i].app)
             rows[i].installed = InstallManager.shared.installedVersion(key)
             rows[i].resolvedName = InstallManager.shared.installedDisplayName(key)
+            rows[i].variantSuffix = rows[i].app.variantSuffix(variantId)
             recomputeRow(i)
         }
         AppLog.shared.log("variant for \(appId) → \(variantId)")
