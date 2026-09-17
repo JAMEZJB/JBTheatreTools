@@ -41,7 +41,7 @@ public sealed class SectionHeaderControl : UserControl
             b.Size = new Size(26, 22);
             b.TabStop = false;
             b.BackColor = Color.Transparent;
-            b.Font = new Font(Font.FontFamily, 7f, FontStyle.Bold);
+            b.Font = Theme.Ui(7f, semibold: true);
             b.Cursor = Cursors.Hand;
         }
         _up.Text = "▲";     // ▲
@@ -60,6 +60,14 @@ public sealed class SectionHeaderControl : UserControl
         _up.Visible = _down.Visible = !pinnedGroup;
         _up.ForeColor = _down.ForeColor = Theme.Selector;
         LayoutButtons();
+        Invalidate();
+    }
+
+    /// <summary>Re-reads the theme tokens (called by MainForm when the appearance changes).</summary>
+    public void ApplyTheme(bool dark)
+    {
+        _dark = dark;
+        _up.ForeColor = _down.ForeColor = Theme.Selector;
         Invalidate();
     }
 
@@ -83,17 +91,18 @@ public sealed class SectionHeaderControl : UserControl
         g.SmoothingMode = SmoothingMode.AntiAlias;
         using var sel = new SolidBrush(Theme.Selector);
 
-        using var chevFont = new Font("Segoe UI", 7f, FontStyle.Bold);
+        using var chevFont = Theme.Ui(7f, semibold: true);
         var chevron = _collapsed ? "▶" : "▼";   // ▶ collapsed / ▼ expanded
         g.DrawString(chevron, chevFont, sel, 6, (Height - 14) / 2f);
 
-        using var titleFont = new Font("Segoe UI", 8.25f, FontStyle.Bold);
+        // t-label: 10.5px/600 uppercase in the shared slate selector (never the accent — rule 21).
+        using var titleFont = Theme.Ui(Theme.PtLabel, semibold: true);
         var title = _title.ToUpperInvariant();
         float x = 24;
         g.DrawString(title, titleFont, sel, x, (Height - titleFont.Height) / 2f);
         x += g.MeasureString(title, titleFont).Width + 4;
 
-        using var countBrush = new SolidBrush(Color.FromArgb(150, Theme.Selector));
-        g.DrawString(_count.ToString(), Font, countBrush, x, (Height - Font.Height) / 2f);
+        using var countBrush = new SolidBrush(Color.FromArgb(178, Theme.Selector));
+        g.DrawString(_count.ToString(), titleFont, countBrush, x, (Height - titleFont.Height) / 2f);
     }
 }

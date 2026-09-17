@@ -25,9 +25,9 @@ public sealed class DragCardForm : Form
         DoubleBuffered = true;
         Font = SystemFonts.MessageBoxFont ?? SystemFonts.DefaultFont;
 
-        var textWidth = TextRenderer.MeasureText(name, new Font(Font, FontStyle.Bold)).Width;
-        Size = new Size(40 + textWidth + 16, 40);
-        Region = new Region(Rounded(new Rectangle(0, 0, Width, Height), 9));
+        using (var measure = Theme.Ui(Theme.PtBody, semibold: true))
+            Size = new Size(40 + TextRenderer.MeasureText(name, measure).Width + 16, 40);
+        Region = new Region(Rounded(new Rectangle(0, 0, Width, Height), Theme.RPanel));
     }
 
     /// <summary>Don't steal focus when shown.</summary>
@@ -52,15 +52,15 @@ public sealed class DragCardForm : Form
         g.SmoothingMode = SmoothingMode.AntiAlias;
         var card = new Rectangle(0, 0, Width - 1, Height - 1);
         using (var bg = new SolidBrush(Theme.Card(_dark)))
-        using (var path = Rounded(card, 9))
+        using (var path = Rounded(card, Theme.RPanel))
             g.FillPath(bg, path);
-        using (var pen = new Pen(Theme.Line(_dark)))
-        using (var path = Rounded(card, 9))
+        using (var pen = new Pen(Theme.LineStrong(_dark)))
+        using (var path = Rounded(card, Theme.RPanel))
             g.DrawPath(pen, path);
 
         if (_icon != null)
             g.DrawImage(_icon, new Rectangle(9, (Height - 24) / 2, 24, 24));
-        using var font = new Font(Font, FontStyle.Bold);
+        using var font = Theme.Ui(Theme.PtBody, semibold: true);   // body 13px/600
         TextRenderer.DrawText(g, _name, font, new Rectangle(40, 0, Width - 46, Height),
             Theme.Fg(_dark), TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
     }
