@@ -15,11 +15,19 @@ struct SettingsView: View {
     @State private var confirmingTokenRemove = false
     @State private var confirmingServerRemove = false
 
+    /// The kit's panel heading (`.panel > h2`): a 10.5/600 caps micro-label in the tertiary text tone.
+    private func panelLabel(_ title: String, _ symbol: String) -> some View {
+        Label(title.uppercased(), systemImage: symbol)
+            .font(JBFont.label)
+            .tracking(JBFont.labelTracking)
+            .foregroundStyle(Color.jbText3)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Settings").font(.title2).bold()
+            Text("Settings").font(JBFont.title).foregroundStyle(Color.jbText)
 
-            GroupBox(label: Label("Download access", systemImage: "key.fill")) {
+            GroupBox(label: panelLabel("Download access", "key.fill")) {
                 VStack(alignment: .leading, spacing: 8) {
                     // House convention: "mode" selectors use the native dropdown (default style).
                     Picker("Downloads via", selection: $authMode) {
@@ -31,8 +39,8 @@ struct SettingsView: View {
                         Text(state.hasToken
                              ? "A token is saved in your Keychain."
                              : "No token saved — downloads are disabled until you add one.")
-                            .font(.callout)
-                            .foregroundStyle(state.hasToken ? Color.green : Color.secondary)
+                            .font(JBFont.body)
+                            .foregroundStyle(state.hasToken ? Color.jbOk : Color.jbText2)
 
                         SecureField("Paste a fine-grained PAT…", text: $tokenField)
                             .textFieldStyle(.roundedBorder)
@@ -54,24 +62,24 @@ struct SettingsView: View {
 
                         Link("Create a fine-grained token on GitHub →",
                              destination: URL(string: "https://github.com/settings/personal-access-tokens/new")!)
-                            .font(.caption)
+                            .font(JBFont.small)
                         Text("Give it Contents: Read-only. Only the repos this token can access appear in the list.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(JBFont.small)
+                            .foregroundStyle(Color.jbText2)
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
                         Text(state.hasServerAuth
                              ? "Passphrase saved in your Keychain."
                              : "Enter the suite passphrase (ask James) — downloads are disabled until you do.")
-                            .font(.callout)
-                            .foregroundStyle(state.hasServerAuth ? Color.green : Color.secondary)
+                            .font(JBFont.body)
+                            .foregroundStyle(state.hasServerAuth ? Color.jbOk : Color.jbText2)
 
                         SecureField("Suite passphrase…", text: $serverPassField)
                             .textFieldStyle(.roundedBorder)
 
                         Text("Capitalisation and spaces don't matter — type the phrase however you like.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(JBFont.small)
+                            .foregroundStyle(Color.jbText2)
                             .fixedSize(horizontal: false, vertical: true)
 
                         HStack {
@@ -94,8 +102,8 @@ struct SettingsView: View {
                         // is visible rather than silent.
                         if let base = state.serverBase, let host = URL(string: base)?.host {
                             Text("Relay: \(host)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .font(JBFont.small)
+                                .foregroundStyle(Color.jbText2)
                                 .textSelection(.enabled)
                         }
                     }
@@ -103,7 +111,7 @@ struct SettingsView: View {
                 .padding(8)
             }
 
-            GroupBox(label: Label("Updates", systemImage: "arrow.triangle.2.circlepath")) {
+            GroupBox(label: panelLabel("Updates", "arrow.triangle.2.circlepath")) {
                 VStack(alignment: .leading, spacing: 10) {
                     // House convention: "mode" selectors use the native dropdown (default style),
                     // not a segmented control — segmented is reserved for Light/Dark/System-style switches.
@@ -113,13 +121,13 @@ struct SettingsView: View {
                     .labelsHidden()
                     .tint(.selectorBlue)   // house rule 21: dropdowns are slate-blue, not the purple accent
                     Text(updateModeHint)
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(JBFont.small).foregroundStyle(Color.jbText2)
                         .fixedSize(horizontal: false, vertical: true)
 
                     Divider()
 
                     HStack {
-                        Text("JB Theatre Tools v\(state.currentVersion)").font(.callout)
+                        Text("JB Theatre Tools v\(state.currentVersion)").font(JBFont.body)
                         Spacer()
                         Button(checkingLauncher ? "Checking…" : "Check for Updates") {
                             Task {
@@ -135,7 +143,7 @@ struct SettingsView: View {
                 .padding(8)
             }
 
-            GroupBox(label: Label("Appearance", systemImage: "circle.lefthalf.filled")) {
+            GroupBox(label: panelLabel("Appearance", "circle.lefthalf.filled")) {
                 Picker("Appearance", selection: $appearance) {
                     ForEach(AppAppearance.allCases) { Text($0.label).tag($0) }
                 }
@@ -144,7 +152,7 @@ struct SettingsView: View {
                 .padding(8)
             }
 
-            GroupBox(label: Label("When I close the window", systemImage: "xmark.circle")) {
+            GroupBox(label: panelLabel("When I close the window", "xmark.circle")) {
                 VStack(alignment: .leading, spacing: 8) {
                     Picker("Close behaviour", selection: $closeBehavior) {
                         ForEach(CloseBehavior.allCases) { Text($0.label).tag($0) }
@@ -154,28 +162,28 @@ struct SettingsView: View {
                     Text(closeBehavior == .quit
                          ? "Closing the window quits JB Theatre Tools."
                          : "Closing the window keeps it running in the Dock — click the Dock icon to reopen it.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(JBFont.small).foregroundStyle(Color.jbText2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(8)
             }
 
-            GroupBox(label: Label("Install location", systemImage: "folder")) {
+            GroupBox(label: panelLabel("Install location", "folder")) {
                 VStack(alignment: .leading, spacing: 8) {
                     Toggle("Install apps to the Applications folder", isOn: $installToApplications)
                     Text("Off: apps stay inside the launcher. On: each installed app is placed in your Applications folder, so you can also open it from Launchpad or Spotlight without this launcher.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(JBFont.small).foregroundStyle(Color.jbText2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(8)
             }
 
             if state.hasHiddenApps {
-                GroupBox(label: Label("Hidden apps", systemImage: "eye.slash")) {
+                GroupBox(label: panelLabel("Hidden apps", "eye.slash")) {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(state.hiddenRows) { row in
                             HStack {
-                                Text(row.displayName).font(.callout)
+                                Text(row.displayName).font(JBFont.body)
                                 Spacer()
                                 Button("Show") { state.setHidden(row.id, false) }
                                     .tint(.selectorBlue)
@@ -202,6 +210,7 @@ struct SettingsView: View {
         }
         .padding(22)
         .frame(width: 470)
+        .background(Color.jbGround)
         .tint(.jbAccent)
         // When the setting changes, offer to move already-installed apps so they don't end up split
         // across both locations. (single-param onChange for macOS 13 compatibility)
@@ -258,26 +267,26 @@ struct SettingsView: View {
     private func launcherResultView(_ result: AppState.LauncherCheck) -> some View {
         switch result {
         case .upToDate(let v):
-            Text("You're up to date (v\(v)).").font(.caption).foregroundStyle(.green)
+            Text("You're up to date (v\(v)).").font(JBFont.small).foregroundStyle(Color.jbOk)
         case .available(_, let latest):
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    Text("v\(latest) is available.").font(.caption).foregroundStyle(.blue)
+                    Text("v\(latest) is available.").font(JBFont.small).foregroundStyle(Color.jbInfo)
                     Button {
                         Task { await state.downloadLauncherUpdate() }
                     } label: {
                         if state.launcherDownloading { Text("Downloading…") } else { Text("Download Update") }
                     }
-                    .font(.caption)
+                    .font(JBFont.small)
                     .disabled(state.launcherDownloading)
                 }
                 if let msg = state.launcherDownloadMessage {
-                    Text(msg).font(.caption2).foregroundStyle(.secondary)
+                    Text(msg).font(JBFont.labelRegular).foregroundStyle(Color.jbText3)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
         case .unavailable(let message):
-            Text(message).font(.caption).foregroundStyle(.secondary)
+            Text(message).font(JBFont.small).foregroundStyle(Color.jbText2)
         }
     }
 }

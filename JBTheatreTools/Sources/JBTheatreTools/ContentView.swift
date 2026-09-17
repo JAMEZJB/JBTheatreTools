@@ -1,19 +1,9 @@
 import SwiftUI
 import AppKit
 
-extension Color {
-    /// JB Theatre Tools suite accent (signed-off palette): purple #AF52DE.
-    /// Applied via `.tint(...)` (this SwiftPM app has no asset catalog for an AccentColor asset).
-    static let jbAccent = Color(red: 175 / 255, green: 82 / 255, blue: 222 / 255)
-    /// Shared house "selector" colour (slate-blue #6E8299) for pop-up dropdowns & overflow menus, so the
-    /// purple accent stays reserved for primary actions / header / icon (house-style rule 21).
-    static let selectorBlue = Color(red: 110 / 255, green: 130 / 255, blue: 153 / 255)
-    /// Subtle fill behind a hovered row (adapts to light & dark via the primary label colour).
-    static let jbRowHover = Color.primary.opacity(0.06)
-    /// Hairline separator drawn between rows.
-    static let jbHairline = Color.primary.opacity(0.10)
-    /// A raised "card" surface for grid tiles — the window's control background (light card / dark card).
-    static let jbSurface = Color(nsColor: .controlBackgroundColor)
+/// A 1px house hairline — the v2 rule is hairline separation, not a shadowed card edge.
+struct Hairline: View {
+    var body: some View { Rectangle().fill(Color.jbLine).frame(height: 1) }
 }
 
 /// User-selectable window appearance. `.system` follows macOS.
@@ -107,12 +97,13 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            Hairline()
             content
-            Divider()
+            Hairline()
             credit
         }
         .frame(minWidth: 600, minHeight: 440)
+        .background(Color.jbGround)
         .tint(.jbAccent)
         // Intercept the window's close button so "keep running" can hide instead of quit.
         // The closure reads the live setting from UserDefaults at close time.
@@ -137,9 +128,9 @@ struct ContentView: View {
                 .font(.system(size: 26))
                 .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 1) {
-                Text("JB Theatre Tools").font(.headline)
+                Text("JB Theatre Tools").font(JBFont.title).foregroundStyle(Color.jbText)
                 Text("Install, update & launch the JB tool suite")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(JBFont.small).foregroundStyle(Color.jbText2)
             }
             Spacer()
             if state.hasVisibleRows {
@@ -197,7 +188,7 @@ struct ContentView: View {
     @ViewBuilder
     private var content: some View {
         if let err = state.globalError {
-            banner(err, systemImage: "exclamationmark.triangle.fill", tint: .red)
+            banner(err, systemImage: "exclamationmark.triangle.fill", tint: .jbDanger)
             Spacer()
         } else {
             if let v = state.launcherUpdateAvailable { launcherBanner(v) }
@@ -206,13 +197,13 @@ struct ContentView: View {
                 banner(authMode == .token
                         ? "This token can’t access any apps. Check the token’s repository access in Settings, or ask James."
                         : "No apps are reachable right now. Check the passphrase in Settings, or ask James.",
-                       systemImage: "lock.fill", tint: .orange)
+                       systemImage: "lock.fill", tint: .jbWarn)
                 Spacer()
             } else if !state.hasVisibleRows {
                 banner(state.hasHiddenApps
                         ? "Every app is hidden. Show them again from Settings → Hidden apps."
                         : "No apps to show yet. Press Refresh, or check your access in Settings.",
-                       systemImage: "eye.slash", tint: .gray)
+                       systemImage: "eye.slash", tint: .jbText3)
                 Spacer()
             } else if viewMode == .grid {
                 gridView
@@ -257,9 +248,10 @@ struct ContentView: View {
         HStack(spacing: 10) {
             Image(systemName: "arrow.down.circle.fill").foregroundStyle(Color.jbAccent)
             VStack(alignment: .leading, spacing: 1) {
-                Text("JB Theatre Tools \(version) is available").font(.callout).bold()
+                Text("JB Theatre Tools \(version) is available")
+                    .font(JBFont.status).foregroundStyle(Color.jbAccent)
                 Text(state.launcherDownloadMessage ?? "You're running v\(state.currentVersion).")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(JBFont.small).foregroundStyle(Color.jbText2)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
@@ -272,30 +264,31 @@ struct ContentView: View {
             .disabled(state.launcherDownloading)
         }
         .padding(12)
-        .background(Color.jbAccent.opacity(0.12))
+        .bannerTint(.jbAccent)
     }
 
     private var credentialsBanner: some View {
         HStack(spacing: 10) {
-            Image(systemName: "key.fill").foregroundStyle(.orange)
+            Image(systemName: "key.fill").foregroundStyle(Color.jbWarn)
             VStack(alignment: .leading, spacing: 1) {
-                Text(state.credentialsPrompt).font(.callout).bold()
+                Text(state.credentialsPrompt).font(JBFont.status).foregroundStyle(Color.jbWarn)
                 Text(authMode == .token
                      ? "Settings → paste a fine-grained PAT (Contents: read)."
                      : "Settings → enter the suite passphrase (ask James).")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(JBFont.small).foregroundStyle(Color.jbText2)
             }
             Spacer()
             Button("Open Settings") { showSettings = true }
         }
         .padding(12)
-        .background(Color.orange.opacity(0.12))
+        .bannerTint(.jbWarn)
     }
 
+    /// Rule 28 — the house credit line, carrying the launcher's own version.
     private var credit: some View {
-        Text("Created by: James Breedon & Claude Code  ·  v\(state.currentVersion)")
-            .font(.caption2)
-            .foregroundColor(.secondary)
+        Text("Created by: James Breedon & Claude Code · v\(state.currentVersion)")
+            .font(JBFont.small)
+            .foregroundStyle(Color.jbText3)
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.vertical, 6)
     }
@@ -303,11 +296,11 @@ struct ContentView: View {
     private func banner(_ text: String, systemImage: String, tint: Color) -> some View {
         HStack(spacing: 10) {
             Image(systemName: systemImage).foregroundStyle(tint)
-            Text(text).font(.callout)
+            Text(text).font(JBFont.body).foregroundStyle(Color.jbText)
             Spacer()
         }
         .padding(12)
-        .background(tint.opacity(0.12))
+        .bannerTint(tint)
     }
 
     private func firstRefresh() async {
@@ -359,12 +352,14 @@ struct DragPreviewCard: View {
     var body: some View {
         HStack(spacing: 10) {
             AppIconImage(id: id, displayName: displayName, size: 30)
-            Text(displayName).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
+            Text(displayName).font(JBFont.bodyStrong).foregroundStyle(Color.jbText).lineLimit(1)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(.regularMaterial))
-        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Color.jbHairline))
+        .background(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous).fill(.regularMaterial))
+        .overlay(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
+            .strokeBorder(Color.jbLineStrong))
+        // A shadow is allowed here: the card is a FLOATING object (v2 keeps shadows for floating things only).
         .shadow(color: .black.opacity(0.30), radius: 14, y: 7)
         .frame(minWidth: 200, alignment: .leading)
     }
@@ -416,14 +411,16 @@ struct CategoryDragChip: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "line.3.horizontal").font(.system(size: 12, weight: .bold))
-            Text(title.uppercased()).font(.system(size: 11, weight: .bold)).tracking(0.6)
-            Text("\(count)").font(.system(size: 10, weight: .semibold)).opacity(0.6)
+            Image(systemName: "line.3.horizontal").font(.system(size: 12, weight: .semibold))
+            Text(title.uppercased()).font(JBFont.label).tracking(JBFont.labelTracking)
+            Text("\(count)").font(JBFont.label).opacity(0.6)
         }
         .foregroundStyle(Color.selectorBlue)
         .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.regularMaterial))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.jbHairline))
+        .background(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous).fill(.regularMaterial))
+        .overlay(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
+            .strokeBorder(Color.jbLineStrong))
+        // Floating chip → a shadow is in-policy here.
         .shadow(color: .black.opacity(0.28), radius: 12, y: 6)
     }
 }
@@ -538,15 +535,15 @@ struct SectionCollapseLabel: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "chevron.right")
-                .font(.system(size: 9, weight: .black))
+                .font(.system(size: 9, weight: .semibold))
                 .rotationEffect(.degrees(collapsed ? 0 : 90))
                 .foregroundStyle(Color.selectorBlue)
             Text(group.title.uppercased())
-                .font(.system(size: 10.5, weight: .bold)).tracking(0.8)
+                .font(JBFont.label).tracking(JBFont.labelTracking)
                 .foregroundStyle(Color.selectorBlue)
             Text("\(group.rows.count)")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Color.selectorBlue.opacity(0.6))
+                .font(JBFont.label)
+                .foregroundStyle(Color.selectorBlue.opacity(0.7))
                 .padding(.horizontal, 5).padding(.vertical, 0.5)
                 .background(Capsule().fill(Color.selectorBlue.opacity(0.12)))
         }
@@ -566,7 +563,7 @@ struct ReorderPill: View {
     var body: some View {
         HStack(spacing: 5) {
             Text("REORDER")
-                .font(.system(size: 8.5, weight: .bold)).tracking(0.6)
+                .font(JBFont.label).tracking(JBFont.labelTracking)
                 .foregroundStyle(Color.selectorBlue.opacity(hovering ? 0.9 : 0.45))
             DragGrip().frame(width: 14).opacity(hovering ? 0.95 : 0.55)
         }
@@ -599,7 +596,7 @@ struct CategorySectionHeader: View {
         }
         .padding(.horizontal, 10).padding(.top, 9).padding(.bottom, 3)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+        .background(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
             .fill(isDropTarget ? Color.jbAccent.opacity(0.14) : Color.clear))
         .onHover { hovering = $0 }
 
@@ -650,9 +647,10 @@ struct ListSectionHeader: View {
 
     /// Dashed placeholder shown in this header's slot while its section is the one being dragged.
     private var dropSlot: some View {
-        RoundedRectangle(cornerRadius: 8, style: .continuous)
+        RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
             .strokeBorder(Color.jbAccent, style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.jbAccent.opacity(0.08)))
+            .background(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
+                .fill(Color.jbAccent.opacity(0.08)))
             .padding(.horizontal, 2)
     }
 
@@ -766,11 +764,11 @@ struct AppRowView: View {
         .padding(.horizontal, 10)
         .frame(maxWidth: .infinity)
         .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
                 .fill(hovering && !isDragging ? Color.jbRowHover : Color.clear)
         )
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.jbHairline)
+            Rectangle().fill(Color.jbLine)
                 .frame(height: 1)
                 .padding(.leading, 57)
                 .padding(.trailing, 10)
@@ -790,9 +788,10 @@ struct AppRowView: View {
 
     /// The dashed accent placeholder shown in this row's slot while it's the one being dragged.
     private var dropSlot: some View {
-        RoundedRectangle(cornerRadius: 11, style: .continuous)
+        RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
             .strokeBorder(Color.jbAccent, style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
-            .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.jbAccent.opacity(0.08)))
+            .background(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
+                .fill(Color.jbAccent.opacity(0.08)))
             .padding(.horizontal, 4)
             .padding(.vertical, 1)
     }
@@ -867,12 +866,12 @@ struct AppRowView: View {
     private var infoColumn: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
-                Text(row.displayName).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
+                Text(row.displayName).font(JBFont.bodyStrong).foregroundStyle(Color.jbText).lineLimit(1)
                 if state.isPinned(row.id) {
                     Image(systemName: "pin.fill").font(.system(size: 9)).foregroundStyle(Color.selectorBlue)
                 }
             }
-            Text(row.app.blurb).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+            Text(row.app.blurb).font(JBFont.small).foregroundStyle(Color.jbText2).lineLimit(1)
             versionLine
             whatsNewLine
             variantToggle
@@ -887,11 +886,11 @@ struct AppRowView: View {
     private var versionLine: some View {
         HStack(spacing: 6) {
             Text("Installed: \(installedText)")
-            Text("·").foregroundStyle(.secondary)
+            Text("·")
             Text("Latest: \(row.latest ?? "—")")
         }
-        .font(.caption2)
-        .foregroundStyle(.secondary)
+        .font(JBFont.labelRegular)
+        .foregroundStyle(Color.jbText3)
     }
 
     /// The installed version of the SELECTED variant's slot, annotated with that variant's label for
@@ -930,7 +929,7 @@ struct AppRowView: View {
                 Text(whatsNewLabel).fontWeight(.semibold)
                 + Text(" ") + Text(note)
             )
-            .font(.caption2)
+            .font(JBFont.labelRegular)
             .foregroundStyle(Color.selectorBlue)
             .lineLimit(2)
             .fixedSize(horizontal: false, vertical: true)
@@ -948,19 +947,19 @@ struct AppRowView: View {
         case .checking:
             ProgressView().controlSize(.small)
         case .upToDate:
-            badge("Up to date", color: .green)
+            badge("Up to date", color: .jbOk)
         case .updateAvailable:
             badge("Update", color: .jbAccent)
         case .notInstalled:
-            badge("Not installed", color: .secondary)
+            badge("Not installed", color: .jbText2)
         case .installed:
-            badge("Installed", color: .secondary)
+            badge("Installed", color: .jbText2)
         case .noRelease:
-            badge("No release", color: .secondary)
+            badge("No release", color: .jbText2)
         case .missingAsset:
-            badge("No macOS build", color: .orange)
+            badge("No macOS build", color: .jbWarn)
         case .error(let msg):
-            badge("Error", color: .red).help(msg)
+            badge("Error", color: .jbDanger).help(msg)
         case .noAccess:
             // Row is filtered out of the list; nothing to show.
             EmptyView()
@@ -971,7 +970,7 @@ struct AppRowView: View {
 
     private func badge(_ text: String, color: Color) -> some View {
         Text(text)
-            .font(.caption2).bold()
+            .font(JBFont.label)
             .padding(.horizontal, 9).padding(.vertical, 3)
             .background(color.opacity(0.15))
             .foregroundStyle(color)
@@ -1158,7 +1157,8 @@ struct AppGridTile: View {
         VStack(spacing: 8) {
             AppIconImage(id: row.id, displayName: row.displayName, size: 52)
             Text(row.displayName)
-                .font(.system(size: 12.5, weight: .semibold))
+                .font(JBFont.smallStrong)
+                .foregroundStyle(Color.jbText)
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
                 .frame(height: 30)
@@ -1167,18 +1167,19 @@ struct AppGridTile: View {
         .frame(maxWidth: .infinity)
         .frame(height: 140)
         .padding(8)
+        // v2: tiles are flat panels separated by a hairline — no card shadow (shadows are for floating
+        // things only). Hover firms the hairline rather than lifting the tile.
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.jbSurface)
-                .shadow(color: .black.opacity(hovering ? 0.14 : 0.05),
-                        radius: hovering ? 6 : 2, y: hovering ? 3 : 1)
+            RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
+                .fill(hovering ? Color.jbRaised : Color.jbSurface)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.jbHairline)
+            RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
+                .strokeBorder(hovering ? Color.jbLineStrong : Color.jbLine)
         )
         .overlay(alignment: .topTrailing) {
             if state.isPinned(row.id) {
-                Image(systemName: "pin.fill").font(.caption2)
+                Image(systemName: "pin.fill").font(.system(size: 9))
                     .foregroundStyle(Color.selectorBlue).padding(8)
             }
         }
@@ -1190,9 +1191,10 @@ struct AppGridTile: View {
         }
         .overlay {
             if isDropTarget {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
                     .strokeBorder(Color.jbAccent, style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
-                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.jbAccent.opacity(0.08)))
+                    .background(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
+                        .fill(Color.jbAccent.opacity(0.08)))
             }
         }
         .contentShape(Rectangle())
@@ -1236,7 +1238,7 @@ struct AppGridTile: View {
     private var statusCaption: some View {
         let variant = state.selectedVariantLabel(row.app)
         Text(captionText(variant: variant))
-            .font(.caption2)
+            .font(JBFont.label)
             .foregroundStyle(captionColor)
             .lineLimit(1)
     }
@@ -1260,10 +1262,11 @@ struct AppGridTile: View {
 
     private var captionColor: Color {
         switch row.status {
-        case .updateAvailable: return .jbAccent
-        case .upToDate:        return .green
-        case .missingAsset, .error: return .orange
-        default:               return .secondary
+        case .updateAvailable:      return .jbAccent
+        case .upToDate:             return .jbOk
+        case .missingAsset:         return .jbWarn
+        case .error:                return .jbDanger
+        default:                    return .jbText2
         }
     }
 

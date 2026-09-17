@@ -110,13 +110,14 @@ public sealed class MainForm : Form
         var header = new Panel { Dock = DockStyle.Fill, Height = 64, Padding = new Padding(14, 10, 14, 10) };
 
         _title.Text = "JB Theatre Tools";
-        _title.Font = new Font(Font.FontFamily, 13f, FontStyle.Bold);
+        _title.Font = Theme.Ui(Theme.PtTitle, semibold: true);   // t-title 15px/600
         _title.AutoSize = true;
         _title.Location = new Point(14, 10);
         _title.UseMnemonic = false;   // render a literal "&" (none here today, but future-proof)
 
         // UseMnemonic=false so the literal "&" shows (default true eats "& " as an Alt-mnemonic prefix).
         _subtitle.Text = "Install, update & launch the JB tool suite";
+        _subtitle.Font = Theme.Ui(Theme.PtSmall);   // t-small 12px
         _subtitle.AutoSize = true;
         _subtitle.Location = new Point(14, 36);
         _subtitle.UseMnemonic = false;
@@ -158,13 +159,13 @@ public sealed class MainForm : Form
     {
         _updateBanner.Dock = DockStyle.Fill;
         _updateBanner.Height = 44;
-        _updateBanner.BackColor = Color.FromArgb(243, 232, 252);   // light tint of the suite accent #AF52DE
-        _updateBanner.Visible = false;
+        _updateBanner.Visible = false;   // colours come from ApplyTheme (the accent wash is theme-dependent)
 
         _updateBannerText.AutoSize = true;
         _updateBannerText.UseMnemonic = false; // render the literal "&" (e.g. "quit & replace") — default true eats it
         _updateBannerText.Location = new Point(14, 13);
-        _updateBannerText.ForeColor = Color.FromArgb(96, 40, 140);   // deep purple, readable on the tint
+        _updateBannerText.Font = Theme.Ui(Theme.PtTitle, semibold: true);   // t-status 15px/600
+        _updateBanner.Paint += (_, e) => BannerEdge(e, _updateBanner, Theme.Accent);
 
         var download = new Button { Text = "Download Update", AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right };
         download.Click += async (_, _) =>
@@ -195,17 +196,26 @@ public sealed class MainForm : Form
         return _updateBanner;
     }
 
+    /// <summary>Closes a banner the way the kit's `.banner` does: a 40% hairline of the semantic colour
+    /// along the bottom edge (parity with the macOS `bannerTint`), never a shadow.</summary>
+    private static void BannerEdge(PaintEventArgs e, Control banner, Color tint)
+    {
+        using var pen = new Pen(Theme.Blend(tint, banner.BackColor, 0.40));
+        e.Graphics.DrawLine(pen, 0, banner.Height - 1, banner.Width, banner.Height - 1);
+    }
+
     private Control BuildTokenBanner()
     {
         _tokenBanner.Dock = DockStyle.Fill;
         _tokenBanner.Height = 44;
-        _tokenBanner.BackColor = Color.FromArgb(255, 244, 214);
+        // v2 rule 25: this notice is a WARN — orange, never yellow. Colours come from ApplyTheme.
         _tokenBanner.Visible = false;
 
         _tokenBannerText.Text = NoCredsMsg;
         _tokenBannerText.AutoSize = true;
         _tokenBannerText.Location = new Point(14, 13);
-        _tokenBannerText.ForeColor = Color.FromArgb(120, 80, 0);
+        _tokenBannerText.Font = Theme.Ui(Theme.PtTitle, semibold: true);   // t-status 15px/600
+        _tokenBanner.Paint += (_, e) => BannerEdge(e, _tokenBanner, Theme.Warn);
 
         var open = new Button { Text = "Open Settings", AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right };
         open.Click += (_, _) => OpenSettings();
@@ -236,8 +246,9 @@ public sealed class MainForm : Form
         // UseMnemonic=false so the literal "&" renders (default true treats it as an Alt-shortcut
         // prefix, eating the "&" and the following space → a double space).
         _credit.UseMnemonic = false;
-        _credit.Text = $"Created by: James Breedon & Claude Code  ·  v{CurrentVersion()}";
-        _credit.ForeColor = SystemColors.GrayText;
+        // Rule 28 — the house credit line, carrying the launcher's own version.
+        _credit.Text = $"Created by: James Breedon & Claude Code · v{CurrentVersion()}";
+        _credit.Font = Theme.Ui(Theme.PtSmall);   // t-small 12px
         _credit.AutoSize = true;
         _credit.Anchor = AnchorStyles.None;
         footer.Controls.Add(_credit);
@@ -1113,12 +1124,20 @@ public sealed class MainForm : Form
     private void ApplyTheme()
     {
         bool dark = Theme.IsDark(_settings.Appearance);
+        Theme.SetCurrent(dark);   // publish the theme first: the token accessors below read it
         BackColor = Theme.Bg(dark);
         ForeColor = Theme.Fg(dark);
         _title.ForeColor = Theme.Fg(dark);
         _subtitle.ForeColor = Theme.Sub(dark);
-        _credit.ForeColor = Theme.Sub(dark);
+        _credit.ForeColor = Theme.Muted(dark);
+        // Banners follow the kit's `.banner`: a 10% wash of the semantic colour, text in that colour.
+        // The launcher-update notice is the accent; the credentials notice is WARN (orange, never yellow).
+        _updateBanner.BackColor = Theme.BannerBack(Theme.Accent, dark);
+        _updateBannerText.ForeColor = Theme.Accent;
+        _tokenBanner.BackColor = Theme.BannerBack(Theme.Warn, dark);
+        _tokenBannerText.ForeColor = Theme.Warn;
         foreach (var row in _rows) row.ApplyTheme(dark);
+        foreach (var header in _headers.Values) header.ApplyTheme(dark);
         if (IsHandleCreated) Theme.ApplyTitleBar(this, dark);
     }
 }

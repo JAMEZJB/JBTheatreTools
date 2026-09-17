@@ -99,7 +99,7 @@ public sealed class SettingsDialog : Form
         _tokenHelp.AutoSize = false;
         _tokenHelp.Location = new Point(16, 186);
         _tokenHelp.Size = new Size(428, 20);
-        _tokenHelp.ForeColor = Color.Gray;
+        _tokenHelp.ForeColor = Theme.Sub(Theme.CurrentDark);
 
         // Server panel (same band; visibility-swapped with the token panel). The relay URL is
         // built-in (catalog `downloadServer`, with an invisible settings.json override) — the user
@@ -136,13 +136,13 @@ public sealed class SettingsDialog : Form
 
         // Forgiving-entry note: the passphrase is normalised (case- and spacing-insensitive) before it's sent.
         _serverHint.AutoSize = true;
-        _serverHint.ForeColor = Color.Gray;
+        _serverHint.ForeColor = Theme.Sub(Theme.CurrentDark);
         _serverHint.Location = new Point(16, 164);
         _serverHint.Text = "Capitalisation and spaces don't matter — type the phrase however you like.";
 
         // Surface the effective relay host read-only (audit F2), so a non-default override is visible.
         _serverRelay.AutoSize = true;
-        _serverRelay.ForeColor = Color.Gray;
+        _serverRelay.ForeColor = Theme.Muted(Theme.CurrentDark);
         _serverRelay.Location = new Point(16, 186);
         var relay = AuthClient.ResolveServerUrl(_settings, _downloadServer);
         _serverRelay.Text = Uri.TryCreate(relay, UriKind.Absolute, out var relayUri) ? $"Relay: {relayUri.Host}" : "";
@@ -164,7 +164,7 @@ public sealed class SettingsDialog : Form
         _updateHint.AutoSize = false;
         _updateHint.Location = new Point(16, 280);
         _updateHint.Size = new Size(428, 18);
-        _updateHint.ForeColor = Color.Gray;
+        _updateHint.ForeColor = Theme.Sub(Theme.CurrentDark);
         _updateHint.Text = UpdateHint();
 
         var versionLabel = new Label
@@ -186,15 +186,15 @@ public sealed class SettingsDialog : Form
         {
             if (_selfInfo == null) return;
             _viewRelease.Enabled = false;
-            SetResult("Downloading…", Color.Gray);
+            SetResult("Downloading…", Theme.Sub(Theme.CurrentDark));
             try
             {
                 var dest = await LauncherUpdate.DownloadAndRevealAsync(_selfInfo, AuthClient.SelfUpdate(_settings, _downloadServer));
-                SetResult($"Saved {Path.GetFileName(dest)} to Downloads — quit & replace.", Color.SeaGreen);
+                SetResult($"Saved {Path.GetFileName(dest)} to Downloads — quit & replace.", Theme.Ok);
             }
             catch (Exception ex)
             {
-                SetResult(ex.Message, Color.Firebrick);
+                SetResult(ex.Message, Theme.Danger);
             }
             finally
             {
@@ -205,7 +205,7 @@ public sealed class SettingsDialog : Form
         _checkResult.AutoSize = false;
         _checkResult.Location = new Point(16, 336);
         _checkResult.Size = new Size(428, 20);
-        _checkResult.ForeColor = Color.Gray;
+        _checkResult.ForeColor = Theme.Sub(Theme.CurrentDark);
 
         // --- Appearance ---
         var appearanceHeading = Bold("Appearance", new Point(16, 372));
@@ -305,15 +305,15 @@ public sealed class SettingsDialog : Form
         _serverState.Text = has
             ? "Passphrase saved in Credential Manager."
             : "Enter the suite passphrase (ask James) — downloads are disabled until you do.";
-        _serverState.ForeColor = has ? Color.SeaGreen : Color.Gray;
+        _serverState.ForeColor = has ? Theme.Ok : Theme.Sub(Theme.CurrentDark);
         _serverRemove.Visible = has && _settings.AuthMode == "server";
     }
 
     private async Task CheckLauncherAsync()
     {
-        if (_selfInfo == null) { SetResult("No self-update info in catalog.", Color.Gray); return; }
+        if (_selfInfo == null) { SetResult("No self-update info in catalog.", Theme.Sub(Theme.CurrentDark)); return; }
         _check.Enabled = false;
-        SetResult("Checking…", Color.Gray);
+        SetResult("Checking…", Theme.Sub(Theme.CurrentDark));
         _viewRelease.Visible = false;
         try
         {
@@ -321,22 +321,22 @@ public sealed class SettingsDialog : Form
             var info = await client.LatestReleaseAsync(_selfInfo.Owner, _selfInfo.Repo);
             if (Versions.IsNewer(info.TagName, _currentVersion))
             {
-                SetResult($"{info.TagName} is available.", Color.RoyalBlue);
+                SetResult($"{info.TagName} is available.", Theme.Info);
                 _viewRelease.Location = new Point(_checkResult.Left + 160, 332);
                 _viewRelease.Visible = true;
             }
             else
             {
-                SetResult($"You're up to date (v{_currentVersion}).", Color.SeaGreen);
+                SetResult($"You're up to date (v{_currentVersion}).", Theme.Ok);
             }
         }
         catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.NoRelease)
         {
-            SetResult("No launcher release published yet.", Color.Gray);
+            SetResult("No launcher release published yet.", Theme.Sub(Theme.CurrentDark));
         }
         catch (Exception ex)
         {
-            SetResult(ex.Message, Color.Gray);
+            SetResult(ex.Message, Theme.Sub(Theme.CurrentDark));
         }
         finally
         {
@@ -357,12 +357,15 @@ public sealed class SettingsDialog : Form
         _ => "Checks all apps and the launcher each time it opens.",
     };
 
+    /// <summary>The kit's panel heading (`.panel > h2`): 10.5px/600 uppercase in the tertiary tone.</summary>
     private static Label Bold(string text, Point location) => new()
     {
-        Text = text,
-        Font = new Font(Control.DefaultFont.FontFamily, 10f, FontStyle.Bold),
+        Text = text.ToUpperInvariant(),
+        Font = Theme.Ui(Theme.PtLabel, semibold: true),
+        ForeColor = Theme.Muted(Theme.CurrentDark),
         AutoSize = true,
         Location = location,
+        Tag = "panel-heading",
     };
 
     private static void OpenUrl(string url)
@@ -380,14 +383,25 @@ public sealed class SettingsDialog : Form
         _tokenState.Text = has
             ? "A token is saved in Credential Manager."
             : "No token saved — downloads are disabled until you add one.";
-        _tokenState.ForeColor = has ? Color.SeaGreen : Color.Gray;
+        _tokenState.ForeColor = has ? Theme.Ok : Theme.Sub(Theme.CurrentDark);
         _remove.Visible = has;
     }
 
     public void ApplyTheme(bool dark)
     {
+        Theme.SetCurrent(dark);
         BackColor = Theme.Bg(dark);
         ForeColor = Theme.Fg(dark);
+        // Panel headings and hint prose carry their own tones (the kit's --text-3 / --text-2).
+        foreach (Control c in Controls)
+            if (c is Label { Tag: "panel-heading" } heading) heading.ForeColor = Theme.Muted(dark);
+        _tokenHelp.ForeColor = Theme.Sub(dark);
+        _serverHint.ForeColor = Theme.Sub(dark);
+        _serverRelay.ForeColor = Theme.Muted(dark);
+        _updateHint.ForeColor = Theme.Sub(dark);
+        _checkResult.ForeColor = Theme.Sub(dark);
+        UpdateTokenState();
+        UpdateServerState();
         if (IsHandleCreated) Theme.ApplyTitleBar(this, dark);
     }
 }

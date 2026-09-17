@@ -57,6 +57,30 @@ public sealed class PillLabel : Label
     }
 }
 
+/// <summary>The "pinned" marker: a drawn pushpin in the house slate. House Style v2 retires emoji from
+/// labels, so this is a vector glyph rather than 📌 — the WinForms counterpart of the macOS `pin.fill`
+/// SF Symbol. Slate is identical in both themes, so it needs no theme plumbing.</summary>
+public sealed class PinGlyph : Label
+{
+    public PinGlyph()
+    {
+        AutoSize = false;
+        Size = new Size(12, 12);
+        SetStyle(ControlStyles.SupportsTransparentBackColor | ControlStyles.OptimizedDoubleBuffer
+                 | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var brush = new SolidBrush(Theme.Selector);
+        using var pen = new Pen(Theme.Selector, 1.4f);
+        g.FillEllipse(brush, 1.5f, 1f, 7f, 7f);       // head
+        g.DrawLine(pen, 5f, 8f, 5f, 11f);             // needle
+    }
+}
+
 /// <summary>A single catalog row: name, blurb, version line, status badge, and action buttons.</summary>
 public sealed class AppRowControl : UserControl
 {
@@ -82,7 +106,7 @@ public sealed class AppRowControl : UserControl
 
     private readonly PictureBox _icon = new();
     private readonly Label _name = new();
-    private readonly Label _pin = new();
+    private readonly PinGlyph _pin = new();
     private readonly Label _blurb = new();
     private readonly Label _version = new();
     private readonly Label _whatsNew = new();
@@ -146,22 +170,21 @@ public sealed class AppRowControl : UserControl
         // UseMnemonic=false on the catalog-text labels so a literal "&" renders (e.g. blurb
         // "Back up & manage") instead of being eaten as an Alt-mnemonic prefix.
         _name.Text = app.Name;
-        _name.Font = new Font(Font.FontFamily, 10f, FontStyle.Bold);
+        _name.Font = Theme.Ui(Theme.PtBody, semibold: true);   // body 13px/600
         _name.AutoSize = true;
         _name.Location = new Point(64, 10);
         _name.UseMnemonic = false;
 
-        _pin.Text = "📌";
-        _pin.Font = new Font("Segoe UI Emoji", 8f);
-        _pin.AutoSize = true;
         _pin.Location = new Point(_name.Right + 4, 12);
         _pin.Visible = false;
 
         _blurb.Text = app.Blurb;
+        _blurb.Font = Theme.Ui(Theme.PtSmall);   // t-small 12px
         _blurb.AutoSize = true;
         _blurb.Location = new Point(64, 31);
         _blurb.UseMnemonic = false;
 
+        _version.Font = Theme.Ui(Theme.PtLabel);   // t-label step, sentence case (a meta line)
         _version.AutoSize = true;
         _version.Location = new Point(64, 52);
 
@@ -169,7 +192,7 @@ public sealed class AppRowControl : UserControl
         _whatsNew.AutoSize = true;
         _whatsNew.Location = new Point(64, 68);
         _whatsNew.UseMnemonic = false;
-        _whatsNew.Font = new Font(Font.FontFamily, 8.25f);
+        _whatsNew.Font = Theme.Ui(Theme.PtLabel);
         _whatsNew.Visible = hasWhatsNew;
         if (hasWhatsNew)
         {
@@ -179,7 +202,7 @@ public sealed class AppRowControl : UserControl
 
         // Variant toggle (Standard/Full) — only for apps that ship more than one download.
         _variant.DropDownStyle = ComboBoxStyle.DropDownList;
-        _variant.Font = new Font(Font.FontFamily, 8.25f);
+        _variant.Font = Theme.Ui(Theme.PtSmall);
         _variant.Width = 120;
         _variant.Location = new Point(64, variantY);
         _variant.Visible = app.HasVariants;
@@ -198,7 +221,7 @@ public sealed class AppRowControl : UserControl
         }
 
         _badge.AutoSize = true;
-        _badge.Font = new Font(Font.FontFamily, 8.5f, FontStyle.Bold);
+        _badge.Font = Theme.Ui(Theme.PtLabel, semibold: true);   // t-label 10.5px/600
 
         _install.AutoSize = true;
         _install.Click += async (_, _) =>
@@ -250,7 +273,7 @@ public sealed class AppRowControl : UserControl
         UpdateIcon();
     }
 
-    /// <summary>Reflects the pinned state: shows the 📌 badge and repositions it after the name.</summary>
+    /// <summary>Reflects the pinned state: shows the pin marker and repositions it after the name.</summary>
     public void SetPinned(bool pinned)
     {
         _pin.Visible = pinned;
@@ -264,7 +287,7 @@ public sealed class AppRowControl : UserControl
         bool h = ClientRectangle.Contains(PointToClient(Cursor.Position));
         if (h == _hover) return;
         _hover = h;
-        BackColor = _hover ? Theme.CardHover(_dark) : Theme.Card(_dark);
+        BackColor = RowBack();
         Invalidate();
     }
 
@@ -286,7 +309,7 @@ public sealed class AppRowControl : UserControl
         r.Inflate(-4, -3);
         r.Width -= 1; r.Height -= 1;
         using var fill = new SolidBrush(Color.FromArgb(24, Theme.Accent));
-        using var path = RoundedRect(r, 10);
+        using var path = RoundedRect(r, Theme.RPanel);
         g.FillPath(fill, path);
         using var pen = new Pen(Theme.Accent, 2) { DashStyle = DashStyle.Dash };
         g.DrawPath(pen, path);
@@ -295,9 +318,27 @@ public sealed class AppRowControl : UserControl
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
-        if (_compact) return;
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        if (_compact)
+        {
+            // Grid tile: a flat panel closed by a hairline — v2 separates with hairlines, never a card
+            // shadow. Hover firms the hairline instead of lifting the tile (parity with the macOS tile).
+            // The control's BackColor IS the tile fill, so the icon / name / badge children inherit it;
+            // only the four corners outside the rounded path are painted back to the window ground.
+            var tile = new Rectangle(0, 0, Width - 1, Height - 1);
+            using var tilePath = RoundedRect(tile, Theme.RPanel);
+            using (var corners = new Region(ClientRectangle))
+            {
+                corners.Exclude(tilePath);
+                using var ground = new SolidBrush(Theme.Bg(_dark));
+                g.FillRegion(ground, corners);
+            }
+            using (var border = new Pen(_hover ? Theme.LineStrong(_dark) : Theme.Line(_dark)))
+                g.DrawPath(border, tilePath);
+            return;
+        }
 
         // Grip handle (2×3 dots) at the left margin — the drag affordance (grab here to reorder).
         int gx = 6, gy = Height / 2 - 8;
@@ -480,6 +521,7 @@ public sealed class AppRowControl : UserControl
     public void SetCompact(bool compact)
     {
         _compact = compact;
+        BackColor = RowBack();
         if (compact)
         {
             Margin = new Padding(6);
@@ -590,10 +632,10 @@ public sealed class AppRowControl : UserControl
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
         var accent = Theme.Accent;
         using (var fill = new SolidBrush(Color.FromArgb(38, accent)))   // ~15% tint of the suite accent
-        using (var path = RoundedRect(new Rectangle(0, 0, 39, 39), 9))
+        using (var path = RoundedRect(new Rectangle(0, 0, 39, 39), Theme.RPanel))
             g.FillPath(fill, path);
         var letter = string.IsNullOrWhiteSpace(name) ? "•" : name.Substring(0, 1).ToUpperInvariant();
-        using var font = new Font("Segoe UI", 16f, FontStyle.Bold);
+        using var font = Theme.Ui(16f, semibold: true);
         using var txt = new SolidBrush(accent);
         var sz = g.MeasureString(letter, font);
         g.DrawString(letter, font, txt, (40 - sz.Width) / 2f, (40 - sz.Height) / 2f);
@@ -637,15 +679,15 @@ public sealed class AppRowControl : UserControl
 
         (string text, Color color) = Status switch
         {
-            RowStatus.UpToDate => ("Up to date", Color.SeaGreen),
+            RowStatus.UpToDate => ("Up to date", Theme.Ok),
             RowStatus.UpdateAvailable => ("Update", Theme.Accent),
-            RowStatus.NotInstalled => ("Not installed", Color.Gray),
-            RowStatus.Installed => ("Installed", Color.Gray),
-            RowStatus.NoRelease => ("No release", Color.Gray),
-            RowStatus.MissingAsset => ("No Windows build", Color.DarkOrange),
-            RowStatus.Error => ("Error", Color.Firebrick),
-            RowStatus.Checking => ("Checking…", Color.Gray),
-            _ => ("", Color.Gray),
+            RowStatus.NotInstalled => ("Not installed", Theme.Sub(_dark)),
+            RowStatus.Installed => ("Installed", Theme.Sub(_dark)),
+            RowStatus.NoRelease => ("No release", Theme.Sub(_dark)),
+            RowStatus.MissingAsset => ("No Windows build", Theme.Warn),
+            RowStatus.Error => ("Error", Theme.Danger),
+            RowStatus.Checking => ("Checking…", Theme.Sub(_dark)),
+            _ => ("", Theme.Sub(_dark)),
         };
         _badge.Text = text;
         _badge.ForeColor = color;
@@ -662,15 +704,24 @@ public sealed class AppRowControl : UserControl
         LayoutControls();
     }
 
+    /// <summary>The control's own background — which its child labels inherit. A list row is a surface
+    /// that lifts on hover; a GRID TILE is the panel fill (raised on hover), with OnPaint rounding the
+    /// corners back to the window ground.</summary>
+    private Color RowBack() => _compact
+        ? (_hover ? Theme.Raised(_dark) : Theme.Surface(_dark))
+        : (_hover ? Theme.CardHover(_dark) : Theme.Card(_dark));
+
     public void ApplyTheme(bool dark)
     {
         _dark = dark;
-        BackColor = _hover ? Theme.CardHover(dark) : Theme.Card(dark);
+        BackColor = RowBack();
         _name.ForeColor = Theme.Fg(dark);
         _blurb.ForeColor = Theme.Sub(dark);
-        _version.ForeColor = Theme.Sub(dark);
-        _whatsNew.ForeColor = Theme.Accent;
+        _version.ForeColor = Theme.Muted(dark);
+        _whatsNew.ForeColor = Theme.Selector;   // rule 21 — meta prose is slate, not the accent
         _variant.BackColor = Theme.Card(dark);
         _variant.ForeColor = Theme.Fg(dark);
+        UpdateVisual();   // the badge's semantic colours are theme-dependent
+        UpdateIcon();     // ditto the monogram fallback, which is tinted with the accent
     }
 }

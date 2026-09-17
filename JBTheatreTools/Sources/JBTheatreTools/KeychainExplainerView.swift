@@ -12,18 +12,19 @@ struct KeychainExplainerView: View {
                     .font(.title)
                     .foregroundStyle(.tint)
                 Text("After an update, macOS needs your permission again")
-                    .font(.headline)
+                    .font(JBFont.title)
             }
 
             Text("Because this is a new version of JB Theatre Tools, macOS will now ask for your "
                  + "Mac login password so the app can use the GitHub token you already saved. "
                  + "This is normal and expected after every update.")
+                .font(JBFont.body)
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("Tip: click **Always Allow** in the next dialog and it won't ask again until the "
                  + "next update.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+                .font(JBFont.small)
+                .foregroundStyle(Color.jbText2)
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack {
@@ -34,5 +35,7 @@ struct KeychainExplainerView: View {
         }
         .padding(22)
         .frame(width: 430)
+        .background(Color.jbGround)
+        .tint(.jbAccent)
     }
 }
