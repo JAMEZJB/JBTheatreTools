@@ -22,7 +22,7 @@
     <!-- File description shown in Task Manager / file properties; window title is set in code. -->
     <AssemblyTitle>JB Theatre Tools</AssemblyTitle>
     <Product>JB Theatre Tools</Product>
-    <Version>1.24.0</Version>
+    <Version>1.25.0</Version>
     <Company>James Breedon</Company>
     <RootNamespace>JBTheatreTools</RootNamespace>
     <ApplicationIcon>app.ico</ApplicationIcon>
@@ -62,6 +62,7 @@
     <EmbeddedResource Include="../icons/surtitletools.png" LogicalName="rowicon-surtitletools.png" />
     <EmbeddedResource Include="../icons/convert.png" LogicalName="rowicon-convert.png" />
     <EmbeddedResource Include="../icons/renametools.png" LogicalName="rowicon-renametools.png" />
+    <EmbeddedResource Include="../icons/reporadar.png" LogicalName="rowicon-reporadar.png" />
   </ItemGroup>
 
 </Project>

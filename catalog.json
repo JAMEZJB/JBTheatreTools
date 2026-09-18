@@ -410,6 +410,21 @@
         "windows-x64": "RenameTools-Windows-x64.exe",
         "windows-arm64": "RenameTools-Windows-arm64.exe"
       }
+    },
+    {
+      "id": "reporadar",
+      "name": "Repo Radar",
+      "blurb": "Every GitHub Actions run across your account in one live window.",
+      "category": "Planning & admin",
+      "whatsNew": "First release — live Runs board across every repo (budget-refused detection, re-run history), Releases & signing, Actions usage vs your plan, Repos overview, security-alert counts.",
+      "whatsNewVersion": "v0.1.0",
+      "owner": "JAMEZJB",
+      "repo": "RepoRadar",
+      "assets": {
+        "macos": "RepoRadar-macOS.zip",
+        "windows-x64": "RepoRadar-Windows-x64.exe",
+        "windows-arm64": "RepoRadar-Windows-arm64.exe"
+      }
     }
   ]
 }
