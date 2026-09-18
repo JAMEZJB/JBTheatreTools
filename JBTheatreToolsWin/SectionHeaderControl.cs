@@ -19,6 +19,10 @@ public sealed class SectionHeaderControl : UserControl
 
     private readonly Button _up = new();
     private readonly Button _down = new();
+    // DPI: every pixel number is a 96-DPI design value scaled through S(); _dpi = what the fonts were built for.
+    private int _dpi;
+    private Font? _buttonFont;
+    private int S(int v) => Theme.Px(v, DeviceDpi);
 
     /// <summary>Raised when the header is clicked (toggle collapse). Argument = section key.</summary>
     public event Action<string>? CollapseToggleRequested;
@@ -27,8 +31,7 @@ public sealed class SectionHeaderControl : UserControl
 
     public SectionHeaderControl()
     {
-        Height = 30;
-        Margin = new Padding(0, 6, 0, 1);
+        AutoScaleMode = AutoScaleMode.None;   // Rescale() owns the geometry, absolutely, from DeviceDpi
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw
                  | ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint, true);
         BackColor = Color.Transparent;
@@ -38,10 +41,8 @@ public sealed class SectionHeaderControl : UserControl
         {
             b.FlatStyle = FlatStyle.Flat;
             b.FlatAppearance.BorderSize = 0;
-            b.Size = new Size(26, 22);
             b.TabStop = false;
             b.BackColor = Color.Transparent;
-            b.Font = Theme.Ui(7f, semibold: true);
             b.Cursor = Cursors.Hand;
         }
         _up.Text = "▲";     // ▲
@@ -52,6 +53,38 @@ public sealed class SectionHeaderControl : UserControl
         Controls.Add(_down);
 
         Click += (_, _) => CollapseToggleRequested?.Invoke(Key);
+        Rescale();
+    }
+
+    /// <summary>Re-derives the height, margin, button size and fonts from the current DPI (constructor,
+    /// handle creation on a different-DPI monitor, and every Per-Monitor V2 DPI change).</summary>
+    public void Rescale()
+    {
+        if (DeviceDpi != _dpi)
+        {
+            _dpi = DeviceDpi;
+            var old = _buttonFont;
+            _buttonFont = Theme.Ui(7f, semibold: true, _dpi);
+            _up.Font = _down.Font = _buttonFont;
+            old?.Dispose();
+        }
+        Height = S(30);
+        Margin = new Padding(0, S(6), 0, S(1));
+        _up.Size = _down.Size = new Size(S(26), S(22));
+        LayoutButtons();
+        Invalidate();
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        if (DeviceDpi != _dpi) Rescale();
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs e)
+    {
+        base.OnDpiChangedAfterParent(e);
+        Rescale();
     }
 
     public void Configure(string key, string title, int count, bool collapsed, bool pinnedGroup, bool dark)
@@ -81,8 +114,8 @@ public sealed class SectionHeaderControl : UserControl
 
     private void LayoutButtons()
     {
-        _down.Location = new Point(Width - _down.Width - 8, (Height - _down.Height) / 2);
-        _up.Location = new Point(_down.Left - _up.Width - 2, (Height - _up.Height) / 2);
+        _down.Location = new Point(Width - _down.Width - S(8), (Height - _down.Height) / 2);
+        _up.Location = new Point(_down.Left - _up.Width - S(2), (Height - _up.Height) / 2);
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -91,16 +124,17 @@ public sealed class SectionHeaderControl : UserControl
         g.SmoothingMode = SmoothingMode.AntiAlias;
         using var sel = new SolidBrush(Theme.Selector);
 
-        using var chevFont = Theme.Ui(7f, semibold: true);
+        // Pixel-sized fonts: GDI+ DrawString would otherwise size a point font at the canvas DPI.
+        using var chevFont = Theme.Ui(7f, semibold: true, DeviceDpi);
         var chevron = _collapsed ? "▶" : "▼";   // ▶ collapsed / ▼ expanded
-        g.DrawString(chevron, chevFont, sel, 6, (Height - 14) / 2f);
+        g.DrawString(chevron, chevFont, sel, S(6), (Height - S(14)) / 2f);
 
         // t-label: 10.5px/600 uppercase in the shared slate selector (never the accent — rule 21).
-        using var titleFont = Theme.Ui(Theme.PtLabel, semibold: true);
+        using var titleFont = Theme.Ui(Theme.PtLabel, semibold: true, DeviceDpi);
         var title = _title.ToUpperInvariant();
-        float x = 24;
+        float x = S(24);
         g.DrawString(title, titleFont, sel, x, (Height - titleFont.Height) / 2f);
-        x += g.MeasureString(title, titleFont).Width + 4;
+        x += g.MeasureString(title, titleFont).Width + S(4);
 
         using var countBrush = new SolidBrush(Color.FromArgb(178, Theme.Selector));
         g.DrawString(_count.ToString(), titleFont, countBrush, x, (Height - titleFont.Height) / 2f);

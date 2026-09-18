@@ -435,7 +435,7 @@ public sealed class InstallManager
         var text = System.Text.Encoding.UTF8.GetString(sumsBytes);
         var expected = ExpectedSha256(asset.Name, text);
         if (expected == null) return VerifyResult.AssetNotListed;
-        var actual = Sha256Hex(file);
+        var actual = await Task.Run(() => Sha256Hex(file));   // 450 MB hash — never on the UI thread
         if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
         {
             TryDelete(file);

@@ -42,6 +42,13 @@ public sealed class SettingsDialog : Form
         StartPosition = FormStartPosition.CenterParent;
         MaximizeBox = false;
         MinimizeBox = false;
+        // DPI: this dialog is laid out ONCE at fixed 96-DPI positions (the designer pattern), so the
+        // framework's AutoScale pass — which runs on the first layout, after ResumeLayout below — scales
+        // the client size and every control here. Anything positioned later at runtime must go through
+        // LogicalToDeviceUnits (see CheckLauncherAsync).
+        SuspendLayout();
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
         ClientSize = new Size(460, 568);
 
         // --- Download access (auth mode + per-mode credentials) ---
@@ -286,6 +293,8 @@ public sealed class SettingsDialog : Form
 
         UpdateServerState();
         UpdateAuthPanels();
+        ResumeLayout(false);
+        PerformLayout();   // the AutoScale pass runs here
     }
 
     /// <summary>Shows the token panel or the server panel to match the selected auth mode.</summary>
@@ -322,7 +331,7 @@ public sealed class SettingsDialog : Form
             if (Versions.IsNewer(info.TagName, _currentVersion))
             {
                 SetResult($"{info.TagName} is available.", Theme.Info);
-                _viewRelease.Location = new Point(_checkResult.Left + 160, 332);
+                _viewRelease.Location = new Point(_checkResult.Left + LogicalToDeviceUnits(160), LogicalToDeviceUnits(332));
                 _viewRelease.Visible = true;
             }
             else

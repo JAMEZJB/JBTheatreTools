@@ -76,6 +76,11 @@ public sealed class GitHubException : Exception
 /// <summary>
 /// Talks to the GitHub REST API with a personal access token.
 ///
+/// Every await in here is <c>ConfigureAwait(false)</c>: the client touches no UI, and without it the 21 concurrent
+/// refresh fetches (started on the WinForms context) resumed on the UI thread to decode + parse 40–200 KB of
+/// release JSON each — a burst of UI-thread work right as the list painted. Callers still await the returned
+/// Task on their own context, so results land on the UI thread exactly as before.
+///
 /// Private release assets cannot be fetched from <c>browser_download_url</c>; you must hit the
 /// API asset endpoint with <c>Accept: application/octet-stream</c>, follow the 302 to the signed
 /// S3 URL, and <b>not</b> forward the Authorization header on that redirect (S3 rejects a request
@@ -136,12 +141,12 @@ public sealed class GitHubClient : IDisposable
     {
         var url = $"{_apiBase}/repos/{owner}/{repo}/releases/latest";
         using var req = NewRequest(url, "application/vnd.github+json");
-        using var resp = await _http.SendAsync(req);
+        using var resp = await _http.SendAsync(req).ConfigureAwait(false);
         if (resp.StatusCode == HttpStatusCode.NotFound)
             throw new GitHubException(GitHubErrorKind.NoRelease, "No published release found.");
         if (!resp.IsSuccessStatusCode)
             throw new GitHubException(GitHubErrorKind.Http, $"GitHub returned HTTP {(int)resp.StatusCode}.");
-        var json = await resp.Content.ReadAsStringAsync();
+        var json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
         return JsonSerializer.Deserialize<ReleaseInfo>(json)
             ?? throw new GitHubException(GitHubErrorKind.Bad, "Unexpected response from GitHub.");
     }
@@ -156,14 +161,14 @@ public sealed class GitHubClient : IDisposable
     {
         var url = $"{_apiBase}/repos/{owner}/{repo}/releases?per_page=50";
         using var req = NewRequest(url, "application/vnd.github+json");
-        using var resp = await _http.SendAsync(req);
+        using var resp = await _http.SendAsync(req).ConfigureAwait(false);
         if (resp.StatusCode == HttpStatusCode.Unauthorized)
             throw new GitHubException(GitHubErrorKind.Unauthorized, "GitHub token is invalid or expired.");
         if (resp.StatusCode == HttpStatusCode.NotFound)
             throw new GitHubException(GitHubErrorKind.NotAccessible, "This token can’t access that repository.");
         if (!resp.IsSuccessStatusCode)
             throw new GitHubException(GitHubErrorKind.Http, $"GitHub returned HTTP {(int)resp.StatusCode}.");
-        var json = await resp.Content.ReadAsStringAsync();
+        var json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
         var all = JsonSerializer.Deserialize<List<ReleaseInfo>>(json) ?? new();
         return all.Where(r => !r.Draft).ToList();
     }
@@ -175,7 +180,7 @@ public sealed class GitHubClient : IDisposable
                                                                         HttpCompletionOption completion)
     {
         using var req = NewRequest(url, accept);
-        var resp = await _http.SendAsync(req, completion);
+        var resp = await _http.SendAsync(req, completion).ConfigureAwait(false);
         var current = new Uri(url);
         for (int hop = 0; hop < 5 && (int)resp.StatusCode is >= 300 and < 400 && resp.Headers.Location != null; hop++)
         {
@@ -194,7 +199,7 @@ public sealed class GitHubClient : IDisposable
             current = location;
             using var hopReq = new HttpRequestMessage(HttpMethod.Get, location);
             hopReq.Headers.TryAddWithoutValidation("User-Agent", "JBTheatreTools");
-            resp = await _http.SendAsync(hopReq, completion);
+            resp = await _http.SendAsync(hopReq, completion).ConfigureAwait(false);
         }
         return resp;
     }
@@ -204,7 +209,7 @@ public sealed class GitHubClient : IDisposable
     {
         var url = $"{_apiBase}/repos/{owner}/{repo}/releases/assets/{assetId}";
         using var resp = await SendFollowingRedirectsAsync(url, "application/octet-stream",
-                                                           HttpCompletionOption.ResponseHeadersRead);
+                                                           HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
             throw new GitHubException(GitHubErrorKind.Http, $"Download failed: HTTP {(int)resp.StatusCode}.");
 
@@ -214,18 +219,33 @@ public sealed class GitHubClient : IDisposable
         // download (network drop, app close) never leaves a truncated file that later looks installable.
         var part = dest + ".part";
         long received = 0;
+        double lastReported = 0;   // report on ≥1% change only — every 80 KB chunk was ~5,600 UI marshals per 450 MB
+        // …and at most ~12× a second: on a fast link 1% steps still meant ~100 UI marshals + repaints a second
+        // per download, for a bar nobody can see move that fast (mirrors the macOS ProgressHub floor).
+        long lastTicks = 0;
         try
         {
-            await using (var src = await resp.Content.ReadAsStreamAsync())
+            // ConfigureAwait(false) throughout the loop: each of the ~5,000+ chunk continuations for a Full
+            // edition otherwise bounced through the WinForms message pump (progress still marshals correctly —
+            // Progress<T> captured the UI context when it was created).
+            await using (var src = await resp.Content.ReadAsStreamAsync().ConfigureAwait(false))
             await using (var dst = File.Create(part))
             {
                 var buffer = new byte[81920];
                 int n;
-                while ((n = await src.ReadAsync(buffer)) > 0)
+                while ((n = await src.ReadAsync(buffer).ConfigureAwait(false)) > 0)
                 {
-                    await dst.WriteAsync(buffer.AsMemory(0, n));
+                    await dst.WriteAsync(buffer.AsMemory(0, n)).ConfigureAwait(false);
                     received += n;
-                    if (total > 0) progress?.Report((double)received / total);
+                    if (total > 0)
+                    {
+                        var p = (double)received / total;
+                        var now = Environment.TickCount64;
+                        if (p - lastReported >= 0.01 && now - lastTicks >= 80)
+                        {
+                            lastReported = p; lastTicks = now; progress?.Report(p);
+                        }
+                    }
                 }
             }
             if (total > 0 && received != total)

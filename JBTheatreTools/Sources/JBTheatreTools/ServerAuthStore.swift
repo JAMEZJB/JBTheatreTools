@@ -9,7 +9,12 @@ enum ServerAuthStore {
     private static let account = "server-pass"
 
     /// In-memory cache for this process — keeps the Keychain read (and its prompt) to once per launch.
-    private(set) static var cachedPassphrase: String?
+    /// Dev harness only: `JBTT_SERVER_PASS` pre-seeds it (the GUI twin of the CLI's `--server-pass`) so a
+    /// headless profiling run neither shows the update explainer nor touches the Keychain. Never logged.
+    private(set) static var cachedPassphrase: String? = {
+        let env = ProcessInfo.processInfo.environment["JBTT_SERVER_PASS"] ?? ""
+        return env.isEmpty ? nil : env
+    }()
 
     private static var baseQuery: [String: Any] {
         [

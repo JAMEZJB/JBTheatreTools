@@ -120,15 +120,34 @@ public static class Theme
     }
 
     /// <summary>A font from the house scale. <paramref name="semibold"/> picks weight 600 via the real
-    /// Segoe UI Semibold family, falling back to synthetic bold only where that family is absent.</summary>
-    public static Font Ui(float pt, bool semibold = false)
+    /// Segoe UI Semibold family, falling back to synthetic bold only where that family is absent.
+    /// With <paramref name="dpi"/> the font is built in DEVICE PIXELS for that DPI (pt × dpi / 72), so it
+    /// renders at the right size on whichever monitor its control is on and can be rebuilt idempotently
+    /// on a DPI change. Without it the font is in points, which GDI sizes at the SYSTEM DPI — right on the
+    /// launch monitor only (fine for the one-shot Settings dialog).</summary>
+    public static Font Ui(float pt, bool semibold = false, int dpi = 0)
     {
+        float size = dpi > 0 ? pt * dpi / 72f : pt;
+        var unit = dpi > 0 ? GraphicsUnit.Pixel : GraphicsUnit.Point;
         if (semibold && SemiBold != null)
         {
-            try { return new Font(SemiBold, pt); } catch { /* fall through */ }
+            try { return new Font(SemiBold, size, FontStyle.Regular, unit); } catch { /* fall through */ }
         }
-        return new Font("Segoe UI", pt, semibold ? FontStyle.Bold : FontStyle.Regular);
+        return new Font("Segoe UI", size, semibold ? FontStyle.Bold : FontStyle.Regular, unit);
     }
+
+    // ── DPI ───────────────────────────────────────────────────────────────────────────────────────
+    // Every hard-coded layout number in the WinForms UI is a 96-DPI design value — the same number the
+    // macOS build uses in points — passed through Px() at the owning control's DeviceDpi before use. The
+    // process is Per-Monitor V2 aware (csproj <ApplicationHighDpiMode>), so DeviceDpi is the DPI of the
+    // monitor the window is on and can change at runtime; the custom controls re-derive geometry + fonts
+    // from it (their Rescale) instead of leaning on the framework's one-shot AutoScale pass, which never
+    // reaches controls created later (rows, section headers) or the layout code that runs on resize.
+
+    /// <summary>Scales a 96-DPI design value to device pixels at <paramref name="dpi"/>.</summary>
+    public static int Px(int v, int dpi) => (int)Math.Round(v * dpi / 96.0);
+    /// <summary>Float variant, for pen widths and sub-pixel glyph geometry.</summary>
+    public static float Pxf(float v, int dpi) => v * dpi / 96f;
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);

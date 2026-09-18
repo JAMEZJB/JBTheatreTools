@@ -83,7 +83,9 @@ enum InstallGuard {
 ///
 /// macOS assets are `.zip` files containing a `.app`. Install = extract → move the `.app` into
 /// the apps dir → record the version in a JSON manifest. Launch = `open` the bundle.
-final class InstallManager {
+/// `@unchecked Sendable`: `AppState.install` runs the extract+move on a detached task so a 300 MB `ditto`
+/// never blocks the main thread; the manifest is lock-guarded and the rest is per-call local state.
+final class InstallManager: @unchecked Sendable {
     static let shared = InstallManager()
 
     private let fm = FileManager.default
@@ -149,9 +151,15 @@ final class InstallManager {
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let data = try? enc.encode(m) { try? data.write(to: manifestURL) }
         manifestLock.lock()
+        // Invalidate only the slots whose record actually changed (path or version) — wiping every entry made
+        // the next render re-stat all 21 installed paths on the main thread after each install.
+        let old = manifestCache ?? [:]
+        for key in Set(old.keys).union(m.keys)
+        where old[key]?.path != m[key]?.path || old[key]?.version != m[key]?.version {
+            resolvedPath[key] = nil; resolvedPathDone.remove(key)
+            resolvedName[key] = nil; resolvedNameDone.remove(key)
+        }
         manifestCache = m                       // keep the in-memory copy in sync
-        resolvedPath.removeAll(); resolvedPathDone.removeAll()   // installs/removals change what's on disk
-        resolvedName.removeAll(); resolvedNameDone.removeAll()
         manifestLock.unlock()
     }
 

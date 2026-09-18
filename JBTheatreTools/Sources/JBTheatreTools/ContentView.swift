@@ -6,6 +6,17 @@ struct Hairline: View {
     var body: some View { Rectangle().fill(Color.jbLine).frame(height: 1) }
 }
 
+/// `AppState` handed to row/tile views through a plain environment KEY (not `@EnvironmentObject`): reading it
+/// this way does NOT subscribe the view to the model's publishes, so a structural publish (order, visibility,
+/// header counts) no longer re-runs all 21 row bodies. Rows observe only their own `Row` object.
+private struct AppStateKey: EnvironmentKey { static let defaultValue: AppState? = nil }
+extension EnvironmentValues {
+    var appState: AppState? {
+        get { self[AppStateKey.self] }
+        set { self[AppStateKey.self] = newValue }
+    }
+}
+
 /// User-selectable window appearance. `.system` follows macOS.
 enum AppAppearance: String, CaseIterable, Identifiable {
     case system, light, dark
@@ -95,7 +106,8 @@ struct ContentView: View {
     @State private var downloadingAll = false
 
     var body: some View {
-        VStack(spacing: 0) {
+        LoopWatch.mark("ContentView.body")
+        return VStack(spacing: 0) {
             header
             Hairline()
             content
@@ -134,38 +146,41 @@ struct ContentView: View {
             }
             Spacer()
             if state.hasVisibleRows {
-                Picker("View", selection: $viewMode) {
-                    ForEach(AppViewMode.allCases) { mode in
-                        Image(systemName: mode.symbol).help(mode.label).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-                .help("Switch between list and grid view")
+                JBSegmented(segments: AppViewMode.allCases.map {
+                                JBSegmented.Segment(id: $0, symbol: $0.symbol, help: $0.label) },
+                            selection: $viewMode)
+                    .fixedSize()
+                    .help("Switch between list and grid view")
             }
-            if state.hasVisibleRows, state.hasCredentials, state.hasAnyToDownload(includeFull: false) {
+            if state.hasVisibleRows, state.hasCredentials,
+               state.updatesAvailable > 0 || state.hasAnyToDownload(includeFull: false) {
+                let updates = state.updatesAvailable
                 Menu {
-                    if state.updatesAvailable > 0 {
+                    if updates > 0 {
                         Button {
                             Task { await updateAllAction() }
-                        } label: { Label("Update all (\(state.updatesAvailable))", systemImage: "arrow.up.circle") }
+                        } label: { Label("Update \(updates) installed app\(updates == 1 ? "" : "s") — incl. Full editions", systemImage: "arrow.up.circle") }
                         Divider()
                     }
                     Button {
                         Task { await downloadAllAction(includeFull: false) }
-                    } label: { Label("Download all apps", systemImage: "square.and.arrow.down") }
+                    } label: { Label("Install every app", systemImage: "square.and.arrow.down") }
                     if state.hasFullVariants {
                         Button {
                             Task { await downloadAllAction(includeFull: true) }
-                        } label: { Label("Download all — including Full editions", systemImage: "square.and.arrow.down.on.square") }
+                        } label: { Label("Install every app — plus the Full editions", systemImage: "square.and.arrow.down.on.square") }
                     }
                 } label: {
-                    if downloadingAll || updatingAll { ProgressView().controlSize(.small) }
-                    else { Label("Download All", systemImage: "arrow.down.circle.fill") }
+                    // A plain HStack, not `Label`/`ProgressView`: the borderless popup renders those blank.
+                    HStack(spacing: 5) {
+                        Image(systemName: updates > 0 ? "arrow.up.circle.fill" : "arrow.down.circle.fill")
+                        if downloadingAll { Text("Installing…") }
+                        else if updatingAll { Text("Updating…") }
+                        else if updates > 0 { Text("Update All (\(updates))") }
+                        else { Text("Download All") }
+                    }
                 }
-                .menuStyle(.button)
-                .buttonStyle(.borderedProminent)
+                .jbMenuPill(.primary)
                 .fixedSize()
                 .disabled(downloadingAll || updatingAll || refreshing)
                 .help("Install or update every app in one go")
@@ -176,10 +191,12 @@ struct ContentView: View {
                 if refreshing { ProgressView().controlSize(.small) }
                 else { Label("Refresh", systemImage: "arrow.clockwise") }
             }
+            .buttonStyle(.jbSecondary)
             .disabled(refreshing || updatingAll || !state.hasCredentials)
             Button { showSettings = true } label: {
                 Label("Settings", systemImage: "gearshape")
             }
+            .buttonStyle(.jbSecondary)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -233,7 +250,11 @@ struct ContentView: View {
                         if !state.isCollapsed(group.key) {
                             LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 12)],
                                       alignment: .leading, spacing: 12) {
-                                ForEach(group.rows) { row in AppGridTile(row: row) }
+                                ForEach(group.rows) { row in
+                                    AppGridTile(row: row, isPinned: state.isPinned(row.id),
+                                                selectedVariantId: state.selectedVariantId(row.app))
+                                        .equatable()
+                                }
                             }
                         }
                     }
@@ -307,6 +328,9 @@ struct ContentView: View {
         guard updateMode == .everyLaunch, !refreshing else { return }
         if state.hasCredentials { await refreshAll() }
         await state.checkLauncherUpdate()
+        // Dev perf harness only: JBTT_AUTO_DOWNLOAD_ALL=1 runs Download All straight after the first refresh so
+        // a profiler (`sample`) can capture a whole run headlessly. Never set on a normal launch.
+        if ProcessInfo.processInfo.environment["JBTT_AUTO_DOWNLOAD_ALL"] == "1" { await downloadAllAction(includeFull: false) }
     }
 
     private func refreshAll() async {
@@ -331,15 +355,19 @@ struct ContentView: View {
 /// A small 2×3 dotted drag handle (the "grip"), shown on row hover — grab it to reorder.
 struct DragGrip: View {
     var body: some View {
-        VStack(spacing: 3) {
-            ForEach(0..<3, id: \.self) { _ in
-                HStack(spacing: 3) {
-                    Circle().frame(width: 3, height: 3)
-                    Circle().frame(width: 3, height: 3)
+        GripDots().fill(Color.selectorBlue).frame(width: 9, height: 15)
+    }
+    /// The 2×3 dot grid as ONE shape (one drawing view) rather than six `Circle`s.
+    private struct GripDots: Shape {
+        func path(in r: CGRect) -> Path {
+            var p = Path()
+            for row in 0..<3 {
+                for col in 0..<2 {
+                    p.addEllipse(in: CGRect(x: r.minX + CGFloat(col) * 6, y: r.minY + CGFloat(row) * 6, width: 3, height: 3))
                 }
             }
+            return p
         }
-        .foregroundStyle(Color.selectorBlue)
     }
 }
 
@@ -515,7 +543,9 @@ struct ReorderableList: View {
     @ViewBuilder
     private func rowView(_ id: String) -> some View {
         if let row = state.rows.first(where: { $0.id == id }) {
-            AppRowView(row: row, cursor: cursor, draggingId: $draggingId, order: $order)
+            AppRowView(row: row, cursor: cursor, draggingId: $draggingId, order: $order,
+                       isPinned: state.isPinned(id), selectedVariantId: state.selectedVariantId(row.app))
+                .equatable()   // body runs only when `row` publishes or these inputs change
                 .background(
                     GeometryReader { geo in
                         Color.clear.preference(key: RowFrameKey.self, value: [id: geo.frame(in: .global)])
@@ -739,50 +769,107 @@ struct FloatingCard: View {
 /// starts the drag: the floating card follows the cursor, this row becomes a dashed placeholder, and the
 /// other rows slide aside — driven by reordering a LOCAL array, so there's no shared-state churn and it
 /// stays smooth. The order is committed to the model on drop.
-struct AppRowView: View {
-    @EnvironmentObject var state: AppState
-    let row: AppState.Row
+struct AppRowView: View, Equatable {
+    @Environment(\.appState) private var appState
+    private var state: AppState { appState! }
+    @ObservedObject var row: AppState.Row
     let cursor: DragCursor
     @Binding var draggingId: String?
     @Binding var order: DragGroupOrder?
+    /// Read in the body but owned by AppState — passed as inputs so a pin / variant change re-runs the body
+    /// (via `==`) while unrelated publishes don't.
+    let isPinned: Bool
+    let selectedVariantId: String?
+
+    /// Only these decide whether a PARENT re-render needs this row's body; the row's own `@ObservedObject`
+    /// publishes (busy/status/installed…) still re-render it regardless.
+    static func == (a: AppRowView, b: AppRowView) -> Bool {
+        a.row === b.row && a.cursor === b.cursor && a.isPinned == b.isPinned && a.selectedVariantId == b.selectedVariantId
+    }
     @State private var hovering = false
     @State private var confirmingUninstall = false
 
     private var isDragging: Bool { draggingId == row.id }
 
+    /// Dev A/B switch (`JBTT_NO_RASTER=1`): keeps rows as live views for profiling comparisons.
+    private static let rasterDisabled = ProcessInfo.processInfo.environment["JBTT_NO_RASTER"] == "1"
+
     var body: some View {
-        HStack(alignment: .center, spacing: 11) {
-            grip
+        // On macOS, SwiftUI backs every Text, image and filled shape with its own NSView, and AppKit walks
+        // and re-lays-out the window's whole view tree on every commit and every scroll step. Twenty-one
+        // rows × ~18 views made scrolling, dragging and each install completion stutter. So the row's
+        // content (`core`) is rasterised into ONE Metal layer (`drawingGroup`) — and `core` depends only on
+        // the row's model state, so it re-renders on an install/status change and never on pointer traffic.
+        // Everything the pointer drives — hover wash, grip dots, the live ⋯ menu (an AppKit popup, which
+        // cannot live inside a drawing group), hairline, drag placeholder, download bar — is layered OUTSIDE
+        // the group, so hovering a row costs a few tiny views and no re-rasterisation.
+        Group {
+            if Self.rasterDisabled { core } else { core.drawingGroup() }
+        }
+        .opacity(isDragging ? 0 : 1)
+        .background {
+            if hovering && !isDragging {
+                RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous).fill(Color.jbRowHover)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            Color.jbLine
+                .frame(height: 1)
+                .padding(.leading, 57)
+                .padding(.trailing, 10)
+                .opacity(hovering || isDragging ? 0 : 1)
+        }
+        .overlay(alignment: .leading) { gripOverlay }
+        .overlay(alignment: .trailing) {
+            if hovering && !isDragging { liveMenu.padding(.trailing, 10) }
+        }
+        // The download bar is an OVERLAY on the row, not a child of the info column: inserting it into the
+        // layout changed the row's height, which re-laid-out every row below it. It ticks ~12×/s, so it
+        // must also stay outside the rasterised core.
+        .overlay(alignment: .bottomLeading) {
+            if row.busy {
+                RowProgressBar(id: row.id)
+                    .frame(width: 240)
+                    .padding(.leading, 86)
+                    .padding(.bottom, 3)
+            }
+        }
+        .overlay { if isDragging { dropSlot } }
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .modifier(ErrorHelp(message: row.errorMessage))   // tooltips don't reach into the drawing group
+        .confirmationDialog("Uninstall \(row.displayName)?",
+                            isPresented: $confirmingUninstall, titleVisibility: .visible) {
+            Button("Uninstall", role: .destructive) { Task { await state.uninstallAsync(row.id) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the installed app from your Mac. You can reinstall it anytime.")
+        }
+    }
+
+    /// Everything the row draws from its MODEL state: grip slot · icon · text column · status pill · actions.
+    /// No pointer-dependent state is read here (see `body`), and no AppKit-backed control lives here.
+    private var core: some View {
+        let _ = LoopWatch.mark("row.core \(row.id)")
+        return HStack(alignment: .center, spacing: 11) {
+            Color.clear.frame(width: 16)   // the grip's slot; the dots + gesture are layered over it
             AppIconImage(id: row.id, displayName: row.displayName, size: 38)
             infoColumn
             Spacer(minLength: 8)
             statusBadge
             actions
         }
-        .opacity(isDragging ? 0 : 1)
         .padding(.vertical, 9)
         .padding(.horizontal, 10)
         .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
-                .fill(hovering && !isDragging ? Color.jbRowHover : Color.clear)
-        )
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.jbLine)
-                .frame(height: 1)
-                .padding(.leading, 57)
-                .padding(.trailing, 10)
-                .opacity(hovering || isDragging ? 0 : 1)
-        }
-        .overlay { if isDragging { dropSlot } }
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
-        .confirmationDialog("Uninstall \(row.displayName)?",
-                            isPresented: $confirmingUninstall, titleVisibility: .visible) {
-            Button("Uninstall", role: .destructive) { state.uninstall(row.id) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This removes the installed app from your Mac. You can reinstall it anytime.")
+    }
+
+    /// Attaches the error message as a tooltip only when there is one (an unconditional `.help("")` would
+    /// register an empty tooltip on every row).
+    private struct ErrorHelp: ViewModifier {
+        let message: String?
+        func body(content: Content) -> some View {
+            if let message { content.help(message) } else { content }
         }
     }
 
@@ -796,14 +883,17 @@ struct AppRowView: View {
             .padding(.vertical, 1)
     }
 
-    /// Grip handle: fades in on hover, and carries the reorder `DragGesture`. On macOS a click-drag doesn't
-    /// scroll (scrolling is wheel/trackpad), so a plain gesture here doesn't fight the ScrollView.
-    private var grip: some View {
-        DragGrip()
+    /// Grip handle, layered over the row's leading slot: the dots appear on hover, and the (constant) hit
+    /// frame carries the reorder `DragGesture`. On macOS a click-drag doesn't scroll (scrolling is
+    /// wheel/trackpad), so a plain gesture here doesn't fight the ScrollView.
+    private var gripOverlay: some View {
+        Color.clear
             .frame(width: 16)
-            .opacity(hovering || isDragging ? 0.85 : 0.0)
+            .frame(maxHeight: .infinity)
+            .overlay { if hovering || isDragging { DragGrip().opacity(0.85) } }
             .contentShape(Rectangle())
             .gesture(reorderGesture)
+            .padding(.leading, 10)
             .help("Drag to reorder")
     }
 
@@ -867,7 +957,7 @@ struct AppRowView: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
                 Text(row.displayName).font(JBFont.bodyStrong).foregroundStyle(Color.jbText).lineLimit(1)
-                if state.isPinned(row.id) {
+                if isPinned {
                     Image(systemName: "pin.fill").font(.system(size: 9)).foregroundStyle(Color.selectorBlue)
                 }
             }
@@ -875,11 +965,6 @@ struct AppRowView: View {
             versionLine
             whatsNewLine
             variantToggle
-            if row.busy {
-                ProgressView(value: row.progress)
-                    .frame(maxWidth: 240)
-                    .controlSize(.small)
-            }
         }
     }
 
@@ -897,7 +982,7 @@ struct AppRowView: View {
     /// apps that ship variants (each variant is its own install; the toggle picks which one is shown).
     private var installedText: String {
         guard let v = row.installed else { return "—" }
-        if let variant = state.selectedVariantLabel(row.app) { return "\(v) (\(variant))" }
+        if row.app.hasVariants, let variant = row.app.variantLabel(selectedVariantId) { return "\(v) (\(variant))" }
         return v
     }
 
@@ -905,18 +990,13 @@ struct AppRowView: View {
     @ViewBuilder
     private var variantToggle: some View {
         if row.app.hasVariants, let vs = row.app.variants {
-            Picker("", selection: Binding(
-                get: { state.selectedVariantId(row.app) ?? vs.first?.id ?? "" },
-                set: { state.setVariant(row.id, $0) }
-            )) {
-                ForEach(vs) { Text($0.label).tag($0.id) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.mini)
-            .fixedSize()
-            .tint(.selectorBlue)
-            .disabled(row.busy)
+            JBSegmented(segments: vs.map { JBSegmented.Segment(id: $0.id, label: $0.label) },
+                        selection: Binding(
+                            get: { selectedVariantId ?? vs.first?.id ?? "" },
+                            set: { state.setVariant(row.id, $0) }),
+                        compact: true)
+                .fixedSize()
+                .disabled(row.busy)
         }
     }
 
@@ -945,7 +1025,7 @@ struct AppRowView: View {
     private var statusBadge: some View {
         switch row.status {
         case .checking:
-            ProgressView().controlSize(.small)
+            badge("Checking…", color: .jbText3)   // the header's Refresh spinner is the one live indicator
         case .upToDate:
             badge("Up to date", color: .jbOk)
         case .updateAvailable:
@@ -998,15 +1078,27 @@ struct AppRowView: View {
         .controlSize(.small)
     }
 
-    /// Overflow menu: pin/hide/reorder, pick a variant, install a specific (older) version, or uninstall.
+    /// The ⋯ glyph drawn in the rasterised core for every row. The REAL menu (`liveMenu`) is layered exactly
+    /// over it while the row is hovered — the same glyph, same size — so the swap is invisible.
     private var rowMenu: some View {
+        Image(systemName: "ellipsis.circle")
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Color.selectorBlue)
+            .padding(2)
+            .opacity(row.busy ? 0.45 : 1)
+            .help("Variant, reorder, other versions & uninstall")
+    }
+
+    /// Overflow menu: pin/hide/reorder, pick a variant, install a specific (older) version, or uninstall.
+    /// An AppKit popup underneath, so it exists only for the hovered row (one in the list, not 21) and is
+    /// built fresh on hover — its labels (Pin/Unpin, Move Up/Down…) are always current when it opens.
+    private var liveMenu: some View {
         Menu {
             AppMenuButtons(row: row, requestUninstall: { confirmingUninstall = true })
         } label: {
             Image(systemName: "ellipsis.circle")
         }
-        .menuStyle(.borderlessButton)
-        .tint(.selectorBlue)   // house rule 21: selectors/menus are slate-blue, not the purple accent
+        .jbMenuPill(.icon)   // house rule 21: selectors/menus are slate-blue, not the purple accent
         .fixedSize()
         .disabled(row.busy)
         .help("Variant, reorder, other versions & uninstall")
@@ -1016,14 +1108,33 @@ struct AppRowView: View {
         Button(title) {
             Task { await state.install(row.id) }
         }
-        .buttonStyle(.borderedProminent)
+        .buttonStyle(.jbPrimary)
         .disabled(row.busy || row.latestAssetId == nil)
     }
 
     private var launchButton: some View {
         Button("Launch") { state.launch(row.id) }
-            .buttonStyle(.bordered)
+            .buttonStyle(.jbSecondary)
             .disabled(row.busy)
+    }
+}
+
+/// A row's download progress bar. Observes ONLY `ProgressHub`, so a progress tick re-renders this bar and nothing
+/// else (the rows array — and with it every row + the header — is untouched by progress).
+struct RowProgressBar: View {
+    @EnvironmentObject var hub: ProgressHub
+    let id: String
+    var body: some View {
+        // Drawn in SwiftUI rather than `ProgressView(value:)` (an AppKit NSProgressIndicator): there is no
+        // hosted control to lay out or measure, and the fill scales from the leading edge so the bar takes
+        // whatever width its container gives it — no GeometryReader.
+        let fraction = min(max(hub.progress[id] ?? 0, 0), 1)
+        Capsule().fill(Color.jbLine)
+            .overlay(alignment: .leading) {
+                Rectangle().fill(Color.jbAccent).scaleEffect(x: fraction, y: 1, anchor: .leading)
+            }
+            .clipShape(Capsule())
+            .frame(height: 4)
     }
 }
 
@@ -1040,9 +1151,44 @@ struct AppIconImage: View {
     private static let iconCache = NSCache<NSString, NSImage>()
     private static func installedIcon(_ path: String) -> NSImage {
         if let hit = iconCache.object(forKey: path as NSString) { return hit }
-        let img = NSWorkspace.shared.icon(forFile: path)
+        LoopWatch.mark("icon miss \(path)")
+        let img = thumbnail(NSWorkspace.shared.icon(forFile: path))
         iconCache.setObject(img, forKey: path as NSString)
         return img
+    }
+
+    /// Icons are cached as a fixed 128 px bitmap (enough for the 52 pt grid tile @2x). Caching the ORIGINAL
+    /// (a 512 px PNG, or an NSWorkspace icon with reps up to 1024 px) meant every redraw of every row
+    /// resampled a large image down to 38–52 pt with high interpolation. Rendered via a bitmap context so it's
+    /// safe to run off the main thread (prewarm).
+    private static func thumbnail(_ img: NSImage, px: Int = 128) -> NSImage {
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px, bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return img }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ctx
+        ctx.imageInterpolation = .high
+        img.draw(in: NSRect(x: 0, y: 0, width: px, height: px), from: .zero, operation: .copy, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+        let out = NSImage(size: NSSize(width: px, height: px))
+        out.addRepresentation(rep)
+        return out
+    }
+
+    /// After an install/update: drop any stale entry for that bundle path and resolve the fresh icon here
+    /// (called from the detached install task), so the first post-install render finds it cached instead of
+    /// running NSWorkspace.icon(forFile:) + the thumbnail on the main thread at the row flip.
+    static func refreshInstalledIcon(_ path: String) {
+        iconCache.removeObject(forKey: path as NSString)
+        _ = installedIcon(path)
+    }
+
+    /// Fills both caches off the main thread at boot (called from `AppState.init` via a detached task), so the
+    /// first frame never blocks on icon resolution.
+    static func prewarm(paths: [String], ids: [String]) {
+        for p in paths { _ = installedIcon(p) }
+        for id in ids { _ = bundledIcon(id) }
     }
 
     var body: some View {
@@ -1073,7 +1219,8 @@ struct AppIconImage: View {
     static func bundledIcon(_ id: String) -> NSImage? {
         if let hit = bundledCache.object(forKey: id as NSString) { return hit }
         guard let url = Bundle.main.url(forResource: id, withExtension: "png"),
-              let img = NSImage(contentsOf: url) else { return nil }
+              let raw = NSImage(contentsOf: url) else { return nil }
+        let img = thumbnail(raw)
         bundledCache.setObject(img, forKey: id as NSString)
         return img
     }
@@ -1083,7 +1230,7 @@ struct AppIconImage: View {
 /// pin/hide/reorder, pick a variant (Standard/Full), install a specific version, Dock/alias, uninstall.
 struct AppMenuButtons: View {
     @EnvironmentObject var state: AppState
-    let row: AppState.Row
+    @ObservedObject var row: AppState.Row
     /// Called when the user picks Uninstall — the host view shows its own confirmation dialog.
     var requestUninstall: () -> Void
 
@@ -1146,9 +1293,16 @@ struct AppMenuButtons: View {
 /// One tile in the grid view: a large icon + name and a compact status line, on a raised card. A click
 /// launches the app (if installed) or installs it; the full action set lives in the right-click menu.
 /// Dragging a tile lifts a card and reorders it within its pin group on drop (the drop target highlights).
-struct AppGridTile: View {
-    @EnvironmentObject var state: AppState
-    let row: AppState.Row
+struct AppGridTile: View, Equatable {
+    @Environment(\.appState) private var appState
+    private var state: AppState { appState! }
+    @ObservedObject var row: AppState.Row
+    let isPinned: Bool
+    let selectedVariantId: String?
+
+    static func == (a: AppGridTile, b: AppGridTile) -> Bool {
+        a.row === b.row && a.isPinned == b.isPinned && a.selectedVariantId == b.selectedVariantId
+    }
     @State private var hovering = false
     @State private var isDropTarget = false
     @State private var confirmingUninstall = false
@@ -1178,14 +1332,14 @@ struct AppGridTile: View {
                 .strokeBorder(hovering ? Color.jbLineStrong : Color.jbLine)
         )
         .overlay(alignment: .topTrailing) {
-            if state.isPinned(row.id) {
+            if isPinned {
                 Image(systemName: "pin.fill").font(.system(size: 9))
                     .foregroundStyle(Color.selectorBlue).padding(8)
             }
         }
         .overlay(alignment: .bottom) {
             if row.busy {
-                ProgressView(value: row.progress).controlSize(.small)
+                RowProgressBar(id: row.id)
                     .padding(.horizontal, 12).padding(.bottom, 8)
             }
         }
@@ -1216,7 +1370,7 @@ struct AppGridTile: View {
         .contextMenu { AppMenuButtons(row: row, requestUninstall: { confirmingUninstall = true }) }
         .confirmationDialog("Uninstall \(row.displayName)?",
                             isPresented: $confirmingUninstall, titleVisibility: .visible) {
-            Button("Uninstall", role: .destructive) { state.uninstall(row.id) }
+            Button("Uninstall", role: .destructive) { Task { await state.uninstallAsync(row.id) } }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This removes the installed app from your Mac. You can reinstall it anytime.")
@@ -1236,7 +1390,7 @@ struct AppGridTile: View {
 
     @ViewBuilder
     private var statusCaption: some View {
-        let variant = state.selectedVariantLabel(row.app)
+        let variant = row.app.hasVariants ? row.app.variantLabel(selectedVariantId) : nil
         Text(captionText(variant: variant))
             .font(JBFont.label)
             .foregroundStyle(captionColor)
@@ -1274,7 +1428,7 @@ struct AppGridTile: View {
         var t = row.displayName
         if let v = row.installed {
             t += " — installed \(v)"
-            if let vl = state.selectedVariantLabel(row.app) { t += " (\(vl))" }
+            if row.app.hasVariants, let vl = row.app.variantLabel(selectedVariantId) { t += " (\(vl))" }
         } else if row.status == .notInstalled {
             t += " — click to install"
         }

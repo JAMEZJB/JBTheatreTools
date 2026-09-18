@@ -8,11 +8,14 @@ import Security
 /// different build than the one that saved the token → the OS will prompt". We gate the explainer
 /// on a change in this value. Falls back to the build number if the cdhash can't be read.
 enum CodeIdentity {
-    static func current() -> String {
+    /// Computed once per process — the running binary's identity can't change, and this was being re-derived
+    /// (three Security-framework calls on the main actor) on every install and refresh via stampCodeIdentity.
+    private static let cached: String = {
         if let hash = cdHash() { return "cdhash:" + hash }
         let build = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "0"
         return "build:" + build
-    }
+    }()
+    static func current() -> String { cached }
 
     private static func cdHash() -> String? {
         var selfCode: SecCode?

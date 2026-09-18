@@ -12,12 +12,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct JBTheatreToolsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var state = AppState()
+    /// A plain stored property, NOT `@StateObject`: the App struct lives for the whole process, so the model
+    /// needs no SwiftUI ownership — and `@StateObject` would subscribe the App's body to every AppState
+    /// publish, re-creating `ContentView` (an `@self` change) and rendering the list a second time per event.
+    private let state = AppState()
 
     var body: some Scene {
         WindowGroup("JB Theatre Tools") {
             ContentView()
                 .environmentObject(state)
+                .environmentObject(state.progressHub)
+                .environment(\.appState, state)
         }
         .windowResizability(.contentSize)
     }

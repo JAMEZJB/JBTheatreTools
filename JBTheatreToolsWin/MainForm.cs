@@ -20,6 +20,21 @@ public sealed class MainForm : Form
     private readonly Label _title = new();
     private readonly Label _subtitle = new();
     private readonly Label _credit = new();
+    private readonly Panel _header = new();
+    private readonly Panel _footer = new();
+    private readonly Button _updateBtn = new();
+    private readonly Button _tokenBtn = new();
+
+    // DPI: every pixel number in this form is a 96-DPI design value scaled through S() at the form's
+    // DeviceDpi (Theme.Px); the house-font labels are built in device pixels for the same DPI. The
+    // framework's AutoScale pass is switched OFF (AutoScaleMode.None) so there is exactly one source of
+    // truth — RescaleChrome/RescaleAll — which also runs on a Per-Monitor V2 DPI change.
+    private int _chromeDpi;
+    private readonly List<Font> _chromeFonts = new();
+    private int S(int v) => Theme.Px(v, DeviceDpi);
+    /// <summary>Width the list's rows / section headers stretch to (the list's client width less its
+    /// padding and a little air for the scrollbar).</summary>
+    private int ListInnerWidth => _list.ClientSize.Width - S(30);
 
     // Tray support for the "keep running" close behaviour.
     private readonly NotifyIcon _tray = new();
@@ -52,8 +67,8 @@ public sealed class MainForm : Form
     public MainForm()
     {
         Text = "JB Theatre Tools";
-        ClientSize = new Size(680, 520);
-        MinimumSize = new Size(560, 440);
+        AutoScaleMode = AutoScaleMode.None;   // see the DPI note on the fields above
+        ClientSize = new Size(S(680), S(520));
         StartPosition = FormStartPosition.CenterScreen;
         TryLoadIcon();
 
@@ -77,7 +92,6 @@ public sealed class MainForm : Form
         _list.FlowDirection = FlowDirection.TopDown;
         _list.WrapContents = false;
         _list.AutoScroll = true;
-        _list.Padding = new Padding(10);
         // Double-buffer the panel so the live drag-reorder reflow doesn't flicker.
         typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
             ?.SetValue(_list, true);
@@ -87,6 +101,7 @@ public sealed class MainForm : Form
 
         Controls.Add(root);
 
+        RescaleChrome();   // fonts, heights, paddings and fixed positions from the DPI (before the rows measure the list)
         LoadCatalog();
         ApplyTheme();
         SetupTray();
@@ -107,19 +122,16 @@ public sealed class MainForm : Form
 
     private Control BuildHeader()
     {
-        var header = new Panel { Dock = DockStyle.Fill, Height = 64, Padding = new Padding(14, 10, 14, 10) };
+        var header = _header;
+        header.Dock = DockStyle.Fill;   // height, padding and the label positions come from RescaleChrome
 
         _title.Text = "JB Theatre Tools";
-        _title.Font = Theme.Ui(Theme.PtTitle, semibold: true);   // t-title 15px/600
         _title.AutoSize = true;
-        _title.Location = new Point(14, 10);
         _title.UseMnemonic = false;   // render a literal "&" (none here today, but future-proof)
 
         // UseMnemonic=false so the literal "&" shows (default true eats "& " as an Alt-mnemonic prefix).
         _subtitle.Text = "Install, update & launch the JB tool suite";
-        _subtitle.Font = Theme.Ui(Theme.PtSmall);   // t-small 12px
         _subtitle.AutoSize = true;
-        _subtitle.Location = new Point(14, 36);
         _subtitle.UseMnemonic = false;
 
         _refresh.Text = "Refresh";
@@ -145,29 +157,33 @@ public sealed class MainForm : Form
         _settingsBtn.Click += (_, _) => OpenSettings();
 
         header.Controls.AddRange(new Control[] { _title, _subtitle, _downloadAll, _viewToggle, _refresh, _settingsBtn });
-        header.Resize += (_, _) =>
-        {
-            _settingsBtn.Location = new Point(header.Width - _settingsBtn.Width - 14, 16);
-            _refresh.Location = new Point(_settingsBtn.Left - _refresh.Width - 8, 16);
-            _viewToggle.Location = new Point(_refresh.Left - _viewToggle.Width - 8, 16);
-            _downloadAll.Location = new Point(_viewToggle.Left - _downloadAll.Width - 8, 16);
-        };
+        header.Resize += (_, _) => LayoutHeaderButtons();
         return header;
+    }
+
+    /// <summary>Right-aligns the header buttons (Settings, Refresh, view toggle, Download All).</summary>
+    private void LayoutHeaderButtons()
+    {
+        int y = S(16);
+        _settingsBtn.Location = new Point(_header.Width - _settingsBtn.Width - S(14), y);
+        _refresh.Location = new Point(_settingsBtn.Left - _refresh.Width - S(8), y);
+        _viewToggle.Location = new Point(_refresh.Left - _viewToggle.Width - S(8), y);
+        _downloadAll.Location = new Point(_viewToggle.Left - _downloadAll.Width - S(8), y);
     }
 
     private Control BuildUpdateBanner()
     {
-        _updateBanner.Dock = DockStyle.Fill;
-        _updateBanner.Height = 44;
+        _updateBanner.Dock = DockStyle.Fill;   // height + positions come from RescaleChrome / LayoutBanner
         _updateBanner.Visible = false;   // colours come from ApplyTheme (the accent wash is theme-dependent)
 
         _updateBannerText.AutoSize = true;
         _updateBannerText.UseMnemonic = false; // render the literal "&" (e.g. "quit & replace") — default true eats it
-        _updateBannerText.Location = new Point(14, 13);
-        _updateBannerText.Font = Theme.Ui(Theme.PtTitle, semibold: true);   // t-status 15px/600
         _updateBanner.Paint += (_, e) => BannerEdge(e, _updateBanner, Theme.Accent);
 
-        var download = new Button { Text = "Download Update", AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+        var download = _updateBtn;
+        download.Text = "Download Update";
+        download.AutoSize = true;
+        download.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         download.Click += async (_, _) =>
         {
             if (_catalog.Self == null) return;
@@ -192,8 +208,19 @@ public sealed class MainForm : Form
 
         _updateBanner.Controls.Add(_updateBannerText);
         _updateBanner.Controls.Add(download);
-        _updateBanner.Resize += (_, _) => download.Location = new Point(_updateBanner.Width - download.Width - 14, 8);
+        _updateBanner.Resize += (_, _) => LayoutBanner(_updateBanner, _updateBannerText, download);
         return _updateBanner;
+    }
+
+    /// <summary>A banner's height and the placement of its text + action button, from the DPI: the text
+    /// sits at (14, 13) and the button right-aligned at y=8 in the 44px design. The height is floored so
+    /// the banner never clips its text if a pixel-rounded font outgrows the scaled height (inert at 100%
+    /// and at the standard scales — a safety net, not the design).</summary>
+    private void LayoutBanner(Panel banner, Label text, Button action)
+    {
+        text.Location = new Point(S(14), S(13));
+        banner.Height = Math.Max(S(44), text.Bottom + S(10));
+        action.Location = new Point(banner.Width - action.Width - S(14), S(8));
     }
 
     /// <summary>Closes a banner the way the kit's `.banner` does: a 40% hairline of the semantic colour
@@ -206,23 +233,23 @@ public sealed class MainForm : Form
 
     private Control BuildTokenBanner()
     {
-        _tokenBanner.Dock = DockStyle.Fill;
-        _tokenBanner.Height = 44;
+        _tokenBanner.Dock = DockStyle.Fill;   // height + positions come from RescaleChrome / LayoutBanner
         // v2 rule 25: this notice is a WARN — orange, never yellow. Colours come from ApplyTheme.
         _tokenBanner.Visible = false;
 
         _tokenBannerText.Text = NoCredsMsg;
         _tokenBannerText.AutoSize = true;
-        _tokenBannerText.Location = new Point(14, 13);
-        _tokenBannerText.Font = Theme.Ui(Theme.PtTitle, semibold: true);   // t-status 15px/600
         _tokenBanner.Paint += (_, e) => BannerEdge(e, _tokenBanner, Theme.Warn);
 
-        var open = new Button { Text = "Open Settings", AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+        var open = _tokenBtn;
+        open.Text = "Open Settings";
+        open.AutoSize = true;
+        open.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         open.Click += (_, _) => OpenSettings();
 
         _tokenBanner.Controls.Add(_tokenBannerText);
         _tokenBanner.Controls.Add(open);
-        _tokenBanner.Resize += (_, _) => open.Location = new Point(_tokenBanner.Width - open.Width - 14, 8);
+        _tokenBanner.Resize += (_, _) => LayoutBanner(_tokenBanner, _tokenBannerText, open);
         return _tokenBanner;
     }
 
@@ -242,19 +269,98 @@ public sealed class MainForm : Form
 
     private Control BuildFooter()
     {
-        var footer = new Panel { Dock = DockStyle.Fill, Height = 28 };
+        var footer = _footer;
+        footer.Dock = DockStyle.Fill;   // height comes from RescaleChrome
         // UseMnemonic=false so the literal "&" renders (default true treats it as an Alt-shortcut
         // prefix, eating the "&" and the following space → a double space).
         _credit.UseMnemonic = false;
         // Rule 28 — the house credit line, carrying the launcher's own version.
         _credit.Text = $"Created by: James Breedon & Claude Code · v{CurrentVersion()}";
-        _credit.Font = Theme.Ui(Theme.PtSmall);   // t-small 12px
         _credit.AutoSize = true;
         _credit.Anchor = AnchorStyles.None;
         footer.Controls.Add(_credit);
-        footer.Resize += (_, _) =>
-            _credit.Location = new Point((footer.Width - _credit.Width) / 2, 5);
+        footer.Resize += (_, _) => LayoutFooter();
         return footer;
+    }
+
+    private void LayoutFooter() => _credit.Location = new Point((_footer.Width - _credit.Width) / 2, S(5));
+
+    // ── DPI ──────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Derives the window chrome — the house fonts, the header / banner / footer heights and
+    /// paddings, the minimum size and every fixed label position — from the form's current DPI. Runs from
+    /// the constructor and again after a DPI change. Heights are the 96-DPI design values scaled, floored
+    /// at what the (pixel-rounded) text actually needs.</summary>
+    private void RescaleChrome()
+    {
+        if (DeviceDpi != _chromeDpi)
+        {
+            _chromeDpi = DeviceDpi;
+            var old = _chromeFonts.ToList();
+            _chromeFonts.Clear();
+            Font F(float pt, bool semibold = false) { var f = Theme.Ui(pt, semibold, _chromeDpi); _chromeFonts.Add(f); return f; }
+            _title.Font = F(Theme.PtTitle, semibold: true);              // t-title 15px/600
+            _subtitle.Font = F(Theme.PtSmall);                           // t-small 12px
+            _updateBannerText.Font = F(Theme.PtTitle, semibold: true);   // t-status 15px/600
+            _tokenBannerText.Font = F(Theme.PtTitle, semibold: true);    // t-status 15px/600
+            _credit.Font = F(Theme.PtSmall);                             // t-small 12px
+            foreach (var f in old) f.Dispose();
+        }
+        MinimumSize = new Size(S(560), S(440));
+        _list.Padding = new Padding(S(10));
+
+        _header.Padding = new Padding(S(14), S(10), S(14), S(10));
+        _title.Location = new Point(S(14), S(10));
+        _subtitle.Location = new Point(S(14), Math.Max(S(36), _title.Bottom + S(5)));   // floors: never overlap / clip
+        _header.Height = Math.Max(S(64), _subtitle.Bottom + S(11));
+        LayoutHeaderButtons();
+
+        LayoutBanner(_updateBanner, _updateBannerText, _updateBtn);
+        LayoutBanner(_tokenBanner, _tokenBannerText, _tokenBtn);
+
+        _footer.Height = S(28);
+        LayoutFooter();
+    }
+
+    /// <summary>Everything on the form from the current DPI: the chrome, then every row and section header
+    /// (each re-derives its own fonts + geometry), then the list widths.</summary>
+    private void RescaleAll()
+    {
+        SuspendLayout();
+        _list.SuspendLayout();
+        try
+        {
+            RescaleChrome();
+            foreach (var r in _rows) r.Rescale();
+            foreach (var h in _headers.Values) h.Rescale();
+            int w = ListInnerWidth;
+            foreach (var h in _headers.Values) h.Width = w;
+            if (_settings.ViewMode != "grid") foreach (var r in _rows) r.Width = w;
+        }
+        finally
+        {
+            _list.ResumeLayout(true);
+            ResumeLayout(true);
+        }
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        // Per-Monitor V2: the window may open on a monitor whose DPI differs from the system DPI the
+        // constructor laid out for (the framework refreshes DeviceDpi at handle creation).
+        if (DeviceDpi != _chromeDpi) RescaleAll();
+    }
+
+    /// <summary>Per-Monitor V2 DPI change (the window crossed to a monitor with different scaling). The
+    /// framework first scales its own controls — the ambient font the buttons/combos inherit, the window
+    /// to the suggested rectangle — then we re-derive everything we own from the new DPI. The rows and
+    /// headers also hear WM_DPICHANGED_AFTERPARENT themselves; running their Rescale twice is harmless
+    /// because it is absolute, not incremental.</summary>
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        RescaleAll();
     }
 
     private void LoadCatalog()
@@ -275,7 +381,7 @@ public sealed class MainForm : Form
         _rows.Clear();
         foreach (var app in _catalog.Apps)
         {
-            var row = new AppRowControl(app) { Width = Math.Max(400, _list.ClientSize.Width - 30) };
+            var row = new AppRowControl(app) { Width = Math.Max(S(400), ListInnerWidth) };
             row.InstallRequested += InstallAsync;
             row.InstallVersionRequested += InstallVersionAsync;
             row.UninstallRequested += Uninstall;
@@ -297,7 +403,6 @@ public sealed class MainForm : Form
             var slot = InstallKey(app);
             var installed = InstallManager.Shared.InstalledVersion(slot);
             row.SetState(installed, null, null, installed != null ? RowStatus.Installed : RowStatus.Unknown);
-            row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(slot));
             row.SetPinned(IsPinned(app.Id));
             // Installed apps are eligible immediately (launchable pre-refresh); not-installed rows stay hidden
             // until a refresh confirms the token can reach them, so inaccessible apps never flash in.
@@ -310,9 +415,16 @@ public sealed class MainForm : Form
         {
             // Section headers are full-width in BOTH modes (in grid a full-width header forces a wrap, so it
             // reads as a section break); grid tiles themselves are fixed-size and don't stretch.
-            foreach (var h in _headers.Values) h.Width = _list.ClientSize.Width - 30;
-            if (_settings.ViewMode == "grid") return;
-            foreach (var r in _rows) r.Width = _list.ClientSize.Width - 30;
+            // Suspended: without it each of the ~27 Width sets ran the FlowLayoutPanel's whole flow engine (and a
+            // scrollbar recompute) — 27 panel layouts per resize tick instead of one (same idiom as RescaleAll).
+            int w = ListInnerWidth;
+            _list.SuspendLayout();
+            try
+            {
+                foreach (var h in _headers.Values) h.Width = w;
+                if (_settings.ViewMode != "grid") foreach (var r in _rows) r.Width = w;
+            }
+            finally { _list.ResumeLayout(true); }
         };
         ApplyRowOrder();
         ApplyViewMode();
@@ -366,7 +478,6 @@ public sealed class MainForm : Form
         // Switch the row to this variant's install slot: re-read what's installed there, then re-resolve.
         var key = InstallKey(row.App);
         row.SetState(InstallManager.Shared.InstalledVersion(key), row.Latest, row.LatestAssetId, row.Status);
-        row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(key));
         RecomputeRow(row);
         Log.Write($"variant for {row.App.Id} → {variantId}");
     }
@@ -374,7 +485,7 @@ public sealed class MainForm : Form
     /// <summary>Re-derives a row's latest-asset id + status from its cached releases (after a variant change).</summary>
     private void RecomputeRow(AppRowControl row)
     {
-        var latest = Versions.Latest(row.Releases);
+        var latest = row.LatestRelease;
         if (latest == null)
         {
             // No cached releases yet (pre-refresh): the row just reflects whether the slot is installed.
@@ -430,7 +541,7 @@ public sealed class MainForm : Form
         foreach (var r in _rows)
         {
             r.SetCompact(grid);
-            if (!grid) r.Width = _list.ClientSize.Width - 30;
+            if (!grid) r.Width = ListInnerWidth;
         }
         _list.ResumeLayout();
         ReindexList();
@@ -531,7 +642,7 @@ public sealed class MainForm : Form
             var header = HeaderFor(key);
             header.Configure(key, title, rows.Count, collapsed, pinnedGroup, Theme.IsDark(_settings.Appearance));
             header.SetMoveEnabled(!pinnedGroup && gi > firstCat, !pinnedGroup && gi < lastCat);
-            header.Width = _list.ClientSize.Width - 30;
+            header.Width = ListInnerWidth;
             header.Visible = true;
             _list.Controls.SetChildIndex(header, idx++);
             used.Add(key);
@@ -624,7 +735,7 @@ public sealed class MainForm : Form
         _dragRow = row;
         row.SetDragPlaceholder(true);
         _dragCard?.Dispose();
-        _dragCard = new DragCardForm(row.CurrentIcon, row.DisplayName, Theme.IsDark(_settings.Appearance));
+        _dragCard = new DragCardForm(row.CurrentIcon, row.DisplayName, Theme.IsDark(_settings.Appearance), row.DeviceDpi);
         _dragCard.MoveTo(Cursor.Position);
         _dragCard.Show();
     }
@@ -713,7 +824,6 @@ public sealed class MainForm : Form
             foreach (var row in _rows)
             {
                 row.SetChecking();
-                row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(InstallKey(row.App)));
             }
 
             var results = await Task.WhenAll(_rows.Select(async row =>
@@ -784,11 +894,13 @@ public sealed class MainForm : Form
     /// date. The per-item Update-all count lives inside the menu, built fresh on each open.</summary>
     private void RefreshDownloadAllButton()
     {
+        int updates = UpdatesAvailable();
         bool show = _rows.Any(WouldShow)
                     && AuthClient.HasCredentials(_settings, _catalog.DownloadServer)
-                    && HasAnyToDownload(false);
+                    && (updates > 0 || HasAnyToDownload(false));
+        _downloadAll.Text = updates > 0 ? $"Update All ({updates})  ▾" : "Download All  ▾";
         _downloadAll.Visible = show;
-        _downloadAll.Location = new Point(_viewToggle.Left - _downloadAll.Width - 8, 16);
+        LayoutHeaderButtons();   // the label width changed
     }
 
     /// <summary>True if any app has a slot to fetch — a not-installed or updatable default slot (and Full
@@ -800,20 +912,20 @@ public sealed class MainForm : Form
     private void ShowDownloadAllMenu()
     {
         var menu = new ContextMenuStrip();
-        int n = _rows.Count(r => r.Status == RowStatus.UpdateAvailable);
+        int n = UpdatesAvailable();
         if (n > 0)
         {
-            var upd = new ToolStripMenuItem($"Update all ({n})");
+            var upd = new ToolStripMenuItem($"Update {n} installed app{(n == 1 ? "" : "s")} — incl. Full editions");
             upd.Click += async (_, _) => await UpdateAllAsync();
             menu.Items.Add(upd);
             menu.Items.Add(new ToolStripSeparator());
         }
-        var all = new ToolStripMenuItem("Download all apps");
+        var all = new ToolStripMenuItem("Install every app");
         all.Click += async (_, _) => await DownloadAllAsync(false);
         menu.Items.Add(all);
         if (HasFullVariants)
         {
-            var full = new ToolStripMenuItem("Download all — including Full editions");
+            var full = new ToolStripMenuItem("Install every app — plus the Full editions");
             full.Click += async (_, _) => await DownloadAllAsync(true);
             menu.Items.Add(full);
         }
@@ -827,7 +939,7 @@ public sealed class MainForm : Form
     /// version. Mirrors the macOS slotsToDownload.</summary>
     private IEnumerable<string?> SlotsToDownload(AppRowControl row, bool includeFull)
     {
-        var latest = Versions.Latest(row.Releases);
+        var latest = row.LatestRelease;
         if (latest == null) yield break;
         var variants = new List<string?> { row.App.HasVariants ? row.App.Variants?.FirstOrDefault()?.Id : null };
         if (includeFull && row.App.Variants != null)
@@ -846,14 +958,10 @@ public sealed class MainForm : Form
     /// asset for this arch.</summary>
     private async Task DownloadAllAsync(bool includeFull)
     {
+        var work = OrderedSlots(_rows.ToList().SelectMany(r => SlotsToDownload(r, includeFull).ToList().Select(v => (r, v))));
+        Log.Write($"download all{(includeFull ? " (incl. Full)" : "")}: {work.Count} slot(s)");
         _downloadAll.Enabled = false;
-        try
-        {
-            foreach (var row in _rows.ToList())
-                foreach (var vid in SlotsToDownload(row, includeFull).ToList())
-                    await InstallSlotAsync(row, null, vid);
-            Log.Write($"download all{(includeFull ? " (incl. Full)" : "")} complete");
-        }
+        try { await RunSlotsAsync(work, "Download All"); }
         finally { _downloadAll.Enabled = true; RefreshDownloadAllButton(); }
     }
 
@@ -868,19 +976,40 @@ public sealed class MainForm : Form
             var installed = InstallManager.Shared.InstalledVersion(slot);
             row.SetReleases(new List<ReleaseInfo>());
             row.SetState(installed, null, null, installed != null ? RowStatus.Installed : RowStatus.Unknown);
-            row.SetResolvedName(InstallManager.Shared.InstalledDisplayName(slot));
             if (installed != null) _eligible.Add(row.App.Id); else _eligible.Remove(row.App.Id);
         }
         ReindexList();
     }
 
+    /// <summary>Installed slots of a row's app (default + every Full edition) whose latest release is newer than
+    /// what's on disk. Update All used to act on <c>Status == UpdateAvailable</c>, which reflects only the
+    /// SELECTED variant — so an installed Full edition was never updated unless its toggle happened to be on.</summary>
+    private IEnumerable<string?> SlotsToUpdate(AppRowControl row)
+    {
+        var latest = row.LatestRelease;
+        if (latest == null) yield break;
+        var variants = new List<string?> { row.App.HasVariants ? row.App.Variants?.FirstOrDefault()?.Id : null };
+        if (row.App.Variants != null) variants.AddRange(row.App.Variants.Skip(1).Select(v => (string?)v.Id));
+        foreach (var vid in variants)
+        {
+            var name = row.App.WindowsAsset(vid);
+            if (name == null || !latest.Assets.Any(a => a.Name == name)) continue;
+            var installed = InstallManager.Shared.InstalledVersion(row.App.InstallKey(vid));
+            if (installed != null && Versions.IsNewer(latest.TagName, installed)) yield return vid;
+        }
+    }
+
+    /// <summary>Count of installed slots (not rows) with an update — drives the "Update All (N)" label.</summary>
+    private int UpdatesAvailable() => _rows.Sum(r => SlotsToUpdate(r).Count());
+
     private async Task UpdateAllAsync()
     {
-        var targets = _rows.Where(r => r.Status == RowStatus.UpdateAvailable).ToList();
-        if (targets.Count == 0) return;
-        Log.Write($"update all: {targets.Count} app(s)");
+        var work = _rows.Select(r => (row: r, slots: SlotsToUpdate(r).ToList())).Where(w => w.slots.Count > 0).ToList();
+        if (work.Count == 0) return;
+        Log.Write($"update all: {work.Sum(w => w.slots.Count)} slot(s) across {work.Count} app(s)");
+        var flat = OrderedSlots(work.SelectMany(w => w.slots.Select(v => (w.row, v))));
         _downloadAll.Enabled = false;
-        try { foreach (var r in targets) await InstallVersionAsync(r, null); }
+        try { await RunSlotsAsync(flat, "Update All"); }
         finally { _downloadAll.Enabled = true; RefreshDownloadAllButton(); }
     }
 
@@ -939,18 +1068,34 @@ public sealed class MainForm : Form
     /// regardless of the row's on-screen selection (used by Download All to fetch Standard and/or Full);
     /// null = the row's selected variant. The row's displayed state is only updated for the SELECTED
     /// variant, so a background Full-edition install doesn't hijack the row's display.</summary>
-    private async Task InstallSlotAsync(AppRowControl row, string? tag, string? variantOverride)
+    /// <summary>Everything phase 1 hands to phase 2: the resolved release/asset and the (verified-later) cache file.</summary>
+    private sealed record Downloaded(AppRowControl Row, GitHubClient Client, ReleaseInfo Rel, ReleaseAsset Asset,
+                                     string Cache, string AssetName, string? VariantId, string? Tag);
+
+    /// <summary>Installs one slot: phase 1 (download) then phase 2 (verify + extract). Returns the exception on
+    /// failure (already recorded on the row + logged), or null. <paramref name="interactive"/> shows the failure
+    /// dialog immediately; batch runs pass false and show ONE summary at the end instead of halting the batch
+    /// on a modal box nobody is there to click.</summary>
+    private async Task<Exception?> InstallSlotAsync(AppRowControl row, string? tag, string? variantOverride, bool interactive = true)
     {
-        var active = AuthClient.Active(_settings, _catalog.DownloadServer);
-        if (active == null) return;
+        var d = await DownloadSlotAsync(row, tag, variantOverride, interactive);
+        return d == null ? null : await InstallDownloadedAsync(d, interactive);
+    }
+
+    /// <summary>Phase 1 — resolve the release/asset and download it into the cache (network-bound). Marks the
+    /// row busy for the whole slot; on failure records it and ends busy. Returns null on failure or a silent skip.</summary>
+    private async Task<Downloaded?> DownloadSlotAsync(AppRowControl row, string? tag, string? variantOverride, bool interactive)
+    {
+        var client = AuthClient.Active(_settings, _catalog.DownloadServer);
+        if (client == null) return null;
         var variantId = variantOverride ?? SelectedVariant(row.App);
         var assetName = row.App.WindowsAsset(variantId);
-        if (assetName == null) return;
+        if (assetName == null) { client.Dispose(); return null; }
 
         row.SetBusy(true);
+        row.SetPhase("Downloading…");
         try
         {
-            using var client = active;
             var releases = row.Releases.Count > 0
                 ? row.Releases
                 : await client.ReleasesAsync(row.App.Owner, row.App.Repo);
@@ -964,6 +1109,27 @@ public sealed class MainForm : Form
             var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{row.App.Id}-{rel.TagName}-{assetName}");
             var progress = new Progress<double>(p => row.SetProgress(p));
             await client.DownloadAssetAsync(row.App.Owner, row.App.Repo, asset.Id, cache, progress);
+            return new Downloaded(row, client, rel, asset, cache, assetName, variantId, tag);
+        }
+        catch (Exception ex)
+        {
+            client.Dispose();
+            FailSlot(row, ex, interactive);
+            row.SetBusy(false);
+            RefreshDownloadAllButton();
+            return null;
+        }
+    }
+
+    /// <summary>Phase 2 — verify (size + signed SHA256SUMS + hash), extract/copy off the UI thread, reflect it in
+    /// the row. Always ends the row's busy state and disposes the client.</summary>
+    private async Task<Exception?> InstallDownloadedAsync(Downloaded d, bool interactive)
+    {
+        var (row, rel, asset, cache, assetName, variantId, tag) = (d.Row, d.Rel, d.Asset, d.Cache, d.AssetName, d.VariantId, d.Tag);
+        try
+        {
+            using var client = d.Client;
+            row.SetPhase("Verifying…", indeterminate: true);
             var verification = await InstallManager.VerifyDownloadAsync(cache, asset, rel, row.App.Owner, row.App.Repo, client);
             // Strict for current releases: a latest install (tag == null) MUST checksum-verify — every
             // current release ships a correct SHA256SUMS, so a missing/incomplete manifest here is
@@ -971,13 +1137,28 @@ public sealed class MainForm : Form
             // hash MISMATCH always aborts (it throws from VerifyDownloadAsync) regardless of tag.
             if (tag == null && verification != VerifyResult.Verified)
             {
-                InstallManager.TryDelete(cache);
+                _ = Task.Run(() => InstallManager.TryDelete(cache));   // 300-450 MB unlink: never on the UI thread
                 var reason = InstallManager.StrictFailureReason(verification, assetName);
                 Log.Write($"install {row.App.Id} {rel.TagName}: BLOCKED (strict) — {reason}");
                 throw new Exception($"Couldn't verify the download — {reason}. Install aborted for safety.");
             }
-            InstallManager.Shared.Install(row.App, rel.TagName, cache, assetName, _settings.InstallToApplications, variantId);
-            InstallManager.TryDelete(cache);   // verified copy is now installed; mirror the macOS zip cleanup
+            row.SetPhase("Installing…", indeterminate: true);
+            // Everything disk-heavy OFF the UI thread in one Task.Run: the extract/copy (seconds for a Full
+            // edition), the unlink of the cache file (the heaviest synchronous call that was left at the row
+            // flip), and the fresh exe's icon so the post-install repaint is a cache hit.
+            var appRef = row.App; var tagRef = rel.TagName; var toApps = _settings.InstallToApplications;
+            await Task.Run(() =>
+            {
+                var exe = InstallManager.Shared.Install(appRef, tagRef, cache, assetName, toApps, variantId);
+                InstallManager.TryDelete(cache);   // verified copy is now installed; mirror the macOS zip cleanup
+                AppRowControl.PrewarmInstalledIcon(exe);
+                // Install() invalidated the manifest snapshot + path/name caches; re-read installed.json and the
+                // exe's version resource HERE so the row flip below is all cache hits (the mac does the same in
+                // its detached install task).
+                InstallManager.Shared.InstalledDisplayName(appRef.InstallKey(variantId));
+                InstallManager.Shared.InstalledPath(appRef.Id);
+            });
+            row.SetPhase(null);
             // Only reflect the install in the row when it's the variant currently shown — a Download All
             // that fetches a non-selected Full edition into its own slot mustn't hijack the row's display.
             if (variantId == SelectedVariant(row.App))
@@ -994,12 +1175,12 @@ public sealed class MainForm : Form
                 _ => $"install {row.App.Id} {rel.TagName}: unverified older tag (asset not in SHA256SUMS)",
             });
             Log.Write($"installed {row.App.Id} {rel.TagName}{(_settings.InstallToApplications ? " (+shortcuts)" : "")}");
+            return null;
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "Install failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            row.SetState(row.Installed, row.Latest, row.LatestAssetId, RowStatus.Error);
-            Log.Write($"install {row.App.Id} FAILED: {ex.Message}");
+            FailSlot(row, ex, interactive);
+            return ex;
         }
         finally
         {
@@ -1008,26 +1189,100 @@ public sealed class MainForm : Form
         }
     }
 
-    private void Uninstall(AppRowControl row)
+    private void FailSlot(AppRowControl row, Exception ex, bool interactive)
+    {
+        row.SetPhase(null);   // never leave a stale "Installing…" over the Error badge
+        row.SetState(row.Installed, row.Latest, row.LatestAssetId, RowStatus.Error);
+        Log.Write($"install {row.App.Id} FAILED: {ex.Message}");
+        if (interactive) MessageBox.Show(this, ex.Message, "Install failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+
+    /// <summary>Errors worth ONE automatic retry in a batch: network/transport and I/O hiccups. Verification
+    /// failures (strict-verify BLOCKED, checksum/size mismatch, minisign) throw plain Exception and are
+    /// deliberately NOT retried; nor are auth/access errors or "no asset".</summary>
+    private static bool IsTransient(Exception ex) =>
+        ex is HttpRequestException or IOException or OperationCanceledException
+        || (ex is GitHubException ge && ge.Kind == GitHubErrorKind.Http);
+
+    /// <summary>Runs install slots with ONE download of lookahead: while slot N verifies + extracts (CPU/disk),
+    /// slot N+1 is already downloading (network) — serially the network sat idle through every hash + extract.
+    /// Downloads stay serial (venue Wi-Fi is the bottleneck) and at most two cache files exist at once. A failed
+    /// slot gets one retry if the error was transient, and the batch CONTINUES; failures are summarised in one
+    /// dialog at the end (a per-slot modal used to halt the whole batch until someone clicked OK).</summary>
+    private async Task RunSlotsAsync(List<(AppRowControl row, string? vid)> work, string title)
+    {
+        var failures = new List<(string name, string msg)>();
+        Task<Downloaded?>? next = null;
+        for (int i = 0; i < work.Count; i++)
+        {
+            var (row, vid) = work[i];
+            var current = next ?? DownloadSlotAsync(row, null, vid, interactive: false);
+            var d = await current;                                   // download N done (or failed + recorded)
+            next = null;
+            if (i + 1 < work.Count)                                  // start download N+1 now…
+            {
+                var (nrow, nvid) = work[i + 1];
+                next = DownloadSlotAsync(nrow, null, nvid, interactive: false);
+            }
+            Exception? err;
+            if (d != null) err = await InstallDownloadedAsync(d, interactive: false);   // …verify + extract N meanwhile
+            else err = row.Status == RowStatus.Error ? new Exception("download failed") : null;   // a silent skip isn't a failure
+            if (err != null && IsTransient(err))
+            {
+                Log.Write($"install {row.App.Id}: retrying once after a transient error: {err.Message}");
+                await Task.Delay(2000);
+                err = await InstallSlotAsync(row, null, vid, interactive: false);
+            }
+            if (err != null)
+                failures.Add((vid == null ? row.DisplayName : $"{row.DisplayName} ({row.App.VariantLabel(vid)})", err.Message));
+        }
+        Log.Write($"{title} complete ({failures.Count} failed)");
+        if (failures.Count > 0)
+            MessageBox.Show(this,
+                $"{failures.Count} app{(failures.Count == 1 ? "" : "s")} could not be installed:\n\n" +
+                string.Join("\n", failures.Select(f => $"• {f.name} — {f.msg}")),
+                title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    /// <summary>Default editions first, then Full editions — so consecutive slots are (almost always) different
+    /// apps and the pipelined runner overlaps two apps rather than two slots of one row.</summary>
+    private static List<(AppRowControl row, string? vid)> OrderedSlots(IEnumerable<(AppRowControl row, string? vid)> slots)
+    {
+        var list = slots.ToList();
+        return list.Where(s => s.row.App.IsDefaultVariant(s.vid)).Concat(list.Where(s => !s.row.App.IsDefaultVariant(s.vid))).ToList();
+    }
+
+    private async void Uninstall(AppRowControl row)
     {
         if (MessageBox.Show(this, $"Uninstall {row.DisplayName}?", "Uninstall",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        // Uninstalls the SELECTED variant's slot only (a sibling variant, if installed, stays). The delete runs
+        // off the UI thread: a one-dir Full edition is thousands of files (300–450 MB), and Directory.Delete
+        // of that froze the whole window for seconds. The row shows the same marquee it uses for Verifying.
+        var key = InstallKey(row.App);
+        row.SetBusy(true);
+        row.SetPhase("Removing…", indeterminate: true);
         try
         {
-            // Uninstalls the SELECTED variant's slot only (a sibling variant, if installed, stays).
-            InstallManager.Shared.Uninstall(InstallKey(row.App));
+            await Task.Run(() => InstallManager.Shared.Uninstall(key));
+            row.SetPhase(null);
             var status = row.LatestAssetId != null
                 ? RowStatus.NotInstalled
                 : (row.Latest == null ? RowStatus.Unknown : RowStatus.MissingAsset);
             row.SetState(null, row.Latest, row.LatestAssetId, status);
             row.SetResolvedName(null);
             Log.Write($"uninstalled {row.App.Id}");
-            RefreshDownloadAllButton();
         }
         catch (Exception ex)
         {
+            row.SetPhase(null);
             MessageBox.Show(this, ex.Message, "Uninstall failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
             Log.Write($"uninstall {row.App.Id} FAILED: {ex.Message}");
+        }
+        finally
+        {
+            row.SetBusy(false);
+            RefreshDownloadAllButton();
         }
     }
 

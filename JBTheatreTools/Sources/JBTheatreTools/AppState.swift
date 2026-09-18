@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import AppKit
+import Combine
 
 /// Where downloads authenticate: a personal GitHub token (direct API access), or James's
 /// download server (relay) with a shared suite passphrase — no GitHub token on the machine.
@@ -24,6 +25,28 @@ enum FetchOutcome: Sendable {
     case unauthorized
     case noRelease
     case error(String)
+}
+
+/// Download progress, published SEPARATELY from `AppState.rows`. A progress tick used to mutate the whole
+/// `rows` array (`@Published`), which re-rendered every row AND the header ~100 times per download — across a
+/// Download All that's thousands of full-list renders. Only the small progress bars observe this object.
+@MainActor
+final class ProgressHub: ObservableObject {
+    @Published private(set) var progress: [String: Double] = [:]
+    private var lastPublish: [String: CFAbsoluteTime] = [:]
+    /// Publishes on ≥1% steps (audit F12) AND at most ~12× a second per app: every publish is a SwiftUI
+    /// render plus a CoreAnimation commit, and AppKit's per-commit work (a WindowServer display-timing
+    /// round-trip, a walk of the window's whole view tree) costs a few milliseconds regardless of how
+    /// little changed. On a fast connection a 1%-only throttle still meant ~100 commits a second per
+    /// download — most of the main thread — for a bar nobody can see move that fast.
+    func set(_ id: String, _ p: Double) {
+        if p >= 1 { progress[id] = 1; lastPublish[id] = nil; return }   // hold full until `clear` (end of slot)
+        let now = CFAbsoluteTimeGetCurrent()
+        guard abs((progress[id] ?? -1) - p) >= 0.01, now - (lastPublish[id] ?? 0) >= 0.08 else { return }
+        lastPublish[id] = now
+        progress[id] = p
+    }
+    func clear(_ id: String) { progress[id] = nil; lastPublish[id] = nil }
 }
 
 /// Observable view model backing the launcher UI. All work runs on the main actor;
@@ -53,26 +76,41 @@ final class AppState: ObservableObject {
         case unavailable(String)
     }
 
-    struct Row: Identifiable {
+    /// One catalog app's live state. A CLASS with its own `@Published` fields — NOT a value in the published
+    /// `rows` array — so a row's busy/status/progress change re-renders THAT row only. When every row was a
+    /// struct inside `@Published var rows`, each install's ~3 mutations republished the array and re-ran all
+    /// 21 row bodies (each hosting AppKit-backed Menu/Picker/Progress controls whose Auto Layout was re-solved):
+    /// measured ~65 ms per publish on a fast Mac, ~3 s of main-thread time per Download All. `rows` itself now
+    /// publishes only on STRUCTURAL change (order, insert/remove); visibility flips and header counts are
+    /// signalled via `rowsGen`.
+    final class Row: ObservableObject, Identifiable {
         let app: CatalogApp
         var id: String { app.id }
-        var latest: String?
-        var latestAssetId: Int?
-        var installed: String?
-        var releases: [ReleaseInfo] = []
-        var status: Status = .unknown
-        var busy: Bool = false
-        var progress: Double = 0
+        @Published var latest: String?
+        @Published var latestAssetId: Int?
+        @Published var installed: String?
+        @Published var releases: [ReleaseInfo] = []
+        /// The semver-picked latest of `releases`, computed ONCE when releases change. Everything that used to
+        /// call `latest(from:)` per render (the header's update/download counts, slot checks) reads this instead —
+        /// re-sorting 21 release lists on every render was a hidden per-frame cost.
+        @Published var latestRelease: ReleaseInfo?
+        @Published var status: Status = .unknown
+        @Published var busy: Bool = false
+        /// Slots of THIS app currently in flight (a pipelined Download All can have the Full edition downloading
+        /// while the Standard edition is still extracting). `busy` mirrors `busyCount > 0`.
+        var busyCount: Int = 0
         /// The installed app's self-declared bundle name (kept for diagnostics only — NOT shown; see displayName).
-        var resolvedName: String?
+        @Published var resolvedName: String?
         /// Suffix for the selected non-default variant (e.g. " (Full)"), appended to the curated name so a Full
         /// install reads consistently regardless of what the app calls its own bundle.
-        var variantSuffix: String = ""
+        @Published var variantSuffix: String = ""
         /// Name to show: the launcher's CURATED catalog name (James's naming) + the variant suffix. We do NOT
         /// use the installed bundle's self-name — several bundles diverge from the curated name (e.g. the
         /// Convert app calls itself "Convert to it!", Network Port Map's bundle is "Build Port Map", Show
         /// Dashboard's is "ShowDashboard"), and the catalog name is what James curates for the suite.
         var displayName: String { app.name + variantSuffix }
+        /// The error text when the row is in `.error`, else nil (the row shows it as a tooltip).
+        var errorMessage: String? { if case .error(let m) = status { return m } else { return nil } }
         /// Shown once we know a row is relevant: anything installed locally, or any app whose repo
         /// the token is confirmed to reach. Not-yet-checked / inaccessible not-installed rows stay
         /// hidden, so inaccessible apps never flash into view and back out during a refresh.
@@ -82,6 +120,12 @@ final class AppState: ObservableObject {
             case .unknown, .checking, .noAccess: return false
             default: return true
             }
+        }
+
+        init(app: CatalogApp, installed: String? = nil, status: Status = .unknown, resolvedName: String? = nil,
+             variantSuffix: String = "") {
+            self.app = app; self.installed = installed; self.status = status
+            self.resolvedName = resolvedName; self.variantSuffix = variantSuffix
         }
     }
 
@@ -93,6 +137,12 @@ final class AppState: ObservableObject {
     }
 
     @Published var rows: [Row] = []
+    /// Bumped when a row's VISIBILITY flips or a slot/refresh completes — the list/header re-render (cheaply: rows
+    /// whose inputs didn't change skip their bodies) without `rows` itself having to republish.
+    @Published private(set) var rowsGen = 0
+    func bumpRows() { LoopWatch.mark("bumpRows"); rowsGen &+= 1 }
+    /// Per-download progress, published separately so ticks never re-render the list (see `ProgressHub`).
+    let progressHub = ProgressHub()
     @Published var hasToken: Bool = TokenStore.exists()
     /// True when the built-in download server is configured and a passphrase is saved. (Set in init,
     /// after the catalog — which carries the server URL — has loaded.)
@@ -148,7 +198,11 @@ final class AppState: ObservableObject {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
     }
 
+    private var devTap: AnyCancellable?
     init() {
+        if ProcessInfo.processInfo.environment["JBTT_LOOP_WATCH"] == "1" {
+            devTap = objectWillChange.sink { LoopWatch.mark("AppState.willChange") }
+        }
         do {
             let catalog = try Catalog.load()
             selfInfo = catalog.selfInfo
@@ -165,7 +219,7 @@ final class AppState: ObservableObject {
                 return Row(app: $0,
                            installed: installed,
                            status: installed != nil ? .installed : .unknown,
-                           resolvedName: InstallManager.shared.installedDisplayName(key),
+                           resolvedName: nil,   // diagnostic-only; not parsed at boot (was a plist read per app)
                            variantSuffix: $0.variantSuffix(selectedVariantId($0)))
             }
             catalogOrder = catalog.apps.map(\.id)
@@ -173,6 +227,11 @@ final class AppState: ObservableObject {
             categoryOrder = UserDefaults.standard.stringArray(forKey: Self.categoryOrderKey) ?? []
             collapsedGroups = Set(UserDefaults.standard.stringArray(forKey: Self.collapsedKey) ?? [])
             rows = Self.applyingSavedOrder(rows)
+            // Pre-decode + downscale every row icon OFF the main thread, so the first frame doesn't stall on
+            // NSWorkspace.icon(forFile:) / PNG decode for 21 rows.
+            let prewarmPaths = rows.compactMap { InstallManager.shared.installedPath($0.id)?.path }
+            let prewarmIds = rows.map(\.id)
+            Task.detached(priority: .utility) { AppIconImage.prewarm(paths: prewarmPaths, ids: prewarmIds) }
             pinnedIds = Set(UserDefaults.standard.stringArray(forKey: Self.pinnedKey) ?? []).intersection(known)
             hiddenIds = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? []).intersection(known)
         } catch {
@@ -316,7 +375,13 @@ final class AppState: ObservableObject {
     }
 
     private func stampCodeIdentity() {
-        UserDefaults.standard.set(CodeIdentity.current(), forKey: Self.codeIDKey)
+        // Write only on change: this runs on every client build (each download and install phase), and ANY
+        // UserDefaults write re-fires every `@AppStorage` in ContentView — a whole extra list re-render per
+        // slot for a value that changes once per launcher update.
+        let current = CodeIdentity.current()
+        if UserDefaults.standard.string(forKey: Self.codeIDKey) != current {
+            UserDefaults.standard.set(current, forKey: Self.codeIDKey)
+        }
     }
 
     /// Call before the first Keychain read of a flow. If the active mode's secret is saved and the
@@ -357,14 +422,11 @@ final class AppState: ObservableObject {
 
         // Mark every row "checking" in a SINGLE publish — mutate a local copy and assign `rows` once — so we
         // don't re-render the whole list 20× just to show the spinners (that churn was the boot-time lag).
-        var snapshot = rows
-        for i in snapshot.indices {
-            let slot = installKey(for: snapshot[i].app)
-            snapshot[i].status = .checking
-            snapshot[i].installed = InstallManager.shared.installedVersion(slot)
-            snapshot[i].resolvedName = InstallManager.shared.installedDisplayName(slot)
+        for row in rows {
+            row.status = .checking
+            row.installed = InstallManager.shared.installedVersion(installKey(for: row.app))
         }
-        rows = snapshot
+        bumpRows()
 
         // Check all apps CONCURRENTLY instead of one-at-a-time (URLSession caps ~6 connections per host, so
         // this self-throttles). The sequential version took ~one network round-trip × 20 and re-rendered the
@@ -393,20 +455,21 @@ final class AppState: ObservableObject {
         switch outcome {
         case .releases(let all):
             guard let latest = Self.latest(from: all) else {
-                update(id) { $0.releases = all; $0.latest = nil; $0.latestAssetId = nil; $0.status = .noRelease }
+                update(id) { $0.releases = all; $0.latestRelease = nil; $0.latest = nil; $0.latestAssetId = nil; $0.status = .noRelease }
                 return
             }
             let assetId = latest.assets.first { $0.name == macAsset(for: app) }?.id
             let installedNow = InstallManager.shared.installedVersion(slot)
             update(id) {
                 $0.releases = all
+                $0.latestRelease = latest
                 $0.latest = latest.tagName
                 $0.latestAssetId = assetId
                 $0.status = Self.status(installed: installedNow, latest: latest.tagName, hasAsset: assetId != nil)
             }
         case .noAccess:
             // Token can't see this repo → hide the row from the list.
-            update(id) { $0.latest = nil; $0.latestAssetId = nil; $0.releases = []; $0.status = .noAccess }
+            update(id) { $0.latest = nil; $0.latestAssetId = nil; $0.releases = []; $0.latestRelease = nil; $0.status = .noAccess }
         case .unauthorized:
             // The credential itself is bad — surface one clear message instead of N broken rows.
             update(id) { $0.status = .noAccess }
@@ -415,7 +478,7 @@ final class AppState: ObservableObject {
                 : "The download server rejected the passphrase. Check it in Settings."
             AppLog.shared.log("refresh: credentials rejected (\(Self.authMode.rawValue) mode)")
         case .noRelease:
-            update(id) { $0.latest = nil; $0.releases = []; $0.status = .noRelease }
+            update(id) { $0.latest = nil; $0.releases = []; $0.latestRelease = nil; $0.status = .noRelease }
         case .error(let msg):
             update(id) { $0.status = .error(msg) }
             AppLog.shared.log("refresh \(id) error: \(msg)")
@@ -426,7 +489,14 @@ final class AppState: ObservableObject {
     /// row after an `await` (a concurrent drag/Move may have permuted `rows`). See `Self.write` for the
     /// pure, unit-tested core.
     private func update(_ id: String, _ body: (inout Row) -> Void) {
-        Self.write(into: &rows, id: id, body)
+        // Read `rows` (never `&rows` — an inout access to a @Published array publishes it even when nothing
+        // structural changed) and mutate the row OBJECT, so only that row re-renders. A visibility flip is the
+        // one per-row change the list must know about.
+        guard let row = rows.first(where: { $0.id == id }) else { return }
+        let wasVisible = row.isVisible
+        var ref = row
+        body(&ref)
+        if row.isVisible != wasVisible { bumpRows() }
     }
 
     /// Writes to the row with `id` in `rows` (no-op if absent). Pure + nonisolated so a regression test
@@ -441,8 +511,26 @@ final class AppState: ObservableObject {
         hasRefreshed && !rows.isEmpty && rows.allSatisfy { !$0.isVisible }
     }
 
-    /// Number of installed apps with an update available — drives the header "Update All" button.
-    var updatesAvailable: Int { rows.filter { $0.status == .updateAvailable }.count }
+    /// Number of INSTALLED slots (default + Full editions) with an update available — drives the header
+    /// "Update All (N)" label. Counts slots, not rows, so an installed Full edition that's out of date is
+    /// included even when the row's toggle is showing the Standard edition.
+    var updatesAvailable: Int { rows.reduce(0) { $0 + slotsToUpdate($1.app).count } }
+
+    /// Installed slots of an app (default + every Full edition) whose latest release is newer than what's on
+    /// disk. Update All used to act on `row.status == .updateAvailable`, which reflects only the SELECTED
+    /// variant — so an installed Full edition was never updated unless its toggle happened to be on.
+    private func slotsToUpdate(_ app: CatalogApp) -> [String?] {
+        guard let row = rows.first(where: { $0.id == app.id }),
+              let latest = row.latestRelease else { return [] }
+        var variants: [String?] = [app.hasVariants ? app.variants?.first?.id : nil]
+        if let vs = app.variants { variants += vs.dropFirst().map { $0.id } }
+        return variants.filter { vid in
+            guard let name = app.macAssetName(variantId: vid),
+                  latest.assets.contains(where: { $0.name == name }),
+                  let installed = InstallManager.shared.installedVersion(app.installKey(variantId: vid)) else { return false }
+            return Self.versionIsNewer(latest.tagName, than: installed)
+        }
+    }
 
     /// True when any catalog app ships a Full edition (a second variant) — gates the "incl. Full" option.
     var hasFullVariants: Bool { rows.contains { ($0.app.variants?.count ?? 0) > 1 } }
@@ -645,7 +733,6 @@ final class AppState: ObservableObject {
         if let i = rows.firstIndex(where: { $0.id == appId }) {
             let key = installKey(for: rows[i].app)
             rows[i].installed = InstallManager.shared.installedVersion(key)
-            rows[i].resolvedName = InstallManager.shared.installedDisplayName(key)
             rows[i].variantSuffix = rows[i].app.variantSuffix(variantId)
             recomputeRow(i)
         }
@@ -656,7 +743,7 @@ final class AppState: ObservableObject {
     /// With no cached releases yet (pre-refresh), the row simply reflects whether the slot is installed.
     private func recomputeRow(_ i: Int) {
         guard rows.indices.contains(i) else { return }
-        guard let latest = Self.latest(from: rows[i].releases) else {
+        guard let latest = rows[i].latestRelease else {
             rows[i].status = rows[i].installed != nil ? .installed : .unknown
             return
         }
@@ -836,9 +923,38 @@ final class AppState: ObservableObject {
 
     /// Updates every app that currently has an update available, one at a time.
     func updateAll() async {
-        let ids = rows.filter { $0.status == .updateAvailable }.map(\.id)
-        AppLog.shared.log("update all: \(ids.count) app(s)")
-        for id in ids { await install(id) }
+        let work = orderedSlots(rows.flatMap { row in slotsToUpdate(row.app).map { (row.id, $0) } })
+        AppLog.shared.log("update all: \(work.count) slot(s)")
+        await runSlots(work, label: "update all")
+    }
+
+    /// Default editions first, then Full editions — so consecutive slots are (almost always) different apps and
+    /// the pipelined runner overlaps two apps rather than two slots of one row.
+    private func orderedSlots(_ slots: [(String, String?)]) -> [(String, String?)] {
+        func isDefault(_ s: (String, String?)) -> Bool {
+            rows.first { $0.id == s.0 }.map { $0.app.isDefaultVariant(s.1) } ?? true
+        }
+        return slots.filter { isDefault($0) } + slots.filter { !isDefault($0) }
+    }
+
+    /// Runs install slots with ONE download of lookahead: while slot N verifies + extracts (CPU/disk), slot
+    /// N+1 is already downloading (network). Serially, the network sat idle through every hash + extract and
+    /// the disk idle through every download — minutes per Download All on a slow machine. Downloads
+    /// themselves stay serial (venue Wi-Fi is the bottleneck; two at once would just split it) and at most two
+    /// downloaded zips exist at any moment (the one being installed + the one arriving).
+    private func runSlots(_ work: [(String, String?)], label: String) async {
+        var next: Task<Downloaded?, Never>? = nil
+        for (i, slot) in work.enumerated() {
+            let current = next ?? Task { await self.downloadPhase(slot.0, tag: nil, variantOverride: slot.1) }
+            let d = await current.value                       // download N done (or failed + recorded)
+            next = nil
+            if i + 1 < work.count {
+                let n = work[i + 1]                           // start download N+1 now…
+                next = Task { await self.downloadPhase(n.0, tag: nil, variantOverride: n.1) }
+            }
+            if let d { await installPhase(d, id: slot.0) }    // …and verify + extract N meanwhile
+        }
+        AppLog.shared.log("\(label) complete")
     }
 
     /// True if any app has something to fetch — a not-installed or updatable slot (drives the Download All
@@ -853,7 +969,7 @@ final class AppState: ObservableObject {
     /// (so it's reachable on this OS/arch) and that isn't already installed at the latest version.
     private func slotsToDownload(_ app: CatalogApp, includeFull: Bool) -> [String?] {
         guard let row = rows.first(where: { $0.id == app.id }),
-              let latest = Self.latest(from: row.releases) else { return [] }
+              let latest = row.latestRelease else { return [] }
         var variants: [String?] = [app.hasVariants ? app.variants?.first?.id : nil]
         if includeFull, let vs = app.variants { variants += vs.dropFirst().map { $0.id } }
         return variants.filter { vid in
@@ -868,13 +984,9 @@ final class AppState: ObservableObject {
     /// so Standard and Full end up installed side by side). Skips anything already current or with no
     /// asset for this OS/arch.
     func downloadAll(includeFull: Bool) async {
-        for id in rows.map(\.id) {
-            guard let app = rows.first(where: { $0.id == id })?.app else { continue }
-            for vid in slotsToDownload(app, includeFull: includeFull) {
-                await install(id, variantOverride: vid)
-            }
-        }
-        AppLog.shared.log("download all\(includeFull ? " (incl. Full)" : "") complete")
+        let work = orderedSlots(rows.flatMap { row in slotsToDownload(row.app, includeFull: includeFull).map { (row.id, $0) } })
+        AppLog.shared.log("download all\(includeFull ? " (incl. Full)" : ""): \(work.count) slot(s)")
+        await runSlots(work, label: "download all\(includeFull ? " (incl. Full)" : "")")
     }
 
     private static func status(installed: String?, latest: String, hasAsset: Bool) -> Status {
@@ -997,40 +1109,80 @@ final class AppState: ObservableObject {
     /// Installs an app — the latest release, or a specific `tag` (for installing older versions).
     /// `variantOverride` installs a specific variant slot regardless of the row's on-screen selection
     /// (used by Download All to fetch Standard and/or Full); nil = the row's selected variant.
+    /// Everything phase 1 hands to phase 2: the resolved release/asset and the verified-later zip in the cache.
+    struct Downloaded: Sendable {
+        let app: CatalogApp; let rel: ReleaseInfo; let asset: ReleaseAsset; let zip: URL
+        let variantId: String?; let tag: String?
+    }
+
+    private func beginBusy(_ id: String) { update(id) { $0.busyCount += 1; $0.busy = true } }
+    private func endBusy(_ id: String) {
+        update(id) { $0.busyCount = max(0, $0.busyCount - 1); $0.busy = $0.busyCount > 0 }
+        progressHub.clear(id)
+    }
+
+    /// Installs an app — the latest release, or a specific `tag` (for installing older versions).
+    /// `variantOverride` installs a specific variant slot regardless of the row's on-screen selection
+    /// (used by Download All to fetch Standard and/or Full); nil = the row's selected variant.
+    /// Two phases so Download All can overlap them (see `runSlots`): phase 1 is network-bound, phase 2 is
+    /// CPU/disk-bound. A single interactive install just runs them back to back.
     func install(_ id: String, tag: String? = nil, variantOverride: String? = nil) async {
-        guard let app = rows.first(where: { $0.id == id })?.app else { return }
+        guard let d = await downloadPhase(id, tag: tag, variantOverride: variantOverride) else { return }
+        await installPhase(d, id: id)
+    }
+
+    /// Phase 1 — resolve the release + asset and download it into the cache. Marks the row busy for the whole
+    /// slot; on failure it records the error, ends busy and returns nil. Nothing here touches the disk beyond
+    /// the download itself.
+    private func downloadPhase(_ id: String, tag: String?, variantOverride: String?) async -> Downloaded? {
+        guard let app = rows.first(where: { $0.id == id })?.app else { return nil }
         await ensureKeychainExplained()
-        guard let client = activeClient() else { return }
+        guard let client = activeClient() else { return nil }
         // Address the row BY ID after every `await` — a concurrent drag/Move can permute `rows` while
         // this runs, so a captured index would write to the wrong app (audit F3).
-        update(id) { $0.busy = true; $0.progress = 0 }
-        defer { update(id) { $0.busy = false } }
+        beginBusy(id)
+        progressHub.set(id, 0)
         var releases = rows.first(where: { $0.id == id })?.releases ?? []
         if releases.isEmpty {
             do { releases = try await client.releases(owner: app.owner, repo: app.repo) }
-            catch { update(id) { $0.status = .error(error.localizedDescription) }; return }
-            update(id) { $0.releases = releases }
+            catch { update(id) { $0.status = .error(error.localizedDescription) }; endBusy(id); return nil }
+            let picked = Self.latest(from: releases)
+            update(id) { $0.releases = releases; $0.latestRelease = picked }
         }
 
-        let release = tag != nil ? releases.first { $0.tagName == tag } : Self.latest(from: releases)
-        guard let rel = release else { update(id) { $0.status = .error("Version \(tag ?? "latest") not found.") }; return }
+        let release = tag != nil ? releases.first { $0.tagName == tag }
+                                 : (rows.first(where: { $0.id == id })?.latestRelease ?? Self.latest(from: releases))
+        guard let rel = release else {
+            update(id) { $0.status = .error("Version \(tag ?? "latest") not found.") }; endBusy(id); return nil
+        }
         let variantId = variantOverride ?? selectedVariantId(app)
         guard let asset = rel.assets.first(where: { $0.name == app.macAssetName(variantId: variantId) }) else {
-            update(id) { $0.status = .error("No macOS asset in \(rel.tagName).") }; return
+            update(id) { $0.status = .error("No macOS asset in \(rel.tagName).") }; endBusy(id); return nil
         }
 
         let zipDest = InstallManager.shared.cacheDir.appendingPathComponent("\(app.id)-\(PathSafe.component(rel.tagName)).zip")
         let appId = id
         do {
             try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: asset.id, to: zipDest) { p in
-                Task { @MainActor [weak self] in
-                    guard let self = self else { return }
-                    // Throttle: only republish `rows` on a ≥1% change (or completion). Every byte otherwise
-                    // re-renders all 16 rows (and each AppIconImage), so a 200 MB download would trigger
-                    // thousands of synchronous disk reads on the main actor (audit F12).
-                    self.update(appId) { if p >= 1.0 || abs(p - $0.progress) >= 0.01 { $0.progress = p } }
-                }
+                // Progress goes to the hub, NOT `rows`: only the row's progress bar re-renders (≥1% steps).
+                Task { @MainActor [weak self] in self?.progressHub.set(appId, p) }
             }
+            return Downloaded(app: app, rel: rel, asset: asset, zip: zipDest, variantId: variantId, tag: tag)
+        } catch {
+            update(id) { $0.status = .error(error.localizedDescription) }
+            AppLog.shared.log("install \(app.id) FAILED: \(error.localizedDescription)")
+            endBusy(id)
+            return nil
+        }
+    }
+
+    /// Phase 2 — verify (size + signed SHA256SUMS + hash), then extract + install OFF the main actor, then
+    /// reflect it in the row. Always ends the row's busy state.
+    private func installPhase(_ d: Downloaded, id: String) async {
+        let (app, rel, asset, zipDest, variantId, tag) = (d.app, d.rel, d.asset, d.zip, d.variantId, d.tag)
+        defer { endBusy(id) }
+        guard let client = activeClient() else { return }
+        do {
             let verification = try await Self.verifyDownload(zipDest, asset: asset, release: rel, app: app, client: client)
             // Strict for current releases: a "latest" install (tag == nil) MUST checksum-verify — every
             // current release ships a correct SHA256SUMS, so a missing/incomplete manifest here is
@@ -1038,7 +1190,7 @@ final class AppState: ObservableObject {
             // predate the manifest, so they stay verify-if-present. A hash MISMATCH always aborts (it
             // throws from verifyDownload) regardless of tag; size is always checked too.
             if tag == nil, verification != .verified {
-                try? FileManager.default.removeItem(at: zipDest)
+                Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: zipDest) }   // 300-450 MB unlink: never on main
                 let reason = Self.strictFailureReason(verification, assetName: asset.name)
                 AppLog.shared.log("install \(app.id) \(rel.tagName): BLOCKED (strict) — \(reason)")
                 throw InstallError.unverified(reason: reason)
@@ -1050,23 +1202,72 @@ final class AppState: ObservableObject {
             case .assetNotListed: AppLog.shared.log("install \(app.id) \(rel.tagName): unverified older tag (asset not in SHA256SUMS)")
             }
             let toApps = UserDefaults.standard.bool(forKey: "theatre.installToApplications")
-            try InstallManager.shared.install(app: app, version: rel.tagName, downloadedZip: zipDest, toApplications: toApps, variant: variantId)
-            try? FileManager.default.removeItem(at: zipDest)
+            let tagName = rel.tagName
+            let slotKey = app.installKey(variantId: variantId)
+            // Everything disk-heavy OFF the main actor, in one detached block: `ditto` (seconds for a Full
+            // edition), the unlink of the 300-450 MB zip (12-50 ms on a busy disk — it used to sit on the main
+            // actor right at the row flip), the freshly-installed app's icon (NSWorkspace + thumbnail, so the
+            // first post-install render hits the cache instead of resolving it on main), and the diagnostic
+            // display-name read. The zip is removed even when install() throws (a small SSD win — the next
+            // attempt re-downloads to the same path anyway); `_ = try` keeps the throw propagating.
+            let installedName: String? = try await Task.detached(priority: .userInitiated) {
+                defer { try? FileManager.default.removeItem(at: zipDest) }
+                let dest = try InstallManager.shared.install(app: app, version: tagName, downloadedZip: zipDest,
+                                                             toApplications: toApps, variant: variantId)
+                AppIconImage.refreshInstalledIcon(dest.path)
+                return InstallManager.shared.installedDisplayName(slotKey)
+            }.value
+            LoopWatch.mark("install-main begin \(app.id)")
             // Only reflect the install in the row when it's the variant currently shown — a Download All
             // that fetches a non-selected Full edition into its own slot mustn't hijack the row's display.
             if variantId == selectedVariantId(app) {
-                let name = InstallManager.shared.installedDisplayName(app.installKey(variantId: variantId))
                 update(id) {
                     $0.installed = rel.tagName
-                    $0.resolvedName = name
+                    $0.resolvedName = installedName
                     $0.status = Self.status(installed: rel.tagName, latest: $0.latest ?? rel.tagName, hasAsset: true)
                 }
             }
             AppLog.shared.log("installed \(app.id) \(rel.tagName)\(variantId.map { " [\($0)]" } ?? "")\(toApps ? " (Applications)" : "")")
+            bumpRows()   // header counts (Update All (N) / Download All) re-derive once per slot
+            LoopWatch.mark("install-main end \(app.id)")
         } catch {
             update(id) { $0.status = .error(error.localizedDescription) }
             AppLog.shared.log("install \(app.id) FAILED: \(error.localizedDescription)")
         }
+    }
+
+    /// UI entry point: the removal (a one-dir Full edition is thousands of files, 300–450 MB — seconds of unlink)
+    /// runs off the main actor with the row busy, then the row is updated. `uninstall(_:)` below stays
+    /// synchronous for the CLI.
+    func uninstallAsync(_ id: String) async {
+        guard let row = rows.first(where: { $0.id == id }) else { return }
+        let key = installKey(for: row.app)
+        beginBusy(id)
+        let failure: String? = await Task.detached(priority: .userInitiated) {
+            do { try InstallManager.shared.uninstall(key); return nil } catch { return error.localizedDescription }
+        }.value
+        endBusy(id)
+        applyUninstallOutcome(id, failure: failure)
+    }
+
+    private func applyUninstallOutcome(_ id: String, failure: String?) {
+        guard let i = rows.firstIndex(where: { $0.id == id }) else { return }
+        if let failure {
+            rows[i].status = .error(failure)
+            AppLog.shared.log("uninstall \(id) FAILED: \(failure)")
+            return
+        }
+        rows[i].installed = nil
+        rows[i].resolvedName = nil
+        if rows[i].latestAssetId != nil {
+            rows[i].status = .notInstalled
+        } else if rows[i].latest == nil {
+            rows[i].status = .unknown
+        } else {
+            rows[i].status = .missingAsset
+        }
+        AppLog.shared.log("uninstalled \(id)")
+        bumpRows()   // header counts (Download All) re-derive
     }
 
     func uninstall(_ id: String) {
@@ -1136,7 +1337,6 @@ final class AppState: ObservableObject {
         for i in rows.indices {
             let key = installKey(for: rows[i].app)
             rows[i].installed = InstallManager.shared.installedVersion(key)
-            rows[i].resolvedName = InstallManager.shared.installedDisplayName(key)
         }
         AppLog.shared.log("relocate → \(toApplications ? "Applications" : "launcher"): moved \(moved), failed \(failed.count)")
         if !failed.isEmpty {

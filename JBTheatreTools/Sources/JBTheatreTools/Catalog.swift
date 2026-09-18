@@ -42,7 +42,7 @@ struct Catalog: Decodable {
 }
 
 /// One installable app in the catalog.
-struct CatalogApp: Decodable, Identifiable {
+struct CatalogApp: Decodable, Identifiable, Sendable {
     let id: String
     let name: String
     let blurb: String
@@ -110,7 +110,7 @@ struct CatalogApp: Decodable, Identifiable {
 }
 
 /// One downloadable variant of an app (e.g. Standard / Full). `label` is the toggle text.
-struct AppVariant: Decodable, Identifiable {
+struct AppVariant: Decodable, Identifiable, Sendable {
     let id: String
     let label: String
     let assets: [String: String]

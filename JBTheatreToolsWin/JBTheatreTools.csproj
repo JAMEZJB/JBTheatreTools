@@ -11,11 +11,18 @@
     <!-- Allows building Windows-only WinForms apps on macOS/Linux. -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
 
+    <!-- Per-Monitor V2 DPI awareness (ApplicationConfiguration.Initialize() reads this): the window is
+         rendered crisp at each monitor's own scaling instead of being bitmap-stretched when it crosses to
+         a monitor with different scaling. Every control derives its geometry from its DeviceDpi (see the
+         DPI note in Theme.cs) and re-derives it on WM_DPICHANGED. Revert to SystemAware if a real-hardware
+         test shows a problem on mixed-DPI setups — the per-monitor layout is the only part this changes. -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+
     <AssemblyName>JBTheatreTools</AssemblyName>
     <!-- File description shown in Task Manager / file properties; window title is set in code. -->
     <AssemblyTitle>JB Theatre Tools</AssemblyTitle>
     <Product>JB Theatre Tools</Product>
-    <Version>1.23.0</Version>
+    <Version>1.24.0</Version>
     <Company>James Breedon</Company>
     <RootNamespace>JBTheatreTools</RootNamespace>
     <ApplicationIcon>app.ico</ApplicationIcon>

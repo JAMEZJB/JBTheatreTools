@@ -11,13 +11,19 @@ public sealed class DragCardForm : Form
     private readonly Image? _icon;
     private readonly string _name;
     private readonly bool _dark;
+    // The card is sized for the DPI of the row it was lifted from (a fresh top-level form only learns its
+    // own monitor's DPI once shown); every pixel number is a 96-DPI design value through S().
+    private readonly int _dpi;
+    private int S(int v) => Theme.Px(v, _dpi);
 
-    public DragCardForm(Image? icon, string name, bool dark)
+    public DragCardForm(Image? icon, string name, bool dark, int dpi)
     {
         _icon = icon;
         _name = name;
         _dark = dark;
+        _dpi = dpi;
 
+        AutoScaleMode = AutoScaleMode.None;
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
@@ -25,9 +31,9 @@ public sealed class DragCardForm : Form
         DoubleBuffered = true;
         Font = SystemFonts.MessageBoxFont ?? SystemFonts.DefaultFont;
 
-        using (var measure = Theme.Ui(Theme.PtBody, semibold: true))
-            Size = new Size(40 + TextRenderer.MeasureText(name, measure).Width + 16, 40);
-        Region = new Region(Rounded(new Rectangle(0, 0, Width, Height), Theme.RPanel));
+        using (var measure = Theme.Ui(Theme.PtBody, semibold: true, _dpi))
+            Size = new Size(S(40) + TextRenderer.MeasureText(name, measure).Width + S(16), S(40));
+        Region = new Region(Rounded(new Rectangle(0, 0, Width, Height), S(Theme.RPanel)));
     }
 
     /// <summary>Don't steal focus when shown.</summary>
@@ -44,7 +50,7 @@ public sealed class DragCardForm : Form
     }
 
     /// <summary>Places the card so the cursor sits at its grab point (near the top-left), glued to the pointer.</summary>
-    public void MoveTo(Point screenPoint) => Location = new Point(screenPoint.X - 16, screenPoint.Y - 20);
+    public void MoveTo(Point screenPoint) => Location = new Point(screenPoint.X - S(16), screenPoint.Y - S(20));
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -52,16 +58,16 @@ public sealed class DragCardForm : Form
         g.SmoothingMode = SmoothingMode.AntiAlias;
         var card = new Rectangle(0, 0, Width - 1, Height - 1);
         using (var bg = new SolidBrush(Theme.Card(_dark)))
-        using (var path = Rounded(card, Theme.RPanel))
+        using (var path = Rounded(card, S(Theme.RPanel)))
             g.FillPath(bg, path);
         using (var pen = new Pen(Theme.LineStrong(_dark)))
-        using (var path = Rounded(card, Theme.RPanel))
+        using (var path = Rounded(card, S(Theme.RPanel)))
             g.DrawPath(pen, path);
 
         if (_icon != null)
-            g.DrawImage(_icon, new Rectangle(9, (Height - 24) / 2, 24, 24));
-        using var font = Theme.Ui(Theme.PtBody, semibold: true);   // body 13px/600
-        TextRenderer.DrawText(g, _name, font, new Rectangle(40, 0, Width - 46, Height),
+            g.DrawImage(_icon, new Rectangle(S(9), (Height - S(24)) / 2, S(24), S(24)));
+        using var font = Theme.Ui(Theme.PtBody, semibold: true, _dpi);   // body 13px/600
+        TextRenderer.DrawText(g, _name, font, new Rectangle(S(40), 0, Width - S(46), Height),
             Theme.Fg(_dark), TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
     }
 

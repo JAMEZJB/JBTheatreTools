@@ -115,3 +115,170 @@ enum JBFont {
     /// Letter-spacing that goes with `label` when the text is uppercased.
     static let labelTracking: CGFloat = 0.8
 }
+
+// MARK: - Controls drawn in SwiftUI (no AppKit cells)
+//
+// Every AppKit-backed control hosted inside a list row (NSButton, NSPopUpButton, NSSegmentedControl) is
+// re-measured through CoreUI on EVERY list-level layout pass — about a millisecond per cell, times ~3 cells
+// per row, times 21 rows: 50–90 ms of main-thread stall whenever a row appears, an install finishes, a
+// section collapses or a drag moves a row. These controls draw with the kit's own tokens instead (flat
+// accent primary · raised secondary with a hairline · bare selector-blue icon · sunken segmented trough),
+// so SwiftUI lays them out like any Text and a full-list pass costs a few milliseconds.
+
+/// House-kit button style. `compact` follows `.controlSize(.small/.mini)` automatically (row buttons).
+struct JBButtonStyle: ButtonStyle {
+    enum Role { case primary, secondary, icon }
+    var role: Role
+
+    @Environment(\.isEnabled) private var enabled
+    @Environment(\.controlSize) private var controlSize
+
+    func makeBody(configuration: Configuration) -> some View {
+        JBButtonBody(label: configuration.label, pressed: configuration.isPressed, role: role,
+                     enabled: enabled, compact: controlSize == .small || controlSize == .mini)
+    }
+}
+
+private struct JBButtonBody: View {
+    let label: ButtonStyleConfiguration.Label
+    let pressed: Bool
+    let role: JBButtonStyle.Role
+    let enabled: Bool
+    let compact: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: JBRadius.ctl, style: .continuous)
+        label
+            .font(.system(size: compact ? 11 : 13, weight: .medium))
+            .lineLimit(1)
+            .foregroundStyle(foreground)
+            .padding(.horizontal, role == .icon ? 2 : (compact ? 9 : 12))
+            .padding(.vertical, role == .icon ? 2 : (compact ? 3 : 5))
+            .frame(minHeight: role == .icon ? 0 : (compact ? 20 : 26))
+            .background(shape.fill(fill))   // the fill is also the hit surface — no separate contentShape view
+            .overlay { if role == .secondary { shape.strokeBorder(border) } }
+            .opacity(enabled ? 1 : 0.45)
+            .onHover { hovering = $0 }
+    }
+
+    private var foreground: Color {
+        switch role {
+        case .primary:   return .jbOnAccent
+        case .secondary: return .jbText
+        case .icon:      return .selectorBlue
+        }
+    }
+    private var fill: Color {
+        switch role {
+        case .primary:   return pressed ? Color.jbAccent.opacity(0.8) : .jbAccent
+        case .secondary: return pressed ? .jbSunken : (hovering ? .jbSurface : .jbRaised)
+        case .icon:      return pressed ? Color.selectorBlue.opacity(0.18) : (hovering ? Color.selectorBlue.opacity(0.10) : .clear)
+        }
+    }
+    private var border: Color { hovering ? .jbLineStrong : .jbLine }
+}
+
+extension ButtonStyle where Self == JBButtonStyle {
+    /// The accent-filled primary action (Install / Update / Download All).
+    static var jbPrimary: JBButtonStyle { JBButtonStyle(role: .primary) }
+    /// A raised-surface secondary action with a hairline (Launch / Refresh / Settings).
+    static var jbSecondary: JBButtonStyle { JBButtonStyle(role: .secondary) }
+    /// A bare selector-blue icon (the row's ⋯ menu, per house rule 21).
+    static var jbIcon: JBButtonStyle { JBButtonStyle(role: .icon) }
+}
+
+/// A segmented "pick one" control drawn in SwiftUI: a sunken trough with the selected segment lifted to the
+/// surface. Segments carry a text label, a symbol, or both.
+struct JBSegmented<ID: Hashable>: View {
+    struct Segment: Identifiable {
+        let id: ID
+        var label: String? = nil
+        var symbol: String? = nil
+        var help: String? = nil
+    }
+    let segments: [Segment]
+    @Binding var selection: ID
+    var compact = false
+
+    @Environment(\.isEnabled) private var enabled
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(segments) { seg in
+                let selected = seg.id == selection
+                HStack(spacing: 3) {
+                    if let s = seg.symbol { Image(systemName: s).font(.system(size: compact ? 9 : 11, weight: .medium)) }
+                    if let l = seg.label { Text(l).font(.system(size: compact ? 10 : 11, weight: .medium)) }
+                }
+                .foregroundStyle(selected ? Color.jbText : Color.jbText2)
+                .padding(.horizontal, compact ? 7 : 9)
+                .padding(.vertical, compact ? 2 : 3)
+                .background(
+                    RoundedRectangle(cornerRadius: JBRadius.ctl - 2, style: .continuous)
+                        .fill(selected ? Color.jbSurface : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: JBRadius.ctl - 2, style: .continuous)
+                        .strokeBorder(selected ? Color.jbLineStrong : Color.clear)
+                )
+                .contentShape(Rectangle())
+                .onTapGesture { if !selected { selection = seg.id } }
+                .help(seg.help ?? "")
+            }
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: JBRadius.ctl, style: .continuous).fill(Color.jbSunken))
+        .overlay(RoundedRectangle(cornerRadius: JBRadius.ctl, style: .continuous).strokeBorder(Color.jbLine))
+        .opacity(enabled ? 1 : 0.45)
+        .allowsHitTesting(enabled)
+    }
+}
+
+/// House-kit chrome for a `Menu`: a `ButtonStyle` never reaches a menu's popup button on macOS, so the
+/// menu is drawn borderless (label only, no indicator) and the pill is applied around it here.
+struct JBMenuPill: ViewModifier {
+    let role: JBButtonStyle.Role
+    @Environment(\.isEnabled) private var enabled
+    @Environment(\.controlSize) private var controlSize
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        let compact = controlSize == .small || controlSize == .mini
+        let shape = RoundedRectangle(cornerRadius: JBRadius.ctl, style: .continuous)
+        content
+            .menuStyle(.borderlessButton)
+            .menuIndicator(role == .icon ? .hidden : .visible)
+            .font(.system(size: compact ? 11 : 13, weight: .medium))
+            // The borderless popup draws its label (and chevron) in the TINT, not the foreground style — and
+            // the window's tint is the accent, which would vanish on the primary pill's accent fill.
+            .tint(labelColor)
+            .foregroundStyle(labelColor)
+            .padding(.horizontal, role == .icon ? 2 : (compact ? 9 : 12))
+            .padding(.vertical, role == .icon ? 2 : (compact ? 3 : 5))
+            .frame(minHeight: role == .icon ? 0 : (compact ? 20 : 26))
+            .background(shape.fill(fill))
+            .overlay { if role == .secondary { shape.strokeBorder(hovering ? Color.jbLineStrong : Color.jbLine) } }
+            .opacity(enabled ? 1 : 0.45)
+            .onHover { hovering = $0 }
+    }
+
+    private var labelColor: Color {
+        switch role {
+        case .primary:   return .jbOnAccent
+        case .secondary: return .jbText
+        case .icon:      return .selectorBlue
+        }
+    }
+    private var fill: Color {
+        switch role {
+        case .primary:   return .jbAccent
+        case .secondary: return hovering ? .jbSurface : .jbRaised
+        case .icon:      return hovering ? Color.selectorBlue.opacity(0.10) : .clear
+        }
+    }
+}
+
+extension View {
+    func jbMenuPill(_ role: JBButtonStyle.Role) -> some View { modifier(JBMenuPill(role: role)) }
+}
