@@ -138,6 +138,20 @@ final class GitHubClient: NSObject, @unchecked Sendable {
         return try JSONDecoder().decode([ReleaseInfo].self, from: data).filter { !$0.draft }
     }
 
+    /// The relay's editable "New in" lines (see `WhatsNewNotes`). Server mode only — returns nil in direct
+    /// GitHub mode, when the relay has no document (404), or on any error; callers keep the bundled lines.
+    /// Returns the validated raw bytes so the caller can cache the document as served.
+    func whatsNewNotes() async -> (WhatsNewNotes, Data)? {
+        guard apiBase != "https://api.github.com", let url = WhatsNewNotes.url(relayBase: apiBase) else { return nil }
+        var req = apiRequest(url, accept: "application/json")
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.timeoutInterval = 15
+        guard let (data, resp) = try? await session.data(for: req),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let notes = try? WhatsNewNotes.parse(data) else { return nil }
+        return (notes, data)
+    }
+
     /// Downloads a release asset by id to `dest`, reporting fractional progress (0…1).
     func downloadAsset(owner: String, repo: String, assetId: Int, to dest: URL,
                        progress: (@Sendable (Double) -> Void)? = nil) async throws {

@@ -104,6 +104,10 @@ final class AppState: ObservableObject {
         /// Suffix for the selected non-default variant (e.g. " (Full)"), appended to the curated name so a Full
         /// install reads consistently regardless of what the app calls its own bundle.
         @Published var variantSuffix: String = ""
+        /// The "New in" line actually shown: the catalog's, overlaid by the relay's editable notes
+        /// (`WhatsNewNotes`) when the relay has one for this app.
+        @Published var whatsNew: String?
+        @Published var whatsNewVersion: String?
         /// Name to show: the launcher's CURATED catalog name (James's naming) + the variant suffix. We do NOT
         /// use the installed bundle's self-name — several bundles diverge from the curated name (e.g. the
         /// Convert app calls itself "Convert to it!", Network Port Map's bundle is "Build Port Map", Show
@@ -126,6 +130,7 @@ final class AppState: ObservableObject {
              variantSuffix: String = "") {
             self.app = app; self.installed = installed; self.status = status
             self.resolvedName = resolvedName; self.variantSuffix = variantSuffix
+            self.whatsNew = app.whatsNew; self.whatsNewVersion = app.whatsNewVersion
         }
     }
 
@@ -246,6 +251,7 @@ final class AppState: ObservableObject {
                 forKey: "theatre.authMode")
         }
         hasServerAuth = serverBase != nil && ServerAuthStore.exists()
+        if let cached = WhatsNewNotes.loadCached() { applyWhatsNew(cached) }   // last relay copy, for offline starts
         AppLog.shared.log("launched v\(currentVersion)")
     }
 
@@ -433,6 +439,9 @@ final class AppState: ObservableObject {
         // list on each result — seconds of churn on boot. Results now land close together and SwiftUI
         // coalesces them into far fewer renders. Each result addresses its row BY ID (audit F3, reorder-safe).
         let apps = rows.map { (id: $0.id, owner: $0.app.owner, repo: $0.app.repo) }
+        // The relay's editable "New in" lines ride along with the update check (server mode only; nil = keep
+        // what we have). Applied after the release results so the rows re-render once for both.
+        async let notesFetch = client.whatsNewNotes()
         await withTaskGroup(of: (String, FetchOutcome).self) { group in
             for a in apps {
                 group.addTask {
@@ -445,7 +454,21 @@ final class AppState: ObservableObject {
             }
             for await (id, outcome) in group { applyRefreshOutcome(id: id, outcome: outcome) }
         }
+        if let (notes, data) = await notesFetch {
+            applyWhatsNew(notes)
+            WhatsNewNotes.cache(data)
+            AppLog.shared.log("what's-new: applied \(notes.notes.count) relay line(s)")
+        }
         hasRefreshed = true
+    }
+
+    /// Overlays the relay's "New in" lines on every row (catalog line where the relay has none).
+    func applyWhatsNew(_ notes: WhatsNewNotes) {
+        for row in rows {
+            let (line, version) = notes.resolved(for: row.app)
+            if row.whatsNew != line { row.whatsNew = line }
+            if row.whatsNewVersion != version { row.whatsNewVersion = version }
+        }
     }
 
     /// Applies one concurrent check's outcome to its row (on the main actor), re-finding the row by id.

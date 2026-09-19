@@ -1004,7 +1004,7 @@ struct AppRowView: View, Equatable {
     /// Labelled "New in vX.Y.Z:" when a version is present, else "What's new:".
     @ViewBuilder
     private var whatsNewLine: some View {
-        if let note = row.app.whatsNew, !note.isEmpty {
+        if let note = row.whatsNew, !note.isEmpty {
             (
                 Text(whatsNewLabel).fontWeight(.semibold)
                 + Text(" ") + Text(note)
@@ -1017,7 +1017,7 @@ struct AppRowView: View, Equatable {
     }
 
     private var whatsNewLabel: String {
-        if let v = row.app.whatsNewVersion, !v.isEmpty { return "New in \(v):" }
+        if let v = row.whatsNewVersion, !v.isEmpty { return "New in \(v):" }
         return "What's new:"
     }
 

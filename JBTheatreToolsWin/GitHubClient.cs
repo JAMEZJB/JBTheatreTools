@@ -137,6 +137,29 @@ public sealed class GitHubClient : IDisposable
         return req;
     }
 
+    /// <summary>The relay's editable "New in" lines (see <see cref="WhatsNewNotes"/>). Server mode only —
+    /// returns null in direct GitHub mode, when the relay has no document (404), or on any error; callers keep
+    /// the bundled lines. Returns the validated raw text so the caller can cache the document as served.</summary>
+    public async Task<(WhatsNewNotes Notes, string Raw)?> WhatsNewNotesAsync()
+    {
+        if (_apiBase == "https://api.github.com") return null;
+        var url = WhatsNewNotes.UrlFor(_apiBase);
+        if (url == null) return null;
+        try
+        {
+            using var req = NewRequest(url.ToString(), "application/json");
+            req.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue { NoCache = true };
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            // AllowAutoRedirect is off: a relay that doesn't serve the document 302s to github.com — that's a
+            // "no document", never something to follow with our credentials.
+            using var resp = await _http.SendAsync(req, cts.Token).ConfigureAwait(false);
+            if (resp.StatusCode != HttpStatusCode.OK) return null;
+            var raw = await resp.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
+            return (WhatsNewNotes.Parse(raw), raw);
+        }
+        catch { return null; }
+    }
+
     public async Task<ReleaseInfo> LatestReleaseAsync(string owner, string repo)
     {
         var url = $"{_apiBase}/repos/{owner}/{repo}/releases/latest";

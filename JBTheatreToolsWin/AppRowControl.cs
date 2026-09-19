@@ -134,7 +134,9 @@ public sealed class AppRowControl : UserControl
     // fonts are built in device pixels for the same DPI. _dpi = the DPI the fonts were last built for.
     private int _dpi;
     private readonly List<Font> _fonts = new();
-    private bool HasWhatsNew => !string.IsNullOrEmpty(App.WhatsNew);
+    /// <summary>The "New in" line actually shown: the catalog's, overlaid by the relay's editable notes.</summary>
+    private string? _whatsNewText, _whatsNewVersion;
+    private bool HasWhatsNew => !string.IsNullOrEmpty(_whatsNewText);
     private int S(int v) => Theme.Px(v, DeviceDpi);
     private float Sf(float v) => Theme.Pxf(v, DeviceDpi);
 
@@ -193,12 +195,8 @@ public sealed class AppRowControl : UserControl
         // One-line "what's new" for the app's current release; only present when the catalog carries it.
         _whatsNew.AutoSize = true;
         _whatsNew.UseMnemonic = false;
-        _whatsNew.Visible = HasWhatsNew;
-        if (HasWhatsNew)
-        {
-            string label = string.IsNullOrEmpty(app.WhatsNewVersion) ? "What's new:" : $"New in {app.WhatsNewVersion}:";
-            _whatsNew.Text = $"{label} {app.WhatsNew}";
-        }
+        _whatsNewText = app.WhatsNew; _whatsNewVersion = app.WhatsNewVersion;
+        ApplyWhatsNewText();
 
         // Variant toggle (Standard/Full) — only for apps that ship more than one download.
         _variant.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -804,6 +802,24 @@ public sealed class AppRowControl : UserControl
         _progress.MarqueeAnimationSpeed = 60;
         _progress.Visible = true;
         LayoutControls();   // the badge is AutoSize + right-aligned, so a wider text must re-position
+    }
+
+    private void ApplyWhatsNewText()
+    {
+        _whatsNew.Visible = HasWhatsNew;
+        if (!HasWhatsNew) { _whatsNew.Text = ""; return; }
+        string label = string.IsNullOrEmpty(_whatsNewVersion) ? "What's new:" : $"New in {_whatsNewVersion}:";
+        _whatsNew.Text = $"{label} {_whatsNewText}";
+    }
+
+    /// <summary>Replaces the "New in" line (relay overlay; null hides it). Re-lays-out only when it changed —
+    /// the line's presence is part of the row's height, so the list re-flows for a genuine change.</summary>
+    public void SetWhatsNew(string? text, string? version)
+    {
+        if (text == _whatsNewText && version == _whatsNewVersion) return;
+        _whatsNewText = text; _whatsNewVersion = version;
+        ApplyWhatsNewText();
+        if (!_compact) LayoutControls();
     }
 
     private void ApplyBadge(string text, Color color)

@@ -103,6 +103,7 @@ public sealed class MainForm : Form
 
         RescaleChrome();   // fonts, heights, paddings and fixed positions from the DPI (before the rows measure the list)
         LoadCatalog();
+        if (WhatsNewCache.Load() is { } cachedNotes) ApplyWhatsNew(cachedNotes);   // last relay copy, for offline starts
         ApplyTheme();
         SetupTray();
         FormClosing += OnFormClosing;
@@ -622,6 +623,22 @@ public sealed class MainForm : Form
         return groups;
     }
 
+    /// <summary>Overlays the relay's editable "New in" lines on every row (catalog line where the relay has
+    /// none). One layout pass: a changed line changes the row's height, which re-flows the list.</summary>
+    private void ApplyWhatsNew(WhatsNewNotes notes)
+    {
+        _list.SuspendLayout();
+        try
+        {
+            foreach (var row in _rows)
+            {
+                var (line, version) = notes.Resolve(row.App.Id, row.App.WhatsNew, row.App.WhatsNewVersion);
+                row.SetWhatsNew(line, version);
+            }
+        }
+        finally { _list.ResumeLayout(true); }
+    }
+
     /// <summary>Lays out the FlowLayoutPanel: for each group, its header then (unless collapsed) its rows;
     /// collapsed/hidden rows and unused headers are hidden and parked at the end. <c>_rows</c> stays the
     /// master order, and each row's displayed visibility is (would-show AND section not collapsed).</summary>
@@ -826,6 +843,9 @@ public sealed class MainForm : Form
                 row.SetChecking();
             }
 
+            // The relay's editable "New in" lines ride along with the update check (server mode only; null =
+            // keep what we have). Applied after the release results, under one SuspendLayout.
+            var notesTask = client.WhatsNewNotesAsync();
             var results = await Task.WhenAll(_rows.Select(async row =>
             {
                 try
@@ -876,6 +896,14 @@ public sealed class MainForm : Form
                 if (installed != null || accessible) _eligible.Add(row.App.Id); else _eligible.Remove(row.App.Id);
             }
             ReindexList();   // re-group and set displayed visibility now that eligibility settled
+
+            var notes = await notesTask;
+            if (notes != null)
+            {
+                ApplyWhatsNew(notes.Value.Notes);
+                WhatsNewCache.Save(notes.Value.Raw);
+                Log.Write($"what's-new: applied {notes.Value.Notes.Count} relay line(s)");
+            }
 
             // One clear notice for the whole-credential states instead of rows full of errors.
             if (unauthorized) { ShowNotice(BadCredsMsg); Log.Write($"refresh: credentials rejected ({_settings.AuthMode} mode)"); }
