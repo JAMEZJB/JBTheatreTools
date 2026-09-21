@@ -31,8 +31,8 @@ internal static class Shortcuts
     }
 
     // Per-location variants — used by the per-app "Add desktop / Start Menu shortcut" menu items.
-    public static void CreateStartMenu(string name, string targetExe) => CreateAt(Path.Combine(StartMenuDir, name + ".lnk"), targetExe);
-    public static void CreateDesktop(string name, string targetExe) => CreateAt(Path.Combine(DesktopDir, name + ".lnk"), targetExe);
+    public static bool CreateStartMenu(string name, string targetExe) => CreateAt(Path.Combine(StartMenuDir, name + ".lnk"), targetExe);
+    public static bool CreateDesktop(string name, string targetExe) => CreateAt(Path.Combine(DesktopDir, name + ".lnk"), targetExe);
     public static void RemoveStartMenu(string name) => TryDelete(Path.Combine(StartMenuDir, name + ".lnk"));
     public static void RemoveDesktop(string name) => TryDelete(Path.Combine(DesktopDir, name + ".lnk"));
 
@@ -44,28 +44,32 @@ internal static class Shortcuts
         return name.Trim();
     }
 
-    private static void CreateAt(string lnkPath, string targetExe)
+    private static bool CreateAt(string lnkPath, string targetExe)
     {
+        var temporary = Path.Combine(Path.GetDirectoryName(lnkPath)!, ".shortcut-" + Guid.NewGuid().ToString("N") + ".lnk");
         try
         {
             var type = Type.GetTypeFromProgID("WScript.Shell");
-            if (type == null) return;
+            if (type == null) return false;
             dynamic shell = Activator.CreateInstance(type)!;
             try
             {
-                var shortcut = shell.CreateShortcut(lnkPath);
+                var shortcut = shell.CreateShortcut(temporary);
                 shortcut.TargetPath = targetExe;
                 shortcut.WorkingDirectory = Path.GetDirectoryName(targetExe) ?? "";
                 shortcut.IconLocation = targetExe + ",0";
                 shortcut.Save();
                 Marshal.FinalReleaseComObject(shortcut);
+                File.Move(temporary, lnkPath, overwrite: true);
+                return true;
             }
             finally
             {
                 Marshal.FinalReleaseComObject(shell);
             }
         }
-        catch { /* shortcuts are best-effort */ }
+        catch { return false; /* shortcuts are best-effort */ }
+        finally { TryDelete(temporary); }
     }
 
     private static void TryDelete(string path)

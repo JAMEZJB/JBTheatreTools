@@ -53,6 +53,11 @@ signature when one is published; releases that predate signing are allowed with 
 (This logic is unit-tested against a real signed release: `swift test` in `JBTheatreTools/`, and
 `dotnet test JBTheatreToolsWin/Core.Tests`.)
 
+**Windows updates:** EXE and ZIP downloads are prepared in a separate folder before the installed
+version is changed. Failed extraction or metadata publication leaves the previous installation
+available. Shortcuts are replaced only after the new install is recorded; a shortcut or old-file
+cleanup failure does not discard the new install. Old files that cannot be removed are retained.
+
 **First launch on macOS:** if you downloaded JB Theatre Tools from the browser, Gatekeeper may block it
 the first time (it's ad-hoc signed, not notarized). Right-click the app → **Open** → **Open** once; after
 that it launches normally. Apps you install **through** JB Theatre Tools are unaffected.

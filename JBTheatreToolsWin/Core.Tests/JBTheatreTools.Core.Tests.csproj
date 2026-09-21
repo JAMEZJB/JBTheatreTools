@@ -20,6 +20,8 @@
 
   <ItemGroup>
     <ProjectReference Include="../Core/JBTheatreTools.Core.csproj" />
+    <Compile Include="../InstallManager.cs" Link="Integration/InstallManager.cs" />
+    <Compile Include="../Catalog.cs" Link="Integration/Catalog.cs" />
   </ItemGroup>
 
   <ItemGroup>

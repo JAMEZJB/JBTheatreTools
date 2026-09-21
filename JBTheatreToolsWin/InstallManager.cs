@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -36,8 +35,8 @@ public sealed class InstalledRecord
     /// <summary>Which variant (e.g. "standard"/"full") is installed, for apps that ship variants
     /// (null = single-variant app or a manifest written before variants existed).</summary>
     public string? Variant { get; set; }
-    /// <summary>For a one-dir (.zip) install, the extracted folder to remove on uninstall. Null for a
-    /// single-file .exe install (older manifests have no field → treated as single-file).</summary>
+    /// <summary>The payload generation folder to remove on uninstall (EXE or ZIP). Null for a
+    /// legacy single-file install (older manifests have no field → treated as single-file).</summary>
     public string? InstallDir { get; set; }
 }
 
@@ -51,7 +50,8 @@ public sealed class InstalledRecord
 /// </summary>
 public sealed class InstallManager
 {
-    public static readonly InstallManager Shared = new();
+    private static readonly Lazy<InstallManager> SharedInstance = new(() => new InstallManager());
+    public static InstallManager Shared => SharedInstance.Value;
 
     public string SupportDir { get; }
     public string AppsDir { get; }
@@ -64,14 +64,15 @@ public sealed class InstallManager
     // on any manifest write (the only thing that changes what's on disk). `lock` is re-entrant, so the
     // resolution methods can call one another under one lock.
     private readonly object _readLock = new();
+    private readonly object _mutationLock = new();
     private Dictionary<string, InstalledRecord>? _snapshot;
     private readonly Dictionary<string, string?> _pathCache = new();
     private readonly Dictionary<string, string?> _nameCache = new();
 
-    public InstallManager()
+    public InstallManager(string? supportDirectory = null)
     {
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        SupportDir = Path.Combine(local, "JBTheatreTools");
+        SupportDir = supportDirectory ?? Path.Combine(local, "JBTheatreTools");
         AppsDir = Path.Combine(SupportDir, "apps");
         CacheDir = Path.Combine(SupportDir, "cache");
         ManifestPath = Path.Combine(SupportDir, "installed.json");
@@ -79,16 +80,17 @@ public sealed class InstallManager
         Directory.CreateDirectory(CacheDir);
     }
 
-    public Dictionary<string, InstalledRecord> Manifest()
+    public Dictionary<string, InstalledRecord> Manifest(bool strict = false)
     {
         Dictionary<string, InstalledRecord> m = new();
         try
         {
-            if (File.Exists(ManifestPath))
-                m = JsonSerializer.Deserialize<Dictionary<string, InstalledRecord>>(
-                    File.ReadAllText(ManifestPath)) ?? new();
+            m = JsonSerializer.Deserialize<Dictionary<string, InstalledRecord>>(
+                File.ReadAllText(ManifestPath)) ?? throw new JsonException("The install manifest is empty.");
         }
-        catch { /* fall through to empty */ }
+        catch (FileNotFoundException) { }
+        catch (DirectoryNotFoundException) { }
+        catch when (!strict) { /* read-only display may fall through to empty */ }
         // Migrate the legacy single ShortcutName (which meant BOTH locations) to per-location fields.
         foreach (var rec in m.Values)
         {
@@ -100,15 +102,15 @@ public sealed class InstallManager
         return m;
     }
 
-    private void WriteManifest(Dictionary<string, InstalledRecord> m)
+    private void WriteManifest(Dictionary<string, InstalledRecord> m, bool strict = false)
     {
         try
         {
             Directory.CreateDirectory(SupportDir);
-            File.WriteAllText(ManifestPath,
+            InstallTransaction.WriteManifest(ManifestPath,
                 JsonSerializer.Serialize(m, new JsonSerializerOptions { WriteIndented = true }));
         }
-        catch (Exception ex) { Log.Write($"manifest write failed: {ex.Message}"); }
+        catch (Exception ex) when (!strict) { Log.Write($"manifest write failed: {ex.Message}"); }
         // Installs/removals change what's on disk → drop the read caches so the next resolve re-reads.
         lock (_readLock) { _snapshot = null; _pathCache.Clear(); _nameCache.Clear(); }
     }
@@ -172,98 +174,112 @@ public sealed class InstallManager
     /// distinct name on Windows, so no rename is needed.) No-op when nothing matches.</summary>
     public void MigrateVariantSlots(IEnumerable<CatalogApp> apps)
     {
-        var m = Manifest();
-        bool changed = false;
-        foreach (var app in apps.Where(a => a.HasVariants))
+        lock (_mutationLock)
         {
-            if (!m.TryGetValue(app.Id, out var rec) || rec.Variant == null || app.IsDefaultVariant(rec.Variant)) continue;
-            var key = app.InstallKey(rec.Variant);
-            if (m.ContainsKey(key)) continue;   // that slot already has its own record — leave both alone
-            m[key] = rec;
-            m.Remove(app.Id);
-            changed = true;
+            var m = Manifest();
+            bool changed = false;
+            foreach (var app in apps.Where(a => a.HasVariants))
+            {
+                if (!m.TryGetValue(app.Id, out var rec) || rec.Variant == null || app.IsDefaultVariant(rec.Variant)) continue;
+                var key = app.InstallKey(rec.Variant);
+                if (m.ContainsKey(key)) continue;   // that slot already has its own record — leave both alone
+                m[key] = rec;
+                m.Remove(app.Id);
+                changed = true;
+            }
+            if (changed) WriteManifest(m);
         }
-        if (changed) WriteManifest(m);
     }
 
-    public string Install(CatalogApp app, string version, string downloadedExe, string assetName, bool toApplications, string? variant = null)
+    public string Install(CatalogApp app, string version, string downloadedExe, string assetName,
+        bool toApplications, string? variant = null, CancellationToken cancellationToken = default)
     {
+        InstallTransaction.ValidateComponent(app.Id);
         var dir = Path.Combine(AppsDir, app.Id);
-        Directory.CreateDirectory(dir);
         var key = app.InstallKey(variant);
-
-        string dest;          // the .exe to launch / point shortcuts at
-        string? installDir;   // the extracted folder to remove on uninstall (null = single-file .exe)
-        if (assetName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-        {
-            // Heavy "Full" editions ship as a one-dir PyInstaller build in a .zip. Extract into a per-slot
-            // folder (Standard/Full share apps/<id>/, so key the folder by the install slot) and record the
-            // launcher .exe inside. Copy/extract (not move) so the verified download survives a failure.
-            installDir = Path.Combine(dir, key.Replace('@', '-'));
-            if (Directory.Exists(installDir)) Directory.Delete(installDir, recursive: true);   // clean reinstall/update
-            Directory.CreateDirectory(installDir);
-            ZipFile.ExtractToDirectory(downloadedExe, installDir);
-            var stem = FullApp.ExpectedStem(app.Name, app.VariantLabel(variant));
-            var exes = Directory.EnumerateFiles(installDir, "*.exe", SearchOption.AllDirectories).ToList();
-            var mainExe = FullApp.PickMainExe(exes, stem);
-            if (mainExe == null)
+        InstalledRecord? previous = null;
+        bool shortcutsUpdated = true;
+        var payload = InstallTransaction.Install(dir, key, downloadedExe, assetName,
+            FullApp.ExpectedStem(app.Name, app.VariantLabel(variant)), staged =>
             {
-                try { Directory.Delete(installDir, recursive: true); } catch { /* best effort */ }
-                throw new InvalidOperationException($"No .exe found inside {assetName}.");
-            }
-            dest = mainExe;
-        }
-        else
-        {
-            // Single-file self-contained .exe: place it directly under apps/<id>/.
-            dest = Path.Combine(dir, assetName);
-            File.Copy(downloadedExe, dest, overwrite: true);
-            installDir = null;
-        }
+                lock (_mutationLock)
+                {
+                    // Never overwrite unreadable metadata with an apparently empty inventory.
+                    var m = Manifest(strict: true);
+                    m.TryGetValue(key, out previous);
+                    m[key] = new InstalledRecord
+                    {
+                        Version = version, Path = staged.Executable,
+                        InstalledAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                        StartMenuShortcut = previous?.StartMenuShortcut,
+                        DesktopShortcut = previous?.DesktopShortcut,
+                        Variant = variant, InstallDir = staged.Directory
+                    };
+                    WriteManifest(m, strict: true); // the commit point; failure leaves old install intact
+                }
+            }, cancellationToken);
 
-        var m = Manifest();
-        // Remove shortcuts from any previous install (the name may have changed), remembering which
-        // locations the user had so an update re-creates them. Each variant is its own install slot
-        // (Standard and Full coexist under apps/<id>/); only the previous install of THIS slot is replaced.
-        bool hadStart = false, hadDesktop = false;
-        if (m.TryGetValue(key, out var prev))
-        {
-            hadStart = prev.StartMenuShortcut != null;
-            hadDesktop = prev.DesktopShortcut != null;
-            if (prev.StartMenuShortcut != null) Shortcuts.RemoveStartMenu(prev.StartMenuShortcut);
-            if (prev.DesktopShortcut != null) Shortcuts.RemoveDesktop(prev.DesktopShortcut);
-        }
-
-        // The global install-to-Applications setting creates both; otherwise keep whatever the user
-        // had added per-app. Best-effort: a shortcut failure must not abort the install.
-        string? startName = null, desktopName = null;
         try
         {
-            // A non-default variant's shortcuts carry its label (" (Full)") so they sit beside the default's.
-            // F10: name the shortcut from the CATALOG (trusted), not the downloaded exe's ProductName — a
-            // hostile exe could otherwise declare ProductName "Google Chrome" and clobber the user's real
-            // Google Chrome.lnk (which Uninstall would then delete).
-            var name = Shortcuts.SafeName(app.Name + app.VariantSuffix(variant));
-            if (toApplications || hadStart) { Shortcuts.CreateStartMenu(name, dest); startName = name; }
-            if (toApplications || hadDesktop) { Shortcuts.CreateDesktop(name, dest); desktopName = name; }
+            // Shortcuts change only AFTER payload + manifest commit. Preserve an old shortcut and its
+            // payload if recreating it fails, rather than removing the user's working link first.
+            lock (_mutationLock)
+            {
+                var m = Manifest(strict: true);
+                if (m.TryGetValue(key, out var current) && current.Path == payload.Executable)
+                {
+                    var name = Shortcuts.SafeName(app.Name + app.VariantSuffix(variant));
+                    if (toApplications || previous?.StartMenuShortcut != null)
+                    {
+                        if (Shortcuts.CreateStartMenu(name, payload.Executable))
+                        {
+                            current.StartMenuShortcut = name;
+                        }
+                        else shortcutsUpdated = false;
+                    }
+                    if (toApplications || previous?.DesktopShortcut != null)
+                    {
+                        if (Shortcuts.CreateDesktop(name, payload.Executable))
+                        {
+                            current.DesktopShortcut = name;
+                        }
+                        else shortcutsUpdated = false;
+                    }
+                    WriteManifest(m, strict: true);
+                    if (current.StartMenuShortcut == name && previous?.StartMenuShortcut is string oldStart && oldStart != name)
+                        Shortcuts.RemoveStartMenu(oldStart);
+                    if (current.DesktopShortcut == name && previous?.DesktopShortcut is string oldDesktop && oldDesktop != name)
+                        Shortcuts.RemoveDesktop(oldDesktop);
+                    if (shortcutsUpdated && previous != null)
+                        RemovePreviousPayload(previous, payload, dir, m.Values);
+                }
+            }
         }
         catch (Exception ex)
         {
-            Log.Write($"install {app.Id}: shortcut creation failed: {ex.Message}");
+            // The install is already committed. A shortcut/cleanup failure must not turn it into
+            // an apparent failed install or remove a payload still referenced by metadata.
+            Log.Write($"install {app.Id}: post-install cleanup deferred: {ex.Message}");
         }
+        return payload.Executable;
+    }
 
-        m[key] = new InstalledRecord
+    private static void RemovePreviousPayload(InstalledRecord previous, InstalledPayload current,
+        string appDirectory, IEnumerable<InstalledRecord> records)
+    {
+        var old = Path.GetFullPath(previous.InstallDir ?? previous.Path);
+        var root = Path.GetFullPath(appDirectory) + Path.DirectorySeparatorChar;
+        if (!old.StartsWith(root, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(old, current.Directory, StringComparison.OrdinalIgnoreCase)) return;
+        // A legacy slot can share a directory with another variant. Never remove a sibling's payload.
+        if (records.Any(r => Path.GetFullPath(r.Path).Equals(old, StringComparison.OrdinalIgnoreCase) ||
+            Path.GetFullPath(r.Path).StartsWith(old + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))) return;
+        try
         {
-            Version = version,
-            Path = dest,
-            InstalledAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            StartMenuShortcut = startName,
-            DesktopShortcut = desktopName,
-            Variant = variant,
-            InstallDir = installDir
-        };
-        WriteManifest(m);
-        return dest;
+            if (previous.InstallDir != null) Directory.Delete(old, recursive: true);
+            else File.Delete(old);
+        }
+        catch (Exception ex) { Log.Write($"previous install retained: {ex.Message}"); }
     }
 
     /// <summary>Launches the app's default-variant slot (CLI / single-variant apps).</summary>
@@ -282,30 +298,33 @@ public sealed class InstallManager
     /// sibling variant (Standard and Full share apps/&lt;id&gt;/) survives.</summary>
     public void Uninstall(string installKey)
     {
-        var m = Manifest();
-        if (m.TryGetValue(installKey, out var rec))
+        lock (_mutationLock)
         {
-            if (rec.StartMenuShortcut != null) Shortcuts.RemoveStartMenu(rec.StartMenuShortcut);
-            if (rec.DesktopShortcut != null) Shortcuts.RemoveDesktop(rec.DesktopShortcut);
-            // Remove the payload: a whole extracted one-dir (.zip Full) install, or a single-file .exe.
-            try
+            var m = Manifest();
+            if (m.TryGetValue(installKey, out var rec))
             {
-                if (rec.InstallDir != null && Directory.Exists(rec.InstallDir))
-                    Directory.Delete(rec.InstallDir, recursive: true);
-                else if (File.Exists(rec.Path))
-                    File.Delete(rec.Path);
+                if (rec.StartMenuShortcut != null) Shortcuts.RemoveStartMenu(rec.StartMenuShortcut);
+                if (rec.DesktopShortcut != null) Shortcuts.RemoveDesktop(rec.DesktopShortcut);
+                // Remove the payload: a whole extracted one-dir (.zip Full) install, or a single-file .exe.
+                try
+                {
+                    if (rec.InstallDir != null && Directory.Exists(rec.InstallDir))
+                        Directory.Delete(rec.InstallDir, recursive: true);
+                    else if (File.Exists(rec.Path))
+                        File.Delete(rec.Path);
+                }
+                catch (Exception ex) { Log.Write($"uninstall {installKey}: could not delete payload: {ex.Message}"); }
+                // Clean the app's base dir once no sibling slot's files remain (Standard/Full share apps/<id>/).
+                try
+                {
+                    var appDir = Path.Combine(AppsDir, installKey.Split('@')[0]);
+                    if (Directory.Exists(appDir) && !Directory.EnumerateFileSystemEntries(appDir).Any())
+                        Directory.Delete(appDir);
+                }
+                catch (Exception ex) { Log.Write($"uninstall {installKey}: could not remove empty app dir: {ex.Message}"); }
             }
-            catch (Exception ex) { Log.Write($"uninstall {installKey}: could not delete payload: {ex.Message}"); }
-            // Clean the app's base dir once no sibling slot's files remain (Standard/Full share apps/<id>/).
-            try
-            {
-                var appDir = Path.Combine(AppsDir, installKey.Split('@')[0]);
-                if (Directory.Exists(appDir) && !Directory.EnumerateFileSystemEntries(appDir).Any())
-                    Directory.Delete(appDir);
-            }
-            catch (Exception ex) { Log.Write($"uninstall {installKey}: could not remove empty app dir: {ex.Message}"); }
+            if (m.Remove(installKey)) WriteManifest(m);
         }
-        if (m.Remove(installKey)) WriteManifest(m);
     }
 
     // --- Reconcile install location (Windows: the exe never moves, only its shortcuts) ---
@@ -326,20 +345,23 @@ public sealed class InstallManager
     /// is the display name to use (already carrying any variant suffix).</summary>
     public void SyncShortcuts(string installKey, string shortcutName, bool toApplications)
     {
-        var m = Manifest();
-        if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
-        if (toApplications)
+        lock (_mutationLock)
         {
-            var name = Shortcuts.SafeName(shortcutName);
-            if (r.StartMenuShortcut == null) { Shortcuts.CreateStartMenu(name, r.Path); r.StartMenuShortcut = name; }
-            if (r.DesktopShortcut == null) { Shortcuts.CreateDesktop(name, r.Path); r.DesktopShortcut = name; }
+            var m = Manifest();
+            if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
+            if (toApplications)
+            {
+                var name = Shortcuts.SafeName(shortcutName);
+                if (r.StartMenuShortcut == null && Shortcuts.CreateStartMenu(name, r.Path)) r.StartMenuShortcut = name;
+                if (r.DesktopShortcut == null && Shortcuts.CreateDesktop(name, r.Path)) r.DesktopShortcut = name;
+            }
+            else
+            {
+                if (r.StartMenuShortcut != null) { Shortcuts.RemoveStartMenu(r.StartMenuShortcut); r.StartMenuShortcut = null; }
+                if (r.DesktopShortcut != null) { Shortcuts.RemoveDesktop(r.DesktopShortcut); r.DesktopShortcut = null; }
+            }
+            WriteManifest(m);
         }
-        else
-        {
-            if (r.StartMenuShortcut != null) { Shortcuts.RemoveStartMenu(r.StartMenuShortcut); r.StartMenuShortcut = null; }
-            if (r.DesktopShortcut != null) { Shortcuts.RemoveDesktop(r.DesktopShortcut); r.DesktopShortcut = null; }
-        }
-        WriteManifest(m);
     }
 
     // --- Per-app shortcut toggles (from the row's ⋯ menu) ---
@@ -349,38 +371,42 @@ public sealed class InstallManager
 
     public void SetDesktopShortcut(string installKey, string shortcutName, bool on)
     {
-        var m = Manifest();
-        if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
-        if (on && r.DesktopShortcut == null)
+        lock (_mutationLock)
         {
-            var name = Shortcuts.SafeName(shortcutName);
-            Shortcuts.CreateDesktop(name, r.Path);
-            r.DesktopShortcut = name;
+            var m = Manifest();
+            if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
+            if (on && r.DesktopShortcut == null)
+            {
+                var name = Shortcuts.SafeName(shortcutName);
+                if (Shortcuts.CreateDesktop(name, r.Path)) r.DesktopShortcut = name;
+            }
+            else if (!on && r.DesktopShortcut != null)
+            {
+                Shortcuts.RemoveDesktop(r.DesktopShortcut);
+                r.DesktopShortcut = null;
+            }
+            WriteManifest(m);
         }
-        else if (!on && r.DesktopShortcut != null)
-        {
-            Shortcuts.RemoveDesktop(r.DesktopShortcut);
-            r.DesktopShortcut = null;
-        }
-        WriteManifest(m);
     }
 
     public void SetStartMenuShortcut(string installKey, string shortcutName, bool on)
     {
-        var m = Manifest();
-        if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
-        if (on && r.StartMenuShortcut == null)
+        lock (_mutationLock)
         {
-            var name = Shortcuts.SafeName(shortcutName);
-            Shortcuts.CreateStartMenu(name, r.Path);
-            r.StartMenuShortcut = name;
+            var m = Manifest();
+            if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
+            if (on && r.StartMenuShortcut == null)
+            {
+                var name = Shortcuts.SafeName(shortcutName);
+                if (Shortcuts.CreateStartMenu(name, r.Path)) r.StartMenuShortcut = name;
+            }
+            else if (!on && r.StartMenuShortcut != null)
+            {
+                Shortcuts.RemoveStartMenu(r.StartMenuShortcut);
+                r.StartMenuShortcut = null;
+            }
+            WriteManifest(m);
         }
-        else if (!on && r.StartMenuShortcut != null)
-        {
-            Shortcuts.RemoveStartMenu(r.StartMenuShortcut);
-            r.StartMenuShortcut = null;
-        }
-        WriteManifest(m);
     }
 
     // --- Download integrity (SHA-256) ---
