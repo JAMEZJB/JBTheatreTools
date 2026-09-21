@@ -1,0 +1,10 @@
+# Gradle / Android build output
+build/
+.gradle/
+local.properties
+.kotlin/
+*.iml
+.idea/
+# Never a keystore in this repo
+*.jks
+*.keystore

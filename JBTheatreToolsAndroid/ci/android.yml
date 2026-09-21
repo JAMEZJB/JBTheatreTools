@@ -1,0 +1,155 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# JB Theatre Tools for Android — the Android leg of the launcher's release CI.
+#
+# NOT a workflow on its own: merge this JOB into the repo's existing release
+# workflow beside the macOS and Windows jobs, so ONE tag ships all three. The
+# existing `release` job then attaches the artifact this job uploads.
+#
+# Every `uses:` is pinned by full commit SHA with the tag in the trailing comment;
+# re-verify each pin against the peeled tag before it lands.
+#
+# Secrets consumed (the suite key is ONE key for every app and the launcher):
+#   SUITE_KEYSTORE_B64   base64 of the .jks
+#   SUITE_KEYSTORE_PASS  store password; the key password is the SAME value
+#   SUITE_KEY_ALIAS      the key alias
+#
+# The certificate this key produces is pinned in the launcher
+# (core/SigningCert.kt). If the key ever changes, that constant changes with it
+# in the same release, or no install will verify.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: build-android
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    env:
+      APP_SLUG: JBTheatreTools
+      ANDROID_DIR: JBTheatreToolsAndroid
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Read the launcher's version
+        id: launcher
+        run: |
+          set -euo pipefail
+          VER=$(sed -n 's/^versionName=//p' "$ANDROID_DIR/launcher.properties" | head -1)
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "$APP_SLUG v$VER"
+          # One version across mac / Windows / Android: the Android version must match the
+          # macOS Info.plist and the Windows csproj, or the tag is shipping three things.
+          MAC=$(sed -n '/CFBundleShortVersionString/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' JBTheatreTools/Info.plist | head -1)
+          WIN=$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' JBTheatreToolsWin/JBTheatreTools.csproj | head -1)
+          if [ "$VER" != "$MAC" ] || [ "$VER" != "$WIN" ]; then
+            echo "::error::version mismatch — android=$VER macos=$MAC windows=$WIN"
+            exit 1
+          fi
+
+      - name: Confirm the Android SDK
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms"
+          ls "$ANDROID_HOME/build-tools"
+
+      - name: Decode the suite keystore
+        env:
+          SUITE_KEYSTORE_B64: ${{ secrets.SUITE_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUITE_KEYSTORE_B64:-}" ]; then
+            echo "::error::SUITE_KEYSTORE_B64 is not set — an unsigned APK is never published."
+            exit 1
+          fi
+          # Outside the workspace so it can never be picked up by a glob or an artifact.
+          install -d -m 700 "$RUNNER_TEMP/signing"
+          printf '%s' "$SUITE_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/signing/suite.jks"
+          chmod 600 "$RUNNER_TEMP/signing/suite.jks"
+
+      - name: Unit tests
+        working-directory: ${{ env.ANDROID_DIR }}
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon :app:testDebugUnitTest
+
+      - name: Assemble the signed release APK
+        working-directory: ${{ env.ANDROID_DIR }}
+        env:
+          SUITE_KEYSTORE_PATH: ${{ runner.temp }}/signing/suite.jks
+          SUITE_KEYSTORE_PASS: ${{ secrets.SUITE_KEYSTORE_PASS }}
+          SUITE_KEY_ALIAS: ${{ secrets.SUITE_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Name, verify and checksum the asset
+        id: asset
+        working-directory: ${{ env.ANDROID_DIR }}
+        run: |
+          set -euo pipefail
+          VER="${{ steps.launcher.outputs.version }}"
+          SRC=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          [ -n "$SRC" ] || { echo "::error::no APK produced"; exit 1; }
+          case "$SRC" in
+            *unsigned*) echo "::error::the APK is UNSIGNED — check the signing secrets"; exit 1 ;;
+          esac
+          OUT="${APP_SLUG}-v${VER}-android-arm64.apk"
+          install -d "$RUNNER_TEMP/out"
+          cp "$SRC" "$RUNNER_TEMP/out/$OUT"
+
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -1)
+          "$APKSIGNER" verify --verbose "$RUNNER_TEMP/out/$OUT"
+
+          # The launcher pins this certificate; if it ever stops matching, every install in the
+          # field fails closed — so the build says so here instead.
+          PINNED=$(sed -n 's/.*SUITE_CERT_SHA256 = "\(.*\)".*/\1/p' \
+            app/src/main/java/com/jamesbreedon/jbtheatretools/core/SigningCert.kt | head -1)
+          GOT=$("$APKSIGNER" verify --print-certs "$RUNNER_TEMP/out/$OUT" \
+            | sed -n 's/.*certificate SHA-256 digest: //p' | head -1)
+          if [ "$PINNED" != "$GOT" ]; then
+            echo "::error::signing certificate $GOT does not match the pin $PINNED"
+            exit 1
+          fi
+
+          ABIS=$(unzip -Z1 "$RUNNER_TEMP/out/$OUT" 'lib/*' | cut -d/ -f2 | sort -u | tr '\n' ' ')
+          if [ -n "$(echo "$ABIS" | tr -d ' ')" ] && [ "$(echo "$ABIS" | tr -d ' ')" != "arm64-v8a" ]; then
+            echo "::error::ABI set is '$ABIS' — arm64-v8a only"; exit 1
+          fi
+          # The shared catalog and the row icons must be in the APK, not forked into it.
+          unzip -Z1 "$RUNNER_TEMP/out/$OUT" 'assets/catalog.json' >/dev/null || {
+            echo "::error::catalog.json is not in the APK"; exit 1; }
+
+          ( cd "$RUNNER_TEMP/out" && sha256sum "$OUT" > "$OUT.sha256" )
+          echo "name=$OUT" >> "$GITHUB_OUTPUT"
+          echo "dir=$RUNNER_TEMP/out" >> "$GITHUB_OUTPUT"
+          ls -la "$RUNNER_TEMP/out"
+
+      - name: Shred the keystore
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/signing"
+
+      - name: Upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ env.APP_SLUG }}-android
+          path: ${{ steps.asset.outputs.dir }}/*
+          if-no-files-found: error
+          retention-days: 7

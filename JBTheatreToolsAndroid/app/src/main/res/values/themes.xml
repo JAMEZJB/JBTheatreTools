@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Compose does the theming (§2); the activity theme only gets out of the way and gives the
+         system splash its accent tile. Edge-to-edge is set in code (enableEdgeToEdge). -->
+    <style name="Theme.JBTheatreTools" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/ground</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:enforceNavigationBarContrast" tools:targetApi="29">false</item>
+        <item name="android:enforceStatusBarContrast" tools:targetApi="29">false</item>
+    </style>
+
+    <style name="Theme.JBTheatreTools.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/ground</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_splash_tile</item>
+        <item name="postSplashScreenTheme">@style/Theme.JBTheatreTools</item>
+    </style>
+</resources>

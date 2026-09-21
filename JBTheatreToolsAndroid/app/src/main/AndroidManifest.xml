@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- The launcher IS the installer (§1a): it commits PackageInstaller sessions itself,
+         so it asks for "Install unknown apps" once and explains why in one line. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- "Remove" hands the app to the system uninstaller; without this the system refuses to show
+         that prompt at all ("does not have REQUEST_DELETE_PACKAGES"). It is a normal permission:
+         no runtime prompt, and the user still confirms in the system's own dialog. -->
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <!-- Android 14+: claim update ownership of the apps this launcher installs. -->
+    <uses-permission android:name="android.permission.ENFORCE_UPDATE_OWNERSHIP" />
+
+    <!-- Package visibility (Android 11+). The launcher looks up ONLY the suite's own apps by
+         applicationId — never QUERY_ALL_PACKAGES. Keep in step with core/PackageIds.kt. -->
+    <queries>
+        <package android:name="com.jamesbreedon.helo" />
+        <package android:name="com.jamesbreedon.dmx" />
+        <package android:name="com.jamesbreedon.psn" />
+        <package android:name="com.jamesbreedon.timecode" />
+        <package android:name="com.jamesbreedon.shownet" />
+        <package android:name="com.jamesbreedon.ndi" />
+        <package android:name="com.jamesbreedon.showcontrol" />
+        <package android:name="com.jamesbreedon.projector" />
+        <package android:name="com.jamesbreedon.power" />
+        <package android:name="com.jamesbreedon.portmap" />
+        <package android:name="com.jamesbreedon.dashboard" />
+        <package android:name="com.jamesbreedon.handbook" />
+        <package android:name="com.jamesbreedon.desk" />
+        <package android:name="com.jamesbreedon.labels" />
+        <package android:name="com.jamesbreedon.inventory" />
+        <package android:name="com.jamesbreedon.rename" />
+        <package android:name="com.jamesbreedon.surtitle" />
+        <package android:name="com.jamesbreedon.image" />
+        <package android:name="com.jamesbreedon.cisco" />
+        <package android:name="com.jamesbreedon.pdf" />
+        <package android:name="com.jamesbreedon.radar" />
+        <package android:name="com.jamesbreedon.convert" />
+    </queries>
+
+    <application
+        android:name=".LauncherApp"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:enableOnBackInvokedCallback="true"
+        android:theme="@style/Theme.JBTheatreTools"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale"
+            android:theme="@style/Theme.JBTheatreTools.Splash"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- PackageInstaller session status comes back here (never an ACTION_VIEW install). -->
+        <receiver
+            android:name=".install.InstallResultReceiver"
+            android:exported="false" />
+    </application>
+</manifest>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon (§5 rule 15). Foreground + background are the kit's design-approved
+     layers (kit/android-icons/theatre/); monochrome is the toolbar glyph for Android 13+
+     themed icons. Nothing here is hand-drawn. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@mipmap/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_theatre_glyph" />
+</adaptive-icon>
