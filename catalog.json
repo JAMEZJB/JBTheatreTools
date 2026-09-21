@@ -17,8 +17,8 @@
       "windows-x64": "JBTheatreTools-Windows-x64.exe",
       "windows-arm64": "JBTheatreTools-Windows-arm64.exe"
     },
-    "whatsNew": "Downloads are now verified before they install.",
-    "whatsNewVersion": "v1.16.0"
+    "whatsNew": "Now on Android too: the launcher installs the suite on phones and tablets.",
+    "whatsNewVersion": "v1.27.0"
   },
   "apps": [
     {

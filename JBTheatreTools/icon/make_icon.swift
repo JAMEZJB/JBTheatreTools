@@ -1,7 +1,7 @@
 // Generates icon_1024.png — the master art for JB Theatre Tools' app icon.
-// Family style (dark slate "squircle", glossy centre, heavy wordmark) themed for the launcher:
-// a theatre spotlight shining down onto a glossy 2×2 grid of app "tiles" (the suite it installs),
-// over a "JB TOOLS" wordmark.
+// Family style (dark slate "squircle", glossy centre) themed for the launcher: a theatre spotlight
+// shining down onto a glossy 2×2 grid of app "tiles" (the suite it installs). House Style v2 icon
+// grammar: glyph-led, centred, no wordmark.
 // Run:  swift make_icon.swift   (then sips/iconutil -> AppIcon.icns; PIL -> app.ico — see make.sh)
 import AppKit
 
@@ -28,6 +28,12 @@ bgPath.addClip()
 NSGradient(colors: [NSColor(red: 0.17, green: 0.19, blue: 0.23, alpha: 1),
                     NSColor(red: 0.07, green: 0.08, blue: 0.10, alpha: 1)])!.draw(in: r, angle: -90)
 ctx.resetClip(); clipSquircle()
+
+// House Style v2 icon grammar (2026-09-21): glyph-led, no wordmark. Everything drawn on top of the
+// tile is centred on (512,512) at 60% of the 824px tile by this transform; the tile, the colours and
+// the glyph drawing below are unchanged.
+ctx.saveGState()
+ctx.translateBy(x: 93.32, y: 2.87); ctx.scaleBy(x: 0.8185, y: 0.8185)
 
 // --- spotlight beam from a lamp at top centre ---
 let apex = NSPoint(x: r.midX, y: r.maxY - 30)
@@ -97,14 +103,7 @@ NSGradient(colors: [NSColor(white: 1, alpha: 0.9), NSColor(red: 1, green: 0.9, b
     .draw(in: NSBezierPath(ovalIn: NSRect(x: apex.x - 40, y: apex.y - 40, width: 80, height: 80)),
           relativeCenterPosition: .zero)
 
-// --- "JB TOOLS" wordmark ---
-let para = NSMutableParagraphStyle(); para.alignment = .center
-let attr = NSAttributedString(string: "JB TOOLS", attributes: [
-    .font: NSFont.systemFont(ofSize: 118, weight: .heavy),
-    .foregroundColor: NSColor.white, .paragraphStyle: para, .kern: 4,
-])
-let sz = attr.size()
-attr.draw(in: NSRect(x: r.minX, y: 232 - sz.height / 2, width: r.width, height: sz.height))
+ctx.restoreGState()
 
 // --- crisp edge ---
 ctx.resetClip()
