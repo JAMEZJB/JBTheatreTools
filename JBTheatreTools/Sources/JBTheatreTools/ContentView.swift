@@ -963,7 +963,16 @@ struct AppRowView: View, Equatable {
             }
             Text(row.app.blurb).font(JBFont.small).foregroundStyle(Color.jbText2).lineLimit(1)
             versionLine
-            whatsNewLine
+            if let error = row.errorMessage {
+                // Visible, not a tooltip: failures ("Quit X before updating it…") used to live only in the log.
+                Text(error)
+                    .font(JBFont.labelRegular)
+                    .foregroundStyle(Color.jbDanger)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                whatsNewLine
+            }
             variantToggle
         }
     }

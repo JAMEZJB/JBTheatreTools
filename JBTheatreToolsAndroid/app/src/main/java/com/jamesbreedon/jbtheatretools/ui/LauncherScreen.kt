@@ -596,7 +596,11 @@ private fun UpdatesList(vm: LauncherViewModel, state: LauncherUiState, gutter: a
             start = gutter, end = gutter, top = 8.dp, bottom = 24.dp,
         ),
     ) {
-        if (pending.isEmpty()) {
+        state.launcherUpdate?.let { version ->
+            item { SectionHeader("JB Theatre Tools") }
+            item { LauncherUpdateRow(version, state.progress["jbtheatretools"], vm) }
+        }
+        if (pending.isEmpty() && state.launcherUpdate == null) {
             item {
                 Column(
                     Modifier.fillMaxWidth().padding(top = 40.dp),
@@ -609,13 +613,45 @@ private fun UpdatesList(vm: LauncherViewModel, state: LauncherUiState, gutter: a
                     BodyText("${state.installedCount} apps installed", maxLines = 1)
                 }
             }
-        } else {
+        } else if (pending.isNotEmpty()) {
             item { SectionHeader("Updates available") }
             items(pending, key = { it.app.id }) { AppRow(it, state.progress[it.app.id], vm) }
         }
         if (notInstalled.isNotEmpty()) {
             item { SectionHeader("Not installed") }
             items(notInstalled, key = { it.app.id }) { AppRow(it, state.progress[it.app.id], vm) }
+        }
+    }
+}
+
+/** The launcher's own update, at the top of Updates (and reachable from About). */
+@Composable
+private fun LauncherUpdateRow(version: String, progress: InstallProgress?, vm: LauncherViewModel) {
+    val c = House.colors
+    Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IdentityTile(40.dp)
+            HSpace(12.dp)
+            Column(Modifier.weight(1f)) {
+                SmallText("JB Theatre Tools", color = c.text, weight = FontWeight.Medium)
+                MonoText("v${vm.launcherVersion} → v$version", color = c.text3)
+            }
+            val busy = progress != null && progress.phase != InstallProgress.Phase.DONE &&
+                progress.phase != InstallProgress.Phase.FAILED
+            SecondaryButton(if (busy) "Updating…" else "Update", Modifier.width(120.dp), enabled = !busy) {
+                vm.updateLauncher()
+            }
+        }
+        VSpace(6.dp)
+        SmallText(
+            "The launcher closes while Android installs its update — open it again afterwards.",
+            color = c.text3, weight = FontWeight.Normal,
+        )
+        if (progress != null && progress.phase != InstallProgress.Phase.DONE) {
+            VSpace(8.dp)
+            SmallText(progressLine(progress), color = c.text2, weight = FontWeight.Normal)
+            VSpace(4.dp)
+            HouseProgress(progress.fraction.toFloat(), Modifier.fillMaxWidth())
         }
     }
 }
@@ -653,6 +689,10 @@ private fun AboutScreen(vm: LauncherViewModel, state: LauncherUiState, gutter: a
                     "Android build ${vm.launcherVersion} (arm64)",
                     color = c.text3, weight = FontWeight.Normal,
                 )
+                state.launcherUpdate?.let { version ->
+                    VSpace(12.dp)
+                    SecondaryButton("Update to v$version", Modifier.width(220.dp)) { vm.updateLauncher() }
+                }
             }
             VSpace(20.dp)
         }

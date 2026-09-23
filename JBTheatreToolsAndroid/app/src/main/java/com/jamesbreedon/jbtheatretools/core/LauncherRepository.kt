@@ -91,6 +91,41 @@ class LauncherRepository(private val context: Context) {
             settings.debugFeedBase.isNotBlank()) ||
             secrets.hasPassphrase() || secrets.hasToken()
 
+    // ── self-update ──────────────────────────────────────────────────────────
+
+    /** The launcher itself as a catalog entry (`self` in catalog.json), or null if the catalog has none. */
+    val launcherApp: CatalogApp? get() = catalog.selfInfo?.asApp()
+
+    /**
+     * The launcher's newer version (normalised, e.g. "1.28.0") when its latest release is newer than this
+     * build AND carries an Android APK; else null. Never throws — a failed check just means "no update".
+     */
+    suspend fun checkLauncherUpdate(): String? = withContext(Dispatchers.IO) {
+        val self = launcherApp ?: return@withContext null
+        val client = client() ?: return@withContext null
+        try {
+            val release = client.latestRelease(self.owner, self.repo)
+            val latest = VersionCompare.norm(release.tagName)
+            if (!VersionCompare.isNewer(latest, launcherVersion)) return@withContext null
+            AndroidAsset.resolve(self, release.tagName, release.assets.map { it.name }) ?: return@withContext null
+            latest
+        } catch (e: Exception) {
+            log.log("self-update check: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Updates the launcher through the SAME chain as every app (signed SHA256SUMS with trusted comment
+     * `JBTheatreTools <tag>`, APK SHA-256, suite certificate, package id). Android replaces the running app
+     * once the user confirms, which ends this process — so on success this usually never returns.
+     */
+    suspend fun installLauncher(onProgress: (InstallProgress) -> Unit): Boolean {
+        val self = launcherApp ?: return false
+        log.log("self-update: installing a new launcher (the app closes while Android replaces it)")
+        return install(self, onProgress)
+    }
+
     /** Refreshes every app's status. Network failures land in the row's note, never as a crash. */
     suspend fun refresh(): List<AppStatus> = withContext(Dispatchers.IO) {
         val client = client()

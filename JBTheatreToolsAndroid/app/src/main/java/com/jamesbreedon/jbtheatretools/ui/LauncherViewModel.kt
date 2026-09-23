@@ -30,9 +30,14 @@ data class LauncherUiState(
     val sheetFor: CatalogApp? = null,         // long-press actions
     val confirmRemove: CatalogApp? = null,    // rule-8 confirm
     val busyAll: Boolean = false,
+    /** A newer launcher version with an Android build (e.g. "1.28.0"), or null. */
+    val launcherUpdate: String? = null,
 ) {
     val installedCount: Int get() = statuses.count { it.isInstalled }
-    val updateCount: Int get() = statuses.count { it.hasUpdate }
+    /** Apps with an update. */
+    val appUpdateCount: Int get() = statuses.count { it.hasUpdate }
+    /** Everything with an update — the apps plus the launcher itself (status row, nav badge, Update all). */
+    val updateCount: Int get() = appUpdateCount + (if (launcherUpdate != null) 1 else 0)
 
     fun visibleStatuses(): List<AppStatus> {
         val q = search?.trim()?.lowercase().orEmpty()
@@ -67,8 +72,27 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(loading = true) }
         viewModelScope.launch {
             val statuses = repo.refresh()
-            _state.update { it.copy(loading = false, statuses = statuses, signedIn = repo.hasCredential()) }
+            val launcherUpdate = repo.checkLauncherUpdate()
+            _state.update {
+                it.copy(loading = false, statuses = statuses, signedIn = repo.hasCredential(), launcherUpdate = launcherUpdate)
+            }
         }
+    }
+
+    /** Update this launcher (same verification as any app). Android closes the app to replace it. */
+    fun updateLauncher() {
+        if (!repo.canRequestInstalls()) {
+            _state.update { it.copy(snackbar = "Allow JB Theatre Tools to install apps, then try again.") }
+            repo.openInstallPermissionSettings()
+            return
+        }
+        viewModelScope.launch { runLauncherUpdate() }
+    }
+
+    private suspend fun runLauncherUpdate() {
+        val ok = repo.installLauncher { p -> _state.update { s -> s.copy(progress = s.progress + (p.catalogId to p)) } }
+        // Only reached when Android did NOT replace us (refused, cancelled or failed verification).
+        if (!ok) _state.update { it.copy(snackbar = "JB Theatre Tools was not updated") }
     }
 
     fun selectTab(tab: Tab) = _state.update { it.copy(tab = tab, sheetFor = null) }
@@ -147,8 +171,10 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             }
             refreshInstalledOnly()
             _state.update {
-                it.copy(busyAll = false, snackbar = "Updated $done of ${pending.size}")
+                it.copy(busyAll = false, snackbar = if (pending.isEmpty()) it.snackbar else "Updated $done of ${pending.size}")
             }
+            // The launcher goes LAST: replacing it ends this process, so every app update must be done first.
+            if (_state.value.launcherUpdate != null) runLauncherUpdate()
         }
     }
 

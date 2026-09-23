@@ -11,8 +11,9 @@
          that prompt at all ("does not have REQUEST_DELETE_PACKAGES"). It is a normal permission:
          no runtime prompt, and the user still confirms in the system's own dialog. -->
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
-    <!-- Android 14+: claim update ownership of the apps this launcher installs. -->
-    <uses-permission android:name="android.permission.ENFORCE_UPDATE_OWNERSHIP" />
+    <!-- No ENFORCE_UPDATE_OWNERSHIP (dropped in 1.28.0): claiming exclusive update rights over other apps is
+         an aggressive-installer signal for Play Protect, and it stopped anything but this launcher (e.g. an
+         APK opened from Files) updating a suite app without an extra prompt. -->
 
     <!-- Package visibility (Android 11+). The launcher looks up ONLY the suite's own apps by
          applicationId — never QUERY_ALL_PACKAGES. Keep in step with core/PackageIds.kt. -->

@@ -1170,6 +1170,34 @@ public sealed class MainForm : Form
                 Log.Write($"install {row.App.Id} {rel.TagName}: BLOCKED (strict) — {reason}");
                 throw new Exception($"Couldn't verify the download — {reason}. Install aborted for safety.");
             }
+            // The app is open: ASK instead of failing with "file in use". Yes → close it (it may prompt to
+            // save) and wait for it to exit; No → skip quietly, the row keeps its Update button.
+            var running = InstallManager.Shared.RunningInstances(row.App.InstallKey(variantId));
+            if (running.Length > 0)
+            {
+                var name = row.App.Name + row.App.VariantSuffix(variantId);
+                row.SetPhase("Waiting…", indeterminate: true);
+                var answer = MessageBox.Show(this,
+                    $"{name} is open. Close it to install the update?\n\nIf it has unsaved work it will ask you first.",
+                    $"{name} is open", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (answer != DialogResult.Yes)
+                {
+                    row.SetPhase(null);
+                    _ = Task.Run(() => InstallManager.TryDelete(cache));
+                    Log.Write($"install {row.App.Id} {rel.TagName}: postponed — {name} is open");
+                    return null;
+                }
+                bool closed = await Task.Run(() =>
+                {
+                    foreach (var p in running) { try { p.CloseMainWindow(); } catch { } }
+                    return running.All(p => { try { return p.WaitForExit(15_000); } catch { return true; } });
+                });
+                if (!closed)
+                {
+                    _ = Task.Run(() => InstallManager.TryDelete(cache));
+                    throw new Exception($"{name} didn't close — close it, then try again.");
+                }
+            }
             row.SetPhase("Installing…", indeterminate: true);
             // Everything disk-heavy OFF the UI thread in one Task.Run: the extract/copy (seconds for a Full
             // edition), the unlink of the cache file (the heaviest synchronous call that was left at the row

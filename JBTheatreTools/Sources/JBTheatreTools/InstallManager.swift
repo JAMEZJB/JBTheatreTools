@@ -166,6 +166,14 @@ final class InstallManager: @unchecked Sendable {
     /// The installed path if the recorded bundle still exists — existence checked once, then cached (the lock
     /// makes it safe for off-main-actor CLI callers too). `manifestLock` is non-recursive, so this resolves
     /// everything under a single lock via `manifestUnlocked()`.
+    /// The running copy of an install slot's app, if it's open right now (for the "quit it first?" prompt).
+    func runningInstance(_ key: String) -> NSRunningApplication? {
+        guard let path = installedPath(key) else { return nil }
+        return NSWorkspace.shared.runningApplications.first { app in
+            app.bundleURL.map { InstallGuard.isRunning(path, amongRunning: [$0]) } ?? false
+        }
+    }
+
     func installedPath(_ appId: String) -> URL? {
         manifestLock.lock(); defer { manifestLock.unlock() }
         return resolvedPathUnlocked(appId)

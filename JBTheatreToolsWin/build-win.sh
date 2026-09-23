@@ -26,7 +26,7 @@ COMMON=(-c Release
 
 rm -rf dist
 for RID in win-x64 win-arm64; do
-    echo "==> Publishing $RID…"
+    echo "==> Publishing ${RID}…"
     dotnet publish "${COMMON[@]}" -r "$RID" -o "dist/$RID"
 done
 

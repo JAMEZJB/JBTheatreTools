@@ -83,6 +83,18 @@ class AndroidAssetTest {
         assertEquals("r-v1.0.0-android-arm64.apk", AndroidAsset.resolve(explicit, "v1.0.0", listOf("r-v1.0.0-android-arm64.apk")))
     }
 
+    @Test fun launcherSelfUpdateResolvesItsOwnApk() {
+        val self = catalog.selfInfo!!.asApp()
+        val published = listOf(
+            "JBTheatreTools-macOS.zip", "JBTheatreTools-Windows-x64.exe", "JBTheatreTools-Windows-arm64.exe",
+            "JBTheatreTools-v1.27.1-android-arm64.apk", "SHA256SUMS", "SHA256SUMS.minisig",
+        )
+        assertEquals("JBTheatreTools-v1.27.1-android-arm64.apk", AndroidAsset.resolve(self, "v1.27.1", published))
+        assertEquals("com.jamesbreedon.jbtheatretools", PackageIds.packageId(self.id))
+        assertEquals(true, VersionCompare.isNewer("1.28.0", "1.27.1"))
+        assertEquals(false, VersionCompare.isNewer("1.27.1", "1.27.1"))
+    }
+
     @Test fun sidecarName() {
         assertEquals(
             "HeloControl-v2.1.1-android-arm64.apk.sha256",

@@ -39,10 +39,6 @@ class ApkInstaller(private val context: Context) {
         if (Build.VERSION.SDK_INT >= 31) {
             params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_UNSPECIFIED)
         }
-        if (Build.VERSION.SDK_INT >= 34) {
-            // Android 14+: this launcher owns updates to the apps it installs (§1a).
-            params.setRequestUpdateOwnership(true)
-        }
 
         val sessionId = try {
             installer.createSession(params)

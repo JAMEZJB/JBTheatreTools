@@ -1227,6 +1227,21 @@ final class AppState: ObservableObject {
             let toApps = UserDefaults.standard.bool(forKey: "theatre.installToApplications")
             let tagName = rel.tagName
             let slotKey = app.installKey(variantId: variantId)
+            // The app is open: ASK (sheet) instead of failing with a log-only "Quit X first". Quit → wait for it
+            // to exit, then install; Not Now → skip quietly (the row keeps its Update button).
+            if let running = InstallManager.shared.runningInstance(slotKey) {
+                let name = app.name + app.variantSuffix(variantId)
+                switch await Self.askToQuit(name, running) {
+                case .quit: break
+                case .declined:
+                    Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: zipDest) }
+                    AppLog.shared.log("install \(app.id) \(rel.tagName): postponed — \(name) is open")
+                    return
+                case .stillRunning:
+                    Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: zipDest) }
+                    throw InstallError.appRunning(name)
+                }
+            }
             // Everything disk-heavy OFF the main actor, in one detached block: `ditto` (seconds for a Full
             // edition), the unlink of the 300-450 MB zip (12-50 ms on a busy disk — it used to sit on the main
             // actor right at the row flip), the freshly-installed app's icon (NSWorkspace + thumbnail, so the
@@ -1291,6 +1306,33 @@ final class AppState: ObservableObject {
         }
         AppLog.shared.log("uninstalled \(id)")
         bumpRows()   // header counts (Download All) re-derive
+    }
+
+    enum QuitAnswer { case quit, declined, stillRunning }
+
+    /// "Repo Radar is open — quit it and update?" as a sheet on the launcher window. On Quit, asks the app
+    /// to quit normally (it may show its own save prompt) and waits up to 15 s for it to exit.
+    static func askToQuit(_ name: String, _ running: NSRunningApplication) async -> QuitAnswer {
+        let alert = NSAlert()
+        alert.messageText = "\(name) is open"
+        alert.informativeText = "Quit \(name) to install the update? If it has unsaved work it will ask you first."
+        alert.addButton(withTitle: "Quit and Update")
+        alert.addButton(withTitle: "Not Now")
+        let answer: NSApplication.ModalResponse
+        if let window = NSApp.windows.first(where: { $0.isVisible && $0.canBecomeKey }) {
+            NSApp.activate(ignoringOtherApps: true)
+            answer = await withCheckedContinuation { cont in
+                alert.beginSheetModal(for: window) { cont.resume(returning: $0) }
+            }
+        } else {
+            answer = alert.runModal()
+        }
+        guard answer == .alertFirstButtonReturn else { return .declined }
+        running.terminate()
+        for _ in 0..<75 where !running.isTerminated {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        return running.isTerminated ? .quit : .stillRunning
     }
 
     func uninstall(_ id: String) {

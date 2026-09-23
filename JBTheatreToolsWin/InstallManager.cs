@@ -128,6 +128,22 @@ public sealed class InstallManager
         }
     }
 
+    /// <summary>Processes currently running the slot's installed exe (for the "close it first?" prompt).
+    /// Matches by exe name, then by full path where Windows lets us read it.</summary>
+    public System.Diagnostics.Process[] RunningInstances(string key)
+    {
+        var exe = InstalledPath(key);
+        if (exe == null) return Array.Empty<System.Diagnostics.Process>();
+        var full = Path.GetFullPath(exe);
+        return System.Diagnostics.Process.GetProcessesByName(Path.GetFileNameWithoutExtension(exe))
+            .Where(p =>
+            {
+                try { return string.Equals(p.MainModule?.FileName, full, StringComparison.OrdinalIgnoreCase); }
+                catch { return true; }   // can't read the path (access) → same name counts; asking is harmless
+            })
+            .ToArray();
+    }
+
     public string? InstalledPath(string id)
     {
         lock (_readLock) { return ResolvedPath(id); }
