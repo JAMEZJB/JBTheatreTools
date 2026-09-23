@@ -68,11 +68,11 @@ public sealed class CatalogApp
     /// variant's assets.</summary>
     [JsonPropertyName("assets")] public Dictionary<string, string> Assets { get; set; } = new();
 
-    /// <summary>Optional download variants of the SAME app (e.g. NDI Standard vs Full). When present
+    /// <summary>Optional download variants of the SAME app (e.g. NDI Light vs Full). When present
     /// with more than one entry, the row shows a variant toggle and install resolves the selected one.</summary>
     [JsonPropertyName("variants")] public List<AppVariant>? Variants { get; set; }
 
-    /// <summary>True when this app ships more than one variant → the row shows a Standard/Full toggle.</summary>
+    /// <summary>True when this app ships more than one variant → the row shows a Light/Full toggle.</summary>
     public bool HasVariants => (Variants?.Count ?? 0) > 1;
 
     /// <summary>The asset map for a variant id (null/unknown → the default = first variant, or the
@@ -102,7 +102,7 @@ public sealed class CatalogApp
     public string? VariantLabel(string? variantId)
         => variantId == null ? null : Variants?.FirstOrDefault(v => v.Id == variantId)?.Label;
 
-    /// <summary>The install-manifest key for a variant. Each variant is its OWN install slot, so Standard
+    /// <summary>The install-manifest key for a variant. Each variant is its OWN install slot, so Light
     /// and Full can be installed side by side. The default variant keeps the plain app id (installs made
     /// before variants existed stay valid); other variants are "&lt;id&gt;@&lt;variant&gt;".</summary>
     public string InstallKey(string? variantId) => IsDefaultVariant(variantId) ? Id : $"{Id}@{variantId}";
@@ -117,7 +117,7 @@ public sealed class CatalogApp
     }
 }
 
-/// <summary>One downloadable variant of an app (e.g. Standard / Full). <c>Label</c> is the toggle text.</summary>
+/// <summary>One downloadable variant of an app (e.g. Light / Full). <c>Label</c> is the toggle text.</summary>
 public sealed class AppVariant
 {
     [JsonPropertyName("id")] public string Id { get; set; } = "";

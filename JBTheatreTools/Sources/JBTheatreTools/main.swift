@@ -60,15 +60,24 @@ enum LoopWatch {
         if let base = ProcessInfo.processInfo.environment["JBTT_SNAPSHOT"] {
             for delay in [4.0, 12.0] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                    guard let win = NSApp.windows.max(by: { $0.frame.width < $1.frame.width }),
-                          let cg = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(win.windowNumber),
-                                                           [.boundsIgnoreFraming, .bestResolution]) else {
-                        fputs("[snapshot] failed\n", stderr); return
+                    guard let win = NSApp.windows.max(by: { $0.frame.width < $1.frame.width }) else {
+                        fputs("[snapshot] failed: no window\n", stderr); return
                     }
-                    let rep = NSBitmapImageRep(cgImage: cg)
+                    // Window-server capture first; when that's refused (screen locked / display asleep), draw the
+                    // view hierarchy into a bitmap instead (Metal-backed layers may render blank that way).
+                    let rep: NSBitmapImageRep
+                    if let cg = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(win.windowNumber),
+                                                        [.boundsIgnoreFraming, .bestResolution]) {
+                        rep = NSBitmapImageRep(cgImage: cg)
+                    } else if let view = win.contentView?.superview ?? win.contentView,
+                              let r = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                        view.cacheDisplay(in: view.bounds, to: r)
+                        rep = r
+                        fputs("[snapshot] (view-cache fallback)\n", stderr)
+                    } else { fputs("[snapshot] failed\n", stderr); return }
                     let url = URL(fileURLWithPath: "\(base)-\(Int(delay)).png")
                     try? rep.representation(using: .png, properties: [:])?.write(to: url)
-                    fputs("[snapshot] wrote \(url.path) \(cg.width)x\(cg.height)\n", stderr)
+                    fputs("[snapshot] wrote \(url.path) \(rep.pixelsWide)x\(rep.pixelsHigh)\n", stderr)
                 }
             }
         }

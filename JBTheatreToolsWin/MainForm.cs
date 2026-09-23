@@ -460,7 +460,7 @@ public sealed class MainForm : Form
     private bool IsPinned(string id) => _settings.PinnedApps.Contains(id);
     private bool IsHidden(string id) => _settings.HiddenApps.Contains(id);
 
-    // ── Variants (apps that ship more than one download, e.g. NDI Standard/Full) ──────────────
+    // ── Variants (apps that ship more than one download, e.g. NDI Light/Full) ──────────────
 
     /// <summary>The selected variant id for an app (persisted), defaulting to its first variant.</summary>
     private string? SelectedVariant(CatalogApp app)
@@ -498,7 +498,7 @@ public sealed class MainForm : Form
     }
 
     /// <summary>The install-manifest key of the row's SELECTED variant slot. Every variant is its own
-    /// slot, so Standard and Full can both be installed; the toggle just picks which slot the row shows.</summary>
+    /// slot, so Light and Full can both be installed; the toggle just picks which slot the row shows.</summary>
     private string InstallKey(CatalogApp app) => app.InstallKey(SelectedVariant(app));
 
     /// <summary>Shortcut base name for a slot: the installed exe's product name (or the catalog name)
@@ -982,7 +982,7 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Download All: install/update every app. <paramref name="includeFull"/> also fetches Full
-    /// editions into their own slots (Standard and Full side by side). Skips anything current or with no
+    /// editions into their own slots (Light and Full side by side). Skips anything current or with no
     /// asset for this arch.</summary>
     private async Task DownloadAllAsync(bool includeFull)
     {
@@ -1093,7 +1093,7 @@ public sealed class MainForm : Form
     private Task InstallVersionAsync(AppRowControl row, string? tag) => InstallSlotAsync(row, tag, null);
 
     /// <summary>Installs one app slot. <paramref name="variantOverride"/> installs a specific variant slot
-    /// regardless of the row's on-screen selection (used by Download All to fetch Standard and/or Full);
+    /// regardless of the row's on-screen selection (used by Download All to fetch Light and/or Full);
     /// null = the row's selected variant. The row's displayed state is only updated for the SELECTED
     /// variant, so a background Full-edition install doesn't hijack the row's display.</summary>
     /// <summary>Everything phase 1 hands to phase 2: the resolved release/asset and the (verified-later) cache file.</summary>

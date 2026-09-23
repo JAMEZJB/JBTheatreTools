@@ -144,6 +144,12 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
                     }
                 }
                 VSpace(16.dp)
+                if (status != null && !status.isInstalled && !status.canInstall) {
+                    // Nothing to open or install: say why (no Android build yet / sign in / feed error)
+                    // instead of a sheet that silently offers only the release notes.
+                    SmallText(status.note ?: "No release", color = c.text2, weight = FontWeight.Normal)
+                    VSpace(12.dp)
+                }
                 if (status?.isInstalled == true) {
                     PrimaryButton("Open", Modifier.fillMaxWidth()) { vm.openApp(app) }
                     VSpace(10.dp)

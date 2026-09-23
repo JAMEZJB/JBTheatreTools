@@ -158,7 +158,7 @@ enum CLI {
         if m.isEmpty { print("No apps installed."); return }
         print("Installed apps (\(InstallManager.shared.manifestURL.path)):\n")
         for app in catalog.apps {
-            // Every install slot: the app itself, or one per variant for variant apps (Standard + Full).
+            // Every install slot: the app itself, or one per variant for variant apps (Light + Full).
             let slots: [(key: String, label: String?)] = app.hasVariants
                 ? (app.variants ?? []).map { (app.installKey(variantId: $0.id), $0.label) }
                 : [(app.id, nil)]

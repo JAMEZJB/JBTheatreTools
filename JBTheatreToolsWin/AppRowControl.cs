@@ -162,7 +162,7 @@ public sealed class AppRowControl : UserControl
     public Func<AppRowControl, bool>? IsPinnedQuery;
     /// <summary>Hide-from-list request from the ⋯ menu.</summary>
     public event Action<AppRowControl>? HideRequested;
-    /// <summary>User picked a different variant (Standard/Full) — carries the chosen variant id.</summary>
+    /// <summary>User picked a different variant (Light/Full) — carries the chosen variant id.</summary>
     public event Action<AppRowControl, string>? VariantChangeRequested;
     /// <summary>Set by MainForm: the currently-selected variant id for this app.</summary>
     public Func<AppRowControl, string?>? SelectedVariantQuery;
@@ -198,7 +198,7 @@ public sealed class AppRowControl : UserControl
         _whatsNewText = app.WhatsNew; _whatsNewVersion = app.WhatsNewVersion;
         ApplyWhatsNewText();
 
-        // Variant toggle (Standard/Full) — only for apps that ship more than one download.
+        // Variant toggle (Light/Full) — only for apps that ship more than one download.
         _variant.DropDownStyle = ComboBoxStyle.DropDownList;
         _variant.Visible = app.HasVariants;
         if (app.HasVariants && app.Variants != null)
@@ -588,17 +588,26 @@ public sealed class AppRowControl : UserControl
     private void LayoutCompact()
     {
         int w = Width;
+        // Tighter than v1.27 so the Light/Full picker fits inside the same 132×140 tile (every tile uses the same
+        // positions, so icons and names line up across a grid row).
         _icon.Size = new Size(S(48), S(48));
-        _icon.Location = new Point((w - _icon.Width) / 2, S(12));
-        _name.Location = new Point(S(6), S(64));
-        _name.Size = new Size(w - S(12), S(32));
-        _badge.Location = new Point(S(6), S(100));
+        _icon.Location = new Point((w - _icon.Width) / 2, S(8));
+        _name.Location = new Point(S(6), S(58));
+        _name.Size = new Size(w - S(12), S(30));
+        _badge.Location = new Point(S(6), S(88));
         _badge.Size = new Size(w - S(12), S(16));
         _pin.Location = new Point(w - _pin.Width - S(6), S(6));
         _progress.Location = new Point(S(10), Height - S(12));
         _progress.Width = w - S(20);
         _blurb.Visible = _version.Visible = _whatsNew.Visible = false;
-        _install.Visible = _launch.Visible = _more.Visible = _variant.Visible = false;
+        _install.Visible = _launch.Visible = _more.Visible = false;
+        // The Light/Full picker, as on the list row (it was hidden in grid view, leaving only the ⋯ menu).
+        _variant.Visible = App.HasVariants;
+        if (App.HasVariants)
+        {
+            _variant.Width = w - S(24);
+            _variant.Location = new Point(S(12), _badge.Bottom + S(3));
+        }
     }
 
     /// <summary>Switches the row between the detailed list layout and a compact grid tile.</summary>
@@ -675,32 +684,35 @@ public sealed class AppRowControl : UserControl
 
     private void UpdateIcon()
     {
-        Image? img = null;
-        try
+        // The launcher's own tile first (the House Style glyph-only set, identical across mac / Windows /
+        // Android), then the installed exe's real icon for anything without a tile, then a monogram. Rows
+        // used to prefer the installed icon — a mixed list while apps adopt the new icons at their own pace.
+        Image? img;
+        lock (BundledIconCache)
         {
-            var path = InstallManager.Shared.InstalledPath(App.Id);   // cached resolve (no disk stat)
-            if (path != null)
+            if (!BundledIconCache.TryGetValue(App.Id, out img)) { img = BundledIcon(App.Id); BundledIconCache[App.Id] = img; }
+        }
+        if (img == null)
+        {
+            try
             {
-                lock (ExtractedIconCache)
+                var path = InstallManager.Shared.InstalledPath(App.Id);   // cached resolve (no disk stat)
+                if (path != null)
                 {
-                    if (!ExtractedIconCache.TryGetValue(path, out img))
+                    lock (ExtractedIconCache)
                     {
-                        using var ico = Icon.ExtractAssociatedIcon(path);
-                        img = ico?.ToBitmap();
-                        ExtractedIconCache[path] = img;
+                        if (!ExtractedIconCache.TryGetValue(path, out img))
+                        {
+                            using var ico = Icon.ExtractAssociatedIcon(path);
+                            img = ico?.ToBitmap();
+                            ExtractedIconCache[path] = img;
+                        }
                     }
                 }
             }
+            catch { /* fall through to the monogram */ }
         }
-        catch { /* fall through to the bundled icon / monogram */ }
         bool owns = false;
-        if (img == null)
-        {
-            lock (BundledIconCache)
-            {
-                if (!BundledIconCache.TryGetValue(App.Id, out img)) { img = BundledIcon(App.Id); BundledIconCache[App.Id] = img; }
-            }
-        }
         if (img == null) { img = MonogramIcon(DisplayName, Math.Max(1, _icon.Width), DeviceDpi); owns = true; }
         if (ReferenceEquals(_icon.Image, img)) return;   // unchanged → no repaint
         var old = _icon.Image;

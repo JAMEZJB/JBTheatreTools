@@ -60,12 +60,12 @@ struct CatalogApp: Decodable, Identifiable, Sendable {
     /// default variant's assets (so any variant-unaware code path still resolves a sane build).
     let assets: [String: String]
 
-    /// Optional downloadable variants of the SAME app (e.g. NDI Tools "Standard" vs "Full"). When
+    /// Optional downloadable variants of the SAME app (e.g. NDI Tools "Light" vs "Full"). When
     /// present with more than one entry, the row shows a variant toggle and install/status resolve
     /// against the SELECTED variant's assets. The first variant is the default.
     let variants: [AppVariant]?
 
-    /// True when this app ships more than one variant → the launcher shows a Standard/Full toggle.
+    /// True when this app ships more than one variant → the launcher shows a Light/Full toggle.
     var hasVariants: Bool { (variants?.count ?? 0) > 1 }
 
     /// The asset map for a given variant id (nil / unknown → the default = first variant, or the
@@ -94,7 +94,7 @@ struct CatalogApp: Decodable, Identifiable, Sendable {
         return variants?.first { $0.id == vid }?.label
     }
 
-    /// The install-manifest key for a variant. Each variant is its OWN install slot, so Standard and
+    /// The install-manifest key for a variant. Each variant is its OWN install slot, so Light and
     /// Full can be installed side by side. The default variant keeps the plain app id (so installs
     /// made before variants existed stay valid); other variants are `<id>@<variant>`.
     func installKey(variantId: String?) -> String {
@@ -109,7 +109,7 @@ struct CatalogApp: Decodable, Identifiable, Sendable {
     }
 }
 
-/// One downloadable variant of an app (e.g. Standard / Full). `label` is the toggle text.
+/// One downloadable variant of an app (e.g. Light / Full). `label` is the toggle text.
 struct AppVariant: Decodable, Identifiable, Sendable {
     let id: String
     let label: String

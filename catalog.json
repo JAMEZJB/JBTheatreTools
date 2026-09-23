@@ -203,7 +203,7 @@
       "variants": [
         {
           "id": "standard",
-          "label": "Standard",
+          "label": "Light",
           "assets": {
             "macos": "NDITools-macOS.zip",
             "windows-x64": "NDITools-Windows-x64.exe",

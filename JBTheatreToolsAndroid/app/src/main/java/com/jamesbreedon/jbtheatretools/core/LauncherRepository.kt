@@ -9,6 +9,9 @@ import com.jamesbreedon.jbtheatretools.net.GitHubClient
 import com.jamesbreedon.jbtheatretools.net.RelayPolicy
 import com.jamesbreedon.jbtheatretools.net.ReleaseInfo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -106,7 +109,7 @@ class LauncherRepository(private val context: Context) {
         }
         return try {
             val release = client.latestRelease(app.owner, app.repo)
-            val assetName = AndroidAsset.apkName(app, release.tagName)
+            val assetName = AndroidAsset.resolve(app, release.tagName, release.assets.map { it.name })
             val asset = assetName?.let { name -> release.assets.firstOrNull { it.name == name } }
             AppStatus(
                 app = app,
@@ -129,6 +132,9 @@ class LauncherRepository(private val context: Context) {
 
     // ── install ──────────────────────────────────────────────────────────────
 
+    /** Guards the PackageInstaller session step — see the note in [install]. */
+    private val sessionMutex = Mutex()
+
     /**
      * Download -> verify -> install one app, reporting progress. The chain:
      *   size -> suite-signed SHA256SUMS (trusted comment `<repo> <tag>`) -> the APK's SHA-256 ->
@@ -146,10 +152,12 @@ class LauncherRepository(private val context: Context) {
         var apk: File? = null
         try {
             val release = client.latestRelease(app.owner, app.repo)
-            val assetName = AndroidAsset.apkName(app, release.tagName)
-                ?: throw IllegalStateException("no Android asset name for ${app.id}")
-            val asset = release.assets.firstOrNull { it.name == assetName }
-                ?: throw IllegalStateException("release ${release.tagName} has no $assetName")
+            val assetName = AndroidAsset.resolve(app, release.tagName, release.assets.map { it.name })
+                ?: throw IllegalStateException(
+                    "release ${release.tagName} has no Android build (looked for " +
+                        AndroidAsset.candidates(app, release.tagName).joinToString(", ") + ")"
+                )
+            val asset = release.assets.first { it.name == assetName }
 
             onProgress(InstallProgress(app.id, InstallProgress.Phase.DOWNLOADING, 0.0))
             apk = File(cache, assetName)
@@ -174,7 +182,21 @@ class LauncherRepository(private val context: Context) {
                     "the APK declares $declared, but the catalog expects $expectedPackage"
                 )
             }
-            when (val outcome = installer.install(apk, expectedPackage ?: declared, app.id)) {
+            // ONE PackageInstaller session at a time (downloads + hashing above still run in parallel): two
+            // overlapping sessions made Android's package verifier reject one of them with
+            // INSTALL_FAILED_VERIFICATION_FAILURE ("Install not allowed for file:///data/app/vmdl….tmp") when
+            // James tapped several tiles in a row — each succeeded on a retry. So: serialise, and retry that
+            // one error once after a pause.
+            val outcome = sessionMutex.withLock {
+                var result = installer.install(apk, expectedPackage ?: declared, app.id)
+                if (result is ApkInstaller.Outcome.Failed && result.message.contains("VERIFICATION_FAILURE")) {
+                    log.log("install ${app.id} ${release.tagName}: verifier busy — retrying once")
+                    delay(2_500)
+                    result = installer.install(apk, expectedPackage ?: declared, app.id)
+                }
+                result
+            }
+            when (outcome) {
                 is ApkInstaller.Outcome.Succeeded -> {
                     log.log("install ${app.id} ${release.tagName}: $assetName verified + installed")
                     onProgress(InstallProgress(app.id, InstallProgress.Phase.DONE, 1.0))

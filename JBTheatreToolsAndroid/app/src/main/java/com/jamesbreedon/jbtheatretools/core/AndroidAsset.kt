@@ -50,11 +50,32 @@ object AndroidAsset {
     /**
      * The exact APK asset name for an app at a version. [version] is the release tag as published
      * (`v2.1.1` or `2.1.1`); the asset always carries exactly one leading `v`.
+     *
+     * This is the FIRST candidate only — resolve against a release with [resolve], which also tries the
+     * repo-named form. The Android CI names the APK from the REPO (`CiscoSwitchTools-…`), while this
+     * app's macOS bundle is `Cisco.Switch.Tools.macOS.universal2.zip`, so the macOS-derived name alone
+     * left Cisco Switch Tools with no Install button (v1.27.0).
      */
-    fun apkName(app: CatalogApp, version: String, variantId: String? = null): String? {
-        app.assets(variantId)[PLATFORM_KEY]?.let { return it }
-        val prefix = prefix(app, variantId) ?: return null
-        return "$prefix-v${VersionCompare.norm(version)}-android-arm64.apk"
+    fun apkName(app: CatalogApp, version: String, variantId: String? = null): String? =
+        candidates(app, version, variantId).firstOrNull()
+
+    /**
+     * Every name the APK could be published under, most specific first: the catalog's explicit
+     * `android-arm64` entry, the macOS-asset-derived name, then the repo-derived name.
+     */
+    fun candidates(app: CatalogApp, version: String, variantId: String? = null): List<String> {
+        val v = VersionCompare.norm(version)
+        val out = ArrayList<String>(3)
+        app.assets(variantId)[PLATFORM_KEY]?.let { out += it }
+        prefix(app, variantId)?.let { out += "$it-v$v-android-arm64.apk" }
+        out += "${app.repo}-v$v-android-arm64.apk"
+        return out.distinct()
+    }
+
+    /** The published asset name that matches one of [candidates], or null when the release has none. */
+    fun resolve(app: CatalogApp, version: String, publishedNames: Collection<String>, variantId: String? = null): String? {
+        val names = publishedNames.toHashSet()
+        return candidates(app, version, variantId).firstOrNull { it in names }
     }
 
     /** The sidecar published beside the APK. */

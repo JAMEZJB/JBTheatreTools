@@ -986,7 +986,7 @@ struct AppRowView: View, Equatable {
         return v
     }
 
-    /// A compact Standard/Full toggle, shown inline only for apps that ship variants.
+    /// A compact Light/Full toggle, shown inline only for apps that ship variants.
     @ViewBuilder
     private var variantToggle: some View {
         if row.app.hasVariants, let vs = row.app.variants {
@@ -1192,12 +1192,15 @@ struct AppIconImage: View {
     }
 
     var body: some View {
-        if let path = InstallManager.shared.installedPath(id)?.path {
-            Image(nsImage: Self.installedIcon(path))
+        // The launcher's own tile first (the House Style glyph-only set, identical across mac / Windows /
+        // Android), then the installed app's real icon for anything without a tile, then a monogram. Rows
+        // used to prefer the installed icon — a mixed list while apps adopt the new icons at their own pace.
+        if let bundled = Self.bundledIcon(id) {
+            Image(nsImage: bundled)
                 .resizable().interpolation(.high)
                 .frame(width: size, height: size)
-        } else if let bundled = Self.bundledIcon(id) {
-            Image(nsImage: bundled)
+        } else if let path = InstallManager.shared.installedPath(id)?.path {
+            Image(nsImage: Self.installedIcon(path))
                 .resizable().interpolation(.high)
                 .frame(width: size, height: size)
         } else {
@@ -1227,7 +1230,7 @@ struct AppIconImage: View {
 }
 
 /// The per-row action menu, shared by the list row's ⋯ button and the grid tile's right-click menu:
-/// pin/hide/reorder, pick a variant (Standard/Full), install a specific version, Dock/alias, uninstall.
+/// pin/hide/reorder, pick a variant (Light/Full), install a specific version, Dock/alias, uninstall.
 struct AppMenuButtons: View {
     @EnvironmentObject var state: AppState
     @ObservedObject var row: AppState.Row
@@ -1308,19 +1311,36 @@ struct AppGridTile: View, Equatable {
     @State private var confirmingUninstall = false
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 0) {
             AppIconImage(id: row.id, displayName: row.displayName, size: 52)
             Text(row.displayName)
                 .font(JBFont.smallStrong)
                 .foregroundStyle(Color.jbText)
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
-                .frame(height: 30)
+                .frame(height: 28)
+                .padding(.top, 5)
             statusCaption
+                .padding(.top, 2)
+                .padding(.bottom, 4)
+            // Light/Full toggle, as on the list row — the only other way to switch in grid
+            // view was a Picker buried in the right-click menu. Every tile reserves the slot so the grid's
+            // rows stay one height.
+            if row.app.hasVariants, let vs = row.app.variants {
+                JBSegmented(segments: vs.map { JBSegmented.Segment(id: $0.id, label: $0.label) },
+                            selection: Binding(
+                                get: { selectedVariantId ?? vs.first?.id ?? "" },
+                                set: { state.setVariant(row.id, $0) }),
+                            compact: true)
+                    .fixedSize()
+                    .disabled(row.busy)
+            } else {
+                Color.clear.frame(height: 20)
+            }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 140)
-        .padding(8)
+        .frame(height: 128)   // the original 140-pt tile (128 + 2 × 6 padding): the toggle fits inside it
+        .padding(6)
         // v2: tiles are flat panels separated by a hairline — no card shadow (shadows are for floating
         // things only). Hover firms the hairline rather than lifting the tile.
         .background(
@@ -1390,14 +1410,14 @@ struct AppGridTile: View, Equatable {
 
     @ViewBuilder
     private var statusCaption: some View {
-        let variant = row.app.hasVariants ? row.app.variantLabel(selectedVariantId) : nil
-        Text(captionText(variant: variant))
+        Text(captionText)
             .font(JBFont.label)
             .foregroundStyle(captionColor)
             .lineLimit(1)
     }
 
-    private func captionText(variant: String?) -> String {
+    /// The status only — which edition this is shows in the tile's own Light/Full toggle.
+    private var captionText: String {
         let base: String
         switch row.status {
         case .updateAvailable: base = "Update"
@@ -1410,7 +1430,6 @@ struct AppGridTile: View, Equatable {
         case .error:           base = "Error"
         default:               base = row.installed ?? " "
         }
-        if let v = variant, row.app.hasVariants { return "\(base) · \(v)" }
         return base
     }
 

@@ -51,7 +51,7 @@ data class CatalogApp(
      * grows one, overrides the name this launcher would otherwise derive (see [AndroidAsset]).
      */
     val assets: Map<String, String> = emptyMap(),
-    /** Optional downloadable variants of the SAME app (e.g. NDI "Standard" / "Full"). */
+    /** Optional downloadable variants of the SAME app (e.g. NDI "Light" / "Full"). */
     val variants: List<AppVariant> = emptyList(),
 ) {
     val hasVariants: Boolean get() = variants.size > 1

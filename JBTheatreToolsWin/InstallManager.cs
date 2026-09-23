@@ -295,7 +295,7 @@ public sealed class InstallManager
     /// <summary>Removes the installed app's folder, its shortcuts, and its manifest entry.</summary>
     /// <summary>Uninstalls ONE install slot (an app, or one variant of a variant app): removes that slot's
     /// exe and shortcuts. The containing app dir is deleted only once nothing else is left in it, so a
-    /// sibling variant (Standard and Full share apps/&lt;id&gt;/) survives.</summary>
+    /// sibling variant (Light and Full share apps/&lt;id&gt;/) survives.</summary>
     public void Uninstall(string installKey)
     {
         lock (_mutationLock)
@@ -314,7 +314,7 @@ public sealed class InstallManager
                         File.Delete(rec.Path);
                 }
                 catch (Exception ex) { Log.Write($"uninstall {installKey}: could not delete payload: {ex.Message}"); }
-                // Clean the app's base dir once no sibling slot's files remain (Standard/Full share apps/<id>/).
+                // Clean the app's base dir once no sibling slot's files remain (Light/Full share apps/<id>/).
                 try
                 {
                     var appDir = Path.Combine(AppsDir, installKey.Split('@')[0]);

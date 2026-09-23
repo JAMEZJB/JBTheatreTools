@@ -159,7 +159,7 @@ public static class Cli
         Console.WriteLine($"Installed apps ({InstallManager.Shared.ManifestPath}):\n");
         foreach (var app in catalog.Apps)
         {
-            // Every install slot: the app itself, or one per variant for variant apps (Standard + Full).
+            // Every install slot: the app itself, or one per variant for variant apps (Light + Full).
             var slots = app.HasVariants && app.Variants != null
                 ? app.Variants.Select(v => (key: app.InstallKey(v.Id), label: (string?)v.Label)).ToList()
                 : new List<(string key, string? label)> { (app.Id, null) };

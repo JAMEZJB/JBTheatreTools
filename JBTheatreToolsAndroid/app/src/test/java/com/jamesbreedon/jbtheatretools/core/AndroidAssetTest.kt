@@ -53,6 +53,36 @@ class AndroidAssetTest {
         assertEquals("Custom.apk", AndroidAsset.apkName(app, "v9.9.9"))
     }
 
+    @Test fun resolvesCiscoSwitchToolsByRepoName() {
+        // v1.27.0 bug: the macOS bundle is dotted ("Cisco.Switch.Tools…") but the APK is repo-named.
+        val cisco = catalog.apps.first { it.id == "ciscoswitchtools" }
+        val published = listOf(
+            "Cisco.Switch.Tools.arm64.exe", "Cisco.Switch.Tools.macOS.universal2.zip",
+            "CiscoSwitchTools-v1.6.1-android-arm64.apk", "SHA256SUMS", "SHA256SUMS.minisig",
+        )
+        assertEquals(
+            listOf("Cisco.Switch.Tools-v1.6.1-android-arm64.apk", "CiscoSwitchTools-v1.6.1-android-arm64.apk"),
+            AndroidAsset.candidates(cisco, "v1.6.1"),
+        )
+        assertEquals("CiscoSwitchTools-v1.6.1-android-arm64.apk", AndroidAsset.resolve(cisco, "v1.6.1", published))
+    }
+
+    @Test fun resolvePrefersTheMostSpecificCandidateAndIsNullWhenAbsent() {
+        val helo = catalog.apps.first { it.id == "helocontrol" }
+        assertEquals(
+            "HeloControl-v2.1.1-android-arm64.apk",
+            AndroidAsset.resolve(helo, "v2.1.1", listOf("HeloControl-v2.1.1-android-arm64.apk", "HeloControl-macOS.zip")),
+        )
+        assertEquals(null, AndroidAsset.resolve(helo, "v2.1.1", listOf("HeloControl-macOS.zip", "SHA256SUMS")))
+        val explicit = CatalogApp(
+            id = "x", name = "X", owner = "o", repo = "r",
+            assets = mapOf("macos" to "Something-macOS.zip", "android-arm64" to "Custom.apk"),
+        )
+        assertEquals(listOf("Custom.apk", "Something-v1.0.0-android-arm64.apk", "r-v1.0.0-android-arm64.apk"),
+            AndroidAsset.candidates(explicit, "v1.0.0"))
+        assertEquals("r-v1.0.0-android-arm64.apk", AndroidAsset.resolve(explicit, "v1.0.0", listOf("r-v1.0.0-android-arm64.apk")))
+    }
+
     @Test fun sidecarName() {
         assertEquals(
             "HeloControl-v2.1.1-android-arm64.apk.sha256",

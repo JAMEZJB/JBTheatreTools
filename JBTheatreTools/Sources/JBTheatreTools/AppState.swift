@@ -97,7 +97,7 @@ final class AppState: ObservableObject {
         @Published var status: Status = .unknown
         @Published var busy: Bool = false
         /// Slots of THIS app currently in flight (a pipelined Download All can have the Full edition downloading
-        /// while the Standard edition is still extracting). `busy` mirrors `busyCount > 0`.
+        /// while the Light edition is still extracting). `busy` mirrors `busyCount > 0`.
         var busyCount: Int = 0
         /// The installed app's self-declared bundle name (kept for diagnostics only — NOT shown; see displayName).
         @Published var resolvedName: String?
@@ -175,7 +175,7 @@ final class AppState: ObservableObject {
     /// Category section keys the user collapsed (per-machine) — a collapsed section shows only its header.
     /// Holds category names (and, if collapsed, the pinned sentinel); stale keys are harmless.
     @Published var collapsedGroups: Set<String> = []
-    /// Per-app selected variant id (per-machine), for apps that ship variants (e.g. NDI Standard/Full).
+    /// Per-app selected variant id (per-machine), for apps that ship variants (e.g. NDI Light/Full).
     /// Absent → the app's default (first) variant.
     @Published var variantSelection: [String: String] = [:]
 
@@ -536,7 +536,7 @@ final class AppState: ObservableObject {
 
     /// Number of INSTALLED slots (default + Full editions) with an update available — drives the header
     /// "Update All (N)" label. Counts slots, not rows, so an installed Full edition that's out of date is
-    /// included even when the row's toggle is showing the Standard edition.
+    /// included even when the row's toggle is showing the Light edition.
     var updatesAvailable: Int { rows.reduce(0) { $0 + slotsToUpdate($1.app).count } }
 
     /// Installed slots of an app (default + every Full edition) whose latest release is newer than what's on
@@ -717,7 +717,7 @@ final class AppState: ObservableObject {
         AppLog.shared.log("unhid all apps")
     }
 
-    // MARK: Variants (apps that ship more than one download, e.g. NDI Standard/Full)
+    // MARK: Variants (apps that ship more than one download, e.g. NDI Light/Full)
 
     /// The selected variant id for an app (persisted), defaulting to its first variant. Nil if the app
     /// ships no variants.
@@ -738,7 +738,7 @@ final class AppState: ObservableObject {
     }
 
     /// The install-manifest key of the row's SELECTED variant slot. Every variant is its own slot, so
-    /// Standard and Full can both be installed; the toggle just chooses which slot the row shows.
+    /// Light and Full can both be installed; the toggle just chooses which slot the row shows.
     func installKey(for app: CatalogApp) -> String {
         app.installKey(variantId: selectedVariantId(app))
     }
@@ -1004,7 +1004,7 @@ final class AppState: ObservableObject {
     }
 
     /// Download All: install/update every app. `includeFull` also fetches Full editions (their own slots,
-    /// so Standard and Full end up installed side by side). Skips anything already current or with no
+    /// so Light and Full end up installed side by side). Skips anything already current or with no
     /// asset for this OS/arch.
     func downloadAll(includeFull: Bool) async {
         let work = orderedSlots(rows.flatMap { row in slotsToDownload(row.app, includeFull: includeFull).map { (row.id, $0) } })
@@ -1131,7 +1131,7 @@ final class AppState: ObservableObject {
 
     /// Installs an app — the latest release, or a specific `tag` (for installing older versions).
     /// `variantOverride` installs a specific variant slot regardless of the row's on-screen selection
-    /// (used by Download All to fetch Standard and/or Full); nil = the row's selected variant.
+    /// (used by Download All to fetch Light and/or Full); nil = the row's selected variant.
     /// Everything phase 1 hands to phase 2: the resolved release/asset and the verified-later zip in the cache.
     struct Downloaded: Sendable {
         let app: CatalogApp; let rel: ReleaseInfo; let asset: ReleaseAsset; let zip: URL
@@ -1146,7 +1146,7 @@ final class AppState: ObservableObject {
 
     /// Installs an app — the latest release, or a specific `tag` (for installing older versions).
     /// `variantOverride` installs a specific variant slot regardless of the row's on-screen selection
-    /// (used by Download All to fetch Standard and/or Full); nil = the row's selected variant.
+    /// (used by Download All to fetch Light and/or Full); nil = the row's selected variant.
     /// Two phases so Download All can overlap them (see `runSlots`): phase 1 is network-bound, phase 2 is
     /// CPU/disk-bound. A single interactive install just runs them back to back.
     func install(_ id: String, tag: String? = nil, variantOverride: String? = nil) async {

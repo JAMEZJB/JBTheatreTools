@@ -246,7 +246,7 @@ final class InstallManager: @unchecked Sendable {
 
         guard let bundle = appBundle(in: extractDir, preferring: app.name) else { throw InstallError.noAppInZip }
 
-        // Each variant is its own install slot (Standard and Full can coexist), keyed by the app id for
+        // Each variant is its own install slot (Light and Full can coexist), keyed by the app id for
         // the default variant and `<id>@<variant>` otherwise. Only the previous install of THIS slot is
         // touched — it may be in a different location if the setting changed.
         let key = app.installKey(variantId: variant)
