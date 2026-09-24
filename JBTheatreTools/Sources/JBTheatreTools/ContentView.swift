@@ -269,7 +269,9 @@ struct ContentView: View {
         HStack(spacing: 10) {
             Image(systemName: "arrow.down.circle.fill").foregroundStyle(Color.jbAccent)
             VStack(alignment: .leading, spacing: 1) {
-                Text("JB Theatre Tools \(version) is available")
+                Text(AppState.versionIsNewer(version, than: state.currentVersion)
+                     ? "JB Theatre Tools \(version) is available"
+                     : "Back to the release: JB Theatre Tools \(version)")
                     .font(JBFont.status).foregroundStyle(Color.jbAccent)
                 Text(state.launcherDownloadMessage ?? "You're running v\(state.currentVersion).")
                     .font(JBFont.small).foregroundStyle(Color.jbText2)
@@ -982,9 +984,18 @@ struct AppRowView: View, Equatable {
             Text("Installed: \(installedText)")
             Text("·")
             Text("Latest: \(row.latest ?? "—")")
+            if isDevBuild {
+                Text("·")
+                Text("dev build").foregroundStyle(Color.jbWarn)
+            }
         }
         .font(JBFont.labelRegular)
         .foregroundStyle(Color.jbText3)
+    }
+
+    /// A development pre-release is installed or on offer (Dev channel).
+    private var isDevBuild: Bool {
+        (row.installed.map(AppState.isDevTag) ?? false) || (row.latest.map(AppState.isDevTag) ?? false)
     }
 
     /// The installed version of the SELECTED variant's slot, annotated with that variant's label for
@@ -1079,6 +1090,14 @@ struct AppRowView: View, Equatable {
                 installButton(title: row.installed == nil ? "Install" : "Retry")
             default:
                 EmptyView()
+            }
+            // Dev channel switched off but a dev build is still here: one click back to the release (a downgrade
+            // — the version picker in ⋯ does the same, this just makes it obvious).
+            if let tag = state.backToReleaseTag(row) {
+                Button("Back to release") { Task { await state.install(row.id, tag: tag) } }
+                    .buttonStyle(.jbSecondary)
+                    .disabled(row.busy)
+                    .help("Install the release \(tag) in place of the development build")
             }
             // Launch — available whenever something is installed, even before a refresh has run.
             if row.installed != nil { launchButton }
@@ -1439,6 +1458,8 @@ struct AppGridTile: View, Equatable {
         case .error:           base = "Error"
         default:               base = row.installed ?? " "
         }
+        // A development build installed or on offer (Dev channel) is marked, as in the list.
+        if (row.installed.map(AppState.isDevTag) ?? false) || (row.latest.map(AppState.isDevTag) ?? false) { return base + " · dev" }
         return base
     }
 

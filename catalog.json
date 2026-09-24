@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64 (plus optional per-arch macOS keys macos-arm64 / macos-x64, which the macOS launcher prefers over the universal `macos` key when present). macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Twenty-one apps (NDI Tools, PDF Tools, Image Tools and Surtitle Tools each ship two variants — a default and a batteries-included 'Full' — chosen by a per-row toggle; each app entry may carry an optional `variants` array [{id,label,assets}], and the Full variant uses the per-arch macOS keys macos-arm64 / macos-x64. Convert is date-tagged (build-YYYYMMDD, rolling) rather than semver, so it resolves against the latest release); Each app entry may carry optional `whatsNew` + `whatsNewVersion` strings (a one-line what's-new for its current release, shown under the app in both launchers; omitted for apps with no release yet). asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships).",
+  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64 (plus optional per-arch macOS keys macos-arm64 / macos-x64, which the macOS launcher prefers over the universal `macos` key when present). macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Twenty-four apps (two — NETGEAR and MikroTik — are shown only with the Development builds switch on until they have a release) (NDI Tools, PDF Tools, Image Tools and Surtitle Tools each ship two variants — a default and a batteries-included 'Full' — chosen by a per-row toggle; each app entry may carry an optional `variants` array [{id,label,assets}], and the Full variant uses the per-arch macOS keys macos-arm64 / macos-x64. Convert is date-tagged (build-YYYYMMDD, rolling) rather than semver, so it resolves against the latest release); Each app entry may carry optional `whatsNew` + `whatsNewVersion` strings (a one-line what's-new for its current release, shown under the app in both launchers; omitted for apps with no release yet). asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships).",
   "downloadServer": "https://jbtheatretools.jamesbreedon.com/ghapi",
   "categories": [
     "Show control",
@@ -26,8 +26,8 @@
       "name": "HELO Control",
       "blurb": "Control AJA HELO stream / record encoders.",
       "category": "Audio & video",
-      "whatsNew": "Now on Android too (via the launcher); bad OSC packets rejected whole; a failed Stop aborts the Split; per-unit settings kept separate.",
-      "whatsNewVersion": "v2.1.1",
+      "whatsNew": "Updates now show the new version straight away, with no stale screens; plus a security hardening pass.",
+      "whatsNewVersion": "v2.1.2",
       "owner": "JAMEZJB",
       "repo": "HeloControl",
       "assets": {
@@ -41,8 +41,8 @@
       "name": "Cisco Switch Tools",
       "blurb": "Back up & manage Cisco CBS350 / SG switches over SSH.",
       "category": "Networking",
-      "whatsNew": "Now on Android (credentials in the device keystore; real-switch test still owed); the write-probe no longer overwrites a file.",
-      "whatsNewVersion": "v1.6.1",
+      "whatsNew": "Safety pass: typed passwords masked in logs, dangerous commands refused, a switch listed twice runs once, quitting mid-run asks.",
+      "whatsNewVersion": "v1.7.1",
       "owner": "JAMEZJB",
       "repo": "CiscoSwitchTools",
       "assets": {
@@ -52,12 +52,38 @@
       }
     },
     {
+      "id": "netgearswitchtools",
+      "name": "NETGEAR Switch Tools",
+      "blurb": "Back up, save, command and reboot a fleet of NETGEAR managed switches over SSH.",
+      "category": "Networking",
+      "owner": "JAMEZJB",
+      "repo": "NetgearSwitchTools",
+      "assets": {
+        "macos": "NetgearSwitchTools-macOS.zip",
+        "windows-x64": "NetgearSwitchTools-Windows-x64.exe",
+        "windows-arm64": "NetgearSwitchTools-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "mikrotikroutertools",
+      "name": "MikroTik Router Tools",
+      "blurb": "Back up, snapshot, command and reboot a fleet of MikroTik RouterOS devices over SSH.",
+      "category": "Networking",
+      "owner": "JAMEZJB",
+      "repo": "MikroTikRouterTools",
+      "assets": {
+        "macos": "MikroTikRouterTools-macOS.zip",
+        "windows-x64": "MikroTikRouterTools-Windows-x64.exe",
+        "windows-arm64": "MikroTikRouterTools-Windows-arm64.exe"
+      }
+    },
+    {
       "id": "ciscobrotherlabels",
       "name": "Cisco Brother Labels",
       "blurb": "Generate Brother P-touch port labels from Cisco switch configs.",
       "category": "Networking",
-      "whatsNew": "Now on Android — same CSV, byte for byte; CSV and settings writes are atomic; safer export batches.",
-      "whatsNewVersion": "v2.1.1",
+      "whatsNew": "Updates now show the new version straight away, with no stale screens; plus a security hardening pass.",
+      "whatsNewVersion": "v2.1.2",
       "owner": "JAMEZJB",
       "repo": "CiscoBrotherLabels",
       "assets": {
@@ -71,8 +97,8 @@
       "name": "Machine Inventory",
       "blurb": "Collect hardware / software inventory from show machines.",
       "category": "Planning & admin",
-      "whatsNew": "Now on Android with its own collector; Cancel run no longer asks to confirm; on Mac, cancelling stops every child process.",
-      "whatsNewVersion": "v2.1.1",
+      "whatsNew": "Updates now show the new version straight away, with no stale screens; plus a security hardening pass.",
+      "whatsNewVersion": "v2.1.2",
       "owner": "JAMEZJB",
       "repo": "ShowMachinesInventory",
       "assets": {
@@ -86,8 +112,8 @@
       "name": "Network Port Map",
       "blurb": "Map network switch ports to the devices plugged into them.",
       "category": "Networking",
-      "whatsNew": "Now on Android (import configs with the system picker); each build gets its own report folder — no same-second overwrite.",
-      "whatsNewVersion": "v1.8.1",
+      "whatsNew": "Updates now show the new version straight away, with no stale screens; plus a security hardening pass.",
+      "whatsNewVersion": "v1.8.2",
       "owner": "JAMEZJB",
       "repo": "NetworkPortMap",
       "assets": {
@@ -101,8 +127,8 @@
       "name": "Projector Control",
       "blurb": "Control theatre projectors over PJLink (Panasonic / Epson).",
       "category": "Audio & video",
-      "whatsNew": "Now on Android (passwords in the device keystore); a shutter toggle no longer asks to confirm; fleet actions wait for each projector.",
-      "whatsNewVersion": "v2.1.1",
+      "whatsNew": "Updates now show the new version straight away, with no stale screens; plus a security hardening pass.",
+      "whatsNewVersion": "v2.1.2",
       "owner": "JAMEZJB",
       "repo": "ProjectorControl",
       "assets": {
@@ -116,8 +142,8 @@
       "name": "Show Dashboard",
       "blurb": "Generate a Node-RED show-control dashboard for a production.",
       "category": "Show control",
-      "whatsNew": "Now on Android — import the Bible and generate into a folder you pick; project saves are exact and written atomically.",
-      "whatsNewVersion": "v1.13.1",
+      "whatsNew": "Updates now show the new version straight away, with no stale screens; plus a security hardening pass.",
+      "whatsNewVersion": "v1.13.2",
       "owner": "JAMEZJB",
       "repo": "ShowDashboard",
       "assets": {
@@ -131,8 +157,8 @@
       "name": "Show Handbook",
       "blurb": "Generate a per-show video handbook document.",
       "category": "Planning & admin",
-      "whatsNew": "Now on Android (.docx only — no PDF export there); handbook files are written atomically; PDF export retries cleanly on desktop.",
-      "whatsNewVersion": "v1.22.1",
+      "whatsNew": "Updates now show the new version straight away, with no stale screens; plus a security hardening pass.",
+      "whatsNewVersion": "v1.22.2",
       "owner": "JAMEZJB",
       "repo": "ShowHandbook",
       "assets": {
@@ -146,8 +172,8 @@
       "name": "PSN Tools",
       "blurb": "Monitor, visualise, generate & record PosiStageNet (PSN) tracking data.",
       "category": "Show control",
-      "whatsNew": "Now on Android (no MP4 export there); the player frees its socket on a failed start; recording, decoder and Inspect fixes.",
-      "whatsNewVersion": "v1.5.1",
+      "whatsNew": "Lists every network adapter, not just the Wi-Fi, marking the default route; a malformed packet can no longer freeze the app.",
+      "whatsNewVersion": "v1.6.1",
       "owner": "JAMEZJB",
       "repo": "PSNTools",
       "assets": {
@@ -161,8 +187,8 @@
       "name": "DMX Tools",
       "blurb": "Monitor, generate & translate Art-Net + sACN lighting data.",
       "category": "Show control",
-      "whatsNew": "Now on Android; generator starts at level 0; Monitor and Translate share one Art-Net receiver; bad settings no longer crash start-up.",
-      "whatsNewVersion": "v1.3.1",
+      "whatsNew": "Lists every network adapter, not just the Wi-Fi; sACN listens on all of them and output leaves by the adapter you pick.",
+      "whatsNewVersion": "v1.3.3",
       "owner": "JAMEZJB",
       "repo": "DMXTools",
       "assets": {
@@ -176,8 +202,8 @@
       "name": "Desk Convert",
       "blurb": "Convert digital mixing-console show files between manufacturers (DiGiCo ↔ Yamaha).",
       "category": "Audio & video",
-      "whatsNew": "Now on Android — pick source and donor, convert into a folder you choose; outputs are written atomically.",
-      "whatsNewVersion": "v0.5.1",
+      "whatsNew": "Updates now show the new version straight away, with no stale screens; plus a security hardening pass.",
+      "whatsNewVersion": "v0.5.2",
       "owner": "JAMEZJB",
       "repo": "DeskConvert",
       "assets": {
@@ -191,8 +217,8 @@
       "name": "NDI Tools",
       "blurb": "Discover NDI video sources on the network and check their health & bandwidth.",
       "category": "Audio & video",
-      "whatsNew": "Now on Android (SDK-free discovery); Full mode locks onto the exact source, never a sibling camera on the same host.",
-      "whatsNewVersion": "v0.3.1",
+      "whatsNew": "Lists every network adapter, not just the Wi-Fi, marking the default route; updates now show the new version straight away.",
+      "whatsNewVersion": "v0.3.3",
       "owner": "JAMEZJB",
       "repo": "NDITools",
       "assets": {
@@ -226,8 +252,8 @@
       "name": "PowerCalc",
       "blurb": "Plan power distribution, balance the phases & print a load sheet.",
       "category": "Planning & admin",
-      "whatsNew": "Now on Android; fixed: exported load sheets read 0.0 A per phase; whole-number quantities; explicit single/three-phase supply.",
-      "whatsNewVersion": "v0.6.1",
+      "whatsNew": "Updates now show the new version straight away, with no stale screens; plus a security hardening pass.",
+      "whatsNewVersion": "v0.6.2",
       "owner": "JAMEZJB",
       "repo": "PowerCalc",
       "assets": {
@@ -241,8 +267,8 @@
       "name": "Show Control Tools",
       "blurb": "Monitor & translate OSC, MIDI and MSC show-control messages.",
       "category": "Show control",
-      "whatsNew": "Now on Android; QA pass — no freeze on odd OSC floats, honest dropped counts, a stuck TCP peer no longer stalls reception.",
-      "whatsNewVersion": "v0.3.1",
+      "whatsNew": "The bind picker lists every network adapter, not just the Wi-Fi; updates now show the new version straight away.",
+      "whatsNewVersion": "v0.3.3",
       "owner": "JAMEZJB",
       "repo": "ShowControlTools",
       "assets": {
@@ -256,8 +282,8 @@
       "name": "ShowNet Scanner",
       "blurb": "Discover every device on a show network in one live inventory.",
       "category": "Networking",
-      "whatsNew": "Now on Android (sweep uses TCP probes there); a new device at a reused IP gets its own row; Stop halts a sweep promptly.",
-      "whatsNewVersion": "v0.3.1",
+      "whatsNew": "Finds every network adapter, not just the Wi-Fi; All interfaces really scans them all and tags each device with its adapter.",
+      "whatsNewVersion": "v0.4.1",
       "owner": "JAMEZJB",
       "repo": "ShowNetScanner",
       "assets": {
@@ -271,8 +297,8 @@
       "name": "Timecode Tools",
       "blurb": "Monitor, generate, convert & compare LTC, MTC and Art-Net timecode.",
       "category": "Show control",
-      "whatsNew": "Now on Android (Art-Net timecode; no MIDI or audio LTC there); a reload no longer restarts running engines.",
-      "whatsNewVersion": "v1.5.1",
+      "whatsNew": "Updates now show the new version straight away, with no stale screens; plus a security hardening pass.",
+      "whatsNewVersion": "v1.5.2",
       "owner": "JAMEZJB",
       "repo": "TimecodeTools",
       "assets": {
@@ -286,8 +312,8 @@
       "name": "PDF Tools",
       "blurb": "A private, offline PDF toolbox — merge, split, convert, redact and more.",
       "category": "Documents & media",
-      "whatsNew": "Now on Android (merge, split, forms, protect, stamp, sign; no reader or edit there); chain steps like redact are never skipped.",
-      "whatsNewVersion": "v0.8.1",
+      "whatsNew": "Opens in a rebuilt reader with tabs; drag and drop works again; Open With on Mac; far more tools on Android; updates show at once.",
+      "whatsNewVersion": "v0.9.1",
       "owner": "JAMEZJB",
       "repo": "PDFTools",
       "assets": {
@@ -319,8 +345,8 @@
       "name": "Image Tools",
       "blurb": "A private, offline image toolbox — convert, resize, watermark & scrub EXIF/GPS.",
       "category": "Documents & media",
-      "whatsNew": "Now on Android (23 tools; no bg-removal, upscale, HEIC, RAW, WEBP or AVIF there); Redact defaults to solid black + strip metadata.",
-      "whatsNewVersion": "v0.5.1",
+      "whatsNew": "Every tool now sits under the job it does, Full-only tools greyed in place; updates now show the new version straight away.",
+      "whatsNewVersion": "v0.6.1",
       "owner": "JAMEZJB",
       "repo": "ImageTools",
       "assets": {
@@ -354,8 +380,8 @@
       "name": "Surtitle Tools",
       "blurb": "An offline subtitle & surtitle toolbox — convert, retime, clean & check caption files.",
       "category": "Documents & media",
-      "whatsNew": "Now on Android (subtitle tools; no video or transcription there); a failed save never damages the existing file.",
-      "whatsNewVersion": "v0.5.1",
+      "whatsNew": "Updates now show the new version straight away, with no stale screens; plus a security hardening pass.",
+      "whatsNewVersion": "v0.5.2",
       "owner": "JAMEZJB",
       "repo": "SurtitleTools",
       "assets": {
@@ -401,8 +427,8 @@
       "name": "Rename Tools",
       "blurb": "Bulk-rename lots of files and folders at once with reusable rules.",
       "category": "Documents & media",
-      "whatsNew": "Now on Android (no JS renaming there); crash-safe apply — a rename batch recovers or rolls back after a restart.",
-      "whatsNewVersion": "v0.3.2",
+      "whatsNew": "Updates now show the new version straight away, with no stale screens; plus a security hardening pass.",
+      "whatsNewVersion": "v0.3.3",
       "owner": "JAMEZJB",
       "repo": "RenameTools",
       "assets": {
@@ -416,8 +442,8 @@
       "name": "Repo Radar",
       "blurb": "Every GitHub Actions run across your account in one live window.",
       "category": "Planning & admin",
-      "whatsNew": "Explains the macOS password prompt after updates; new steel colour and icon.",
-      "whatsNewVersion": "v0.2.2",
+      "whatsNew": "Explains the Mac password prompt before it appears; new steel colour; updates now show the new version straight away.",
+      "whatsNewVersion": "v0.2.3",
       "owner": "JAMEZJB",
       "repo": "RepoRadar",
       "assets": {

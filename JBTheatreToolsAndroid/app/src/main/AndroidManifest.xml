@@ -23,6 +23,8 @@
         <package android:name="com.jamesbreedon.psn" />
         <package android:name="com.jamesbreedon.timecode" />
         <package android:name="com.jamesbreedon.shownet" />
+        <package android:name="com.jamesbreedon.netgear" />
+        <package android:name="com.jamesbreedon.mikrotik" />
         <package android:name="com.jamesbreedon.ndi" />
         <package android:name="com.jamesbreedon.showcontrol" />
         <package android:name="com.jamesbreedon.projector" />

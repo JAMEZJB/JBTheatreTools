@@ -6,6 +6,7 @@ import com.jamesbreedon.jbtheatretools.install.ApkInstaller
 import com.jamesbreedon.jbtheatretools.install.ApkVerifier
 import com.jamesbreedon.jbtheatretools.install.InstalledApps
 import com.jamesbreedon.jbtheatretools.net.GitHubClient
+import com.jamesbreedon.jbtheatretools.net.GitHubException
 import com.jamesbreedon.jbtheatretools.net.RelayPolicy
 import com.jamesbreedon.jbtheatretools.net.ReleaseInfo
 import kotlinx.coroutines.Dispatchers
@@ -25,8 +26,16 @@ data class AppStatus(
     val note: String? = null,          // "No Android build", an error line, …
     val whatsNew: String? = null,
     val whatsNewVersion: String? = null,
+    /** Dev channel is off but a dev build is still installed, and a release can replace it (see [LauncherRepository]). */
+    val backToRelease: Boolean = false,
+    /** Not shown in the lists (an app with no release on this device's channel, not installed). */
+    val hidden: Boolean = false,
 ) {
     val isInstalled: Boolean get() = installedVersion != null
+    /** A development build is installed, or is what's on offer (Dev channel on). */
+    val isDev: Boolean
+        get() = (installedVersion?.let { VersionCompare.isDev(it) } ?: false) ||
+            (latestVersion?.let { VersionCompare.isDev(it) } ?: false)
     val hasUpdate: Boolean
         get() = installedVersion != null && latestVersion != null &&
             VersionCompare.isNewer(latestVersion, installedVersion)
@@ -91,6 +100,29 @@ class LauncherRepository(private val context: Context) {
             settings.debugFeedBase.isNotBlank()) ||
             secrets.hasPassphrase() || secrets.hasToken()
 
+    // ── release choice (stable, or the Dev channel) ─────────────────────────
+
+    /**
+     * The release an app installs from. Dev channel OFF: GitHub's `/releases/latest`, which never returns a
+     * pre-release — so a `-dev.N` build is never offered. ON: the full list, picked by [ReleasePick] (highest
+     * semver including dev builds; a stable X.Y.Z supersedes its own dev builds).
+     */
+    private fun pickRelease(client: GitHubClient, app: CatalogApp): ReleaseInfo {
+        if (!settings.devChannel) return client.latestRelease(app.owner, app.repo)
+        return ReleasePick.latest(client.releases(app.owner, app.repo), devChannel = true)
+            ?: throw GitHubException.noRelease()
+    }
+
+    /**
+     * The installed version as a release tag: the recorded tag when the package still reports that tag's
+     * X.Y.Z (so a dev build reads as `0.1.0-dev.2`, not `0.1.0`), else the package's own versionName.
+     */
+    fun installedVersionFor(catalogId: String): String? {
+        val name = installed.forCatalogId(catalogId)?.versionName ?: return null
+        val tag = settings.installedTag(catalogId) ?: return name
+        return if (VersionCompare.core(tag) == VersionCompare.norm(name)) VersionCompare.norm(tag) else name
+    }
+
     // ── self-update ──────────────────────────────────────────────────────────
 
     /** The launcher itself as a catalog entry (`self` in catalog.json), or null if the catalog has none. */
@@ -104,7 +136,10 @@ class LauncherRepository(private val context: Context) {
         val self = launcherApp ?: return@withContext null
         val client = client() ?: return@withContext null
         try {
-            val release = client.latestRelease(self.owner, self.repo)
+            // Dev channel ON: the launcher's own dev builds too (a dev build's versionName is its full tag,
+            // stamped from JBTT_VERSION at build time). Android can't install an OLDER launcher over a newer one,
+            // so there's no "back to release" here: a dev build is replaced when its release ships.
+            val release = pickRelease(client, self)
             val latest = VersionCompare.norm(release.tagName)
             if (!VersionCompare.isNewer(latest, launcherVersion)) return@withContext null
             AndroidAsset.resolve(self, release.tagName, release.assets.map { it.name }) ?: return@withContext null
@@ -135,7 +170,7 @@ class LauncherRepository(private val context: Context) {
 
     private fun statusFor(app: CatalogApp, client: GitHubClient?): AppStatus {
         val (line, lineVersion) = notes.resolved(app)
-        val installedVersion = installed.forCatalogId(app.id)?.versionName
+        val installedVersion = installedVersionFor(app.id)
         if (client == null) {
             return AppStatus(
                 app = app, installedVersion = installedVersion,
@@ -143,7 +178,7 @@ class LauncherRepository(private val context: Context) {
             )
         }
         return try {
-            val release = client.latestRelease(app.owner, app.repo)
+            val release = pickRelease(client, app)
             val assetName = AndroidAsset.resolve(app, release.tagName, release.assets.map { it.name })
             val asset = assetName?.let { name -> release.assets.firstOrNull { it.name == name } }
             AppStatus(
@@ -153,14 +188,24 @@ class LauncherRepository(private val context: Context) {
                 apkAssetName = if (asset != null) assetName else null,
                 apkSizeBytes = asset?.size ?: 0,
                 note = if (asset == null) "No Android build yet" else null,
+                // Dev channel OFF → `release` is the latest stable. When it isn't NEWER than the dev build that's
+                // installed, nothing would ever replace the dev build until the next release — offer the way back.
+                backToRelease = !settings.devChannel && asset != null &&
+                    installedVersion != null && VersionCompare.isDev(installedVersion) &&
+                    !VersionCompare.isDev(release.tagName) &&
+                    !VersionCompare.isNewer(release.tagName, installedVersion),
                 whatsNew = line,
                 whatsNewVersion = lineVersion,
             )
         } catch (e: Exception) {
+            // Nothing released on this device's channel (only dev builds so far, or none): shown only with the
+            // Development builds switch on, so everyone else never sees a dead tile.
+            val noRelease = e is GitHubException && e.kind == GitHubException.Kind.NO_RELEASE
             AppStatus(
                 app = app, installedVersion = installedVersion,
-                note = e.message ?: "Couldn’t reach the release feed",
+                note = if (noRelease) "No release yet" else (e.message ?: "Couldn’t reach the release feed"),
                 whatsNew = line, whatsNewVersion = lineVersion,
+                hidden = noRelease && installedVersion == null && !settings.devChannel,
             )
         }
     }
@@ -186,7 +231,7 @@ class LauncherRepository(private val context: Context) {
         val cache = File(context.cacheDir, "downloads").apply { mkdirs() }
         var apk: File? = null
         try {
-            val release = client.latestRelease(app.owner, app.repo)
+            val release = pickRelease(client, app)
             val assetName = AndroidAsset.resolve(app, release.tagName, release.assets.map { it.name })
                 ?: throw IllegalStateException(
                     "release ${release.tagName} has no Android build (looked for " +
@@ -233,6 +278,7 @@ class LauncherRepository(private val context: Context) {
             }
             when (outcome) {
                 is ApkInstaller.Outcome.Succeeded -> {
+                    settings.setInstalledTag(app.id, release.tagName)
                     log.log("install ${app.id} ${release.tagName}: $assetName verified + installed")
                     onProgress(InstallProgress(app.id, InstallProgress.Phase.DONE, 1.0))
                     true
@@ -329,6 +375,9 @@ class LauncherRepository(private val context: Context) {
         }
         return done
     }
+
+    /** True while the app's package is on the device (cheap PackageManager read, no network). */
+    fun isInstalled(catalogId: String): Boolean = installed.forCatalogId(catalogId) != null
 
     fun remove(catalogId: String) {
         val pkg = PackageIds.packageId(catalogId) ?: return

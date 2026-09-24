@@ -14,6 +14,9 @@ struct SettingsView: View {
     @State private var launcherResult: AppState.LauncherCheck?
     @State private var confirmingTokenRemove = false
     @State private var confirmingServerRemove = false
+    @State private var versionClicks = 0
+    @AppStorage(AppState.devChannelKey) private var devChannel = false
+    @AppStorage(AppState.devChannelRevealedKey) private var devRevealed = false
 
     /// The kit's panel heading (`.panel > h2`): a 10.5/600 caps micro-label in the tertiary text tone.
     private func panelLabel(_ title: String, _ symbol: String) -> some View {
@@ -128,6 +131,8 @@ struct SettingsView: View {
 
                     HStack {
                         Text("JB Theatre Tools v\(state.currentVersion)").font(JBFont.body)
+                            // Hidden Dev channel: seven clicks reveal it (Android's developer-options gesture).
+                            .onTapGesture { versionClicks += 1; if versionClicks >= 7 { devRevealed = true } }
                         Spacer()
                         Button(checkingLauncher ? "Checking…" : "Check for Updates") {
                             Task {
@@ -139,6 +144,14 @@ struct SettingsView: View {
                         .disabled(checkingLauncher)
                     }
                     if let result = launcherResult { launcherResultView(result) }
+                    if devRevealed {
+                        Divider()
+                        Toggle("Development builds on this Mac", isOn: $devChannel)
+                            .onChange(of: devChannel) { _ in Task { await state.refreshAll() } }
+                        Text("Also offer pre-release development builds (marked “dev”). They're verified exactly like releases, and a proper release always replaces them.")
+                            .font(JBFont.small).foregroundStyle(Color.jbText2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .padding(8)
             }

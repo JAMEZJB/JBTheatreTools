@@ -91,6 +91,19 @@ public sealed class AppRowControl : UserControl
     public string? Installed { get; private set; }
     public RowStatus Status { get; private set; } = RowStatus.Unknown;
     public List<ReleaseInfo> Releases { get; private set; } = new();
+
+    /// <summary>The stable tag to go back to when the Dev channel is off but a dev build is still installed and
+    /// no release is newer (nothing would replace it until the next release); null otherwise.</summary>
+    public string? BackToReleaseTag { get; private set; }
+
+    private string? ComputeBackToRelease()
+    {
+        if (Versions.DevChannel || Installed == null || !VersionCompare.IsDev(Installed)) return null;
+        var stable = VersionCompare.PickLatest(Releases, r => r.TagName, r => r.Prerelease, devChannel: false);
+        if (stable == null || VersionCompare.IsDev(stable.TagName) || VersionCompare.IsNewer(stable.TagName, Installed)) return null;
+        var asset = App.WindowsAsset(SelectedVariantQuery?.Invoke(this));
+        return stable.Assets.Any(a => a.Name == asset) ? stable.TagName : null;
+    }
     /// <summary>The semver-picked latest release, computed once in SetReleases — the header/menu/Download-All
     /// checks used to re-sort every row's release list on every button refresh.</summary>
     public ReleaseInfo? LatestRelease { get; private set; }
@@ -220,7 +233,9 @@ public sealed class AppRowControl : UserControl
         _install.AutoSize = true;
         _install.Click += async (_, _) =>
         {
-            if (InstallRequested != null) await InstallRequested(this);
+            // "Back to release" installs that exact stable tag (a downgrade from a dev build); else the latest.
+            if (BackToReleaseTag is { } tag) { if (InstallVersionRequested != null) await InstallVersionRequested(this, tag); }
+            else if (InstallRequested != null) await InstallRequested(this);
         };
 
         _launch.Text = "Launch";
@@ -861,7 +876,8 @@ public sealed class AppRowControl : UserControl
         // The row shows the SELECTED variant's slot, so the version line is annotated with that label.
         var selVar = App.HasVariants ? SelectedVariantLabel() : null;
         string instText = Installed == null ? "—" : (selVar != null ? $"{Installed} ({selVar})" : Installed);
-        _version.Text = $"Installed: {instText}    ·    Latest: {Latest ?? "—"}";
+        _version.Text = $"Installed: {instText}    ·    Latest: {Latest ?? "—"}"
+            + ((Installed != null && VersionCompare.IsDev(Installed)) || (Latest != null && VersionCompare.IsDev(Latest)) ? "    ·    dev build" : "");
 
         (string text, Color color) = Status switch
         {
@@ -870,7 +886,9 @@ public sealed class AppRowControl : UserControl
             RowStatus.NotInstalled => ("Not installed", Theme.Sub(_dark)),
             RowStatus.Installed => ("Installed", Theme.Sub(_dark)),
             RowStatus.NoRelease => ("No release", Theme.Sub(_dark)),
-            RowStatus.MissingAsset => ("No Windows build", Theme.Warn),
+            // A dev pre-release is mac + Android only (built on the maintainer's Mac), so say why there's nothing here.
+            RowStatus.MissingAsset => (Latest != null && VersionCompare.IsDev(Latest)
+                ? "No Windows build in this development release" : "No Windows build", Theme.Warn),
             RowStatus.Error => ("Error", Theme.Danger),
             RowStatus.Checking => ("Checking…", Theme.Sub(_dark)),
             _ => ("", Theme.Sub(_dark)),
@@ -878,9 +896,11 @@ public sealed class AppRowControl : UserControl
         if (_phase != null) ApplyBadge(_phase, Theme.Sub(_dark)); else ApplyBadge(text, color);   // a live phase wins
 
         bool installed = Installed != null;
-        _install.Visible = Status is RowStatus.NotInstalled or RowStatus.UpdateAvailable or RowStatus.Error;
-        _install.Text = Status == RowStatus.UpdateAvailable ? "Update" : (installed ? "Retry" : "Install");
-        _install.Enabled = LatestAssetId != null;
+        BackToReleaseTag = ComputeBackToRelease();
+        _install.Visible = BackToReleaseTag != null || Status is RowStatus.NotInstalled or RowStatus.UpdateAvailable or RowStatus.Error;
+        _install.Text = BackToReleaseTag != null ? "Back to release"
+            : Status == RowStatus.UpdateAvailable ? "Update" : (installed ? "Retry" : "Install");
+        _install.Enabled = BackToReleaseTag != null || LatestAssetId != null;
         // Launch is available whenever something is installed, even before a refresh has run.
         _launch.Visible = installed;
         _more.Visible = true;   // reordering lives here, so every row keeps its ⋯ menu

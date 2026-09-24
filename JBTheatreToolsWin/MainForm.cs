@@ -102,6 +102,7 @@ public sealed class MainForm : Form
         Controls.Add(root);
 
         RescaleChrome();   // fonts, heights, paddings and fixed positions from the DPI (before the rows measure the list)
+        Versions.DevChannel = _settings.DevChannel;   // before any release is picked
         LoadCatalog();
         if (WhatsNewCache.Load() is { } cachedNotes) ApplyWhatsNew(cachedNotes);   // last relay copy, for offline starts
         ApplyTheme();
@@ -193,7 +194,7 @@ public sealed class MainForm : Form
             download.Text = "Downloading…";
             try
             {
-                var dest = await LauncherUpdate.DownloadAndRevealAsync(_catalog.Self, AuthClient.SelfUpdate(_settings, _catalog.DownloadServer));
+                var dest = await LauncherUpdate.DownloadAndRevealAsync(_catalog.Self, AuthClient.SelfUpdate(_settings, _catalog.DownloadServer), CurrentVersion());
                 _updateBannerText.Text = $"Saved {Path.GetFileName(dest)} to Downloads — quit & replace JB Theatre Tools.";
             }
             catch (Exception ex)
@@ -875,7 +876,13 @@ public sealed class MainForm : Form
                         accessible = true;
                         row.SetReleases(res.Releases!);
                         var latest = Versions.Latest(res.Releases!);
-                        if (latest == null) { row.SetState(installed, null, null, RowStatus.NoRelease); }
+                        if (latest == null)
+                        {
+                            // Nothing released on this PC's channel (only dev builds so far, or none): only the
+                            // Development builds switch shows it, so everyone else never sees a dead row.
+                            accessible = Versions.DevChannel;
+                            row.SetState(installed, null, null, RowStatus.NoRelease);
+                        }
                         else
                         {
                             var asset = latest.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAsset(SelectedVariant(row.App)));
@@ -884,7 +891,7 @@ public sealed class MainForm : Form
                         break;
                     case FetchKind.Unauthorized: unauthorized = true; accessible = false; break;
                     case FetchKind.NoRelease:
-                        accessible = true; row.SetReleases(new List<ReleaseInfo>());
+                        accessible = Versions.DevChannel; row.SetReleases(new List<ReleaseInfo>());
                         row.SetState(installed, null, null, RowStatus.NoRelease); break;
                     case FetchKind.Error:
                         accessible = true; row.SetState(installed, null, null, RowStatus.Error);
@@ -1361,10 +1368,12 @@ public sealed class MainForm : Form
         try
         {
             using var client = AuthClient.SelfUpdate(_settings, _catalog.DownloadServer);   // launcher repo is public; never blocks on creds
-            var info = await client.LatestReleaseAsync(s.Owner, s.Repo);
-            if (Versions.IsNewer(info.TagName, CurrentVersion()))
+            var info = await Versions.LauncherTargetAsync(client, s.Owner, s.Repo, CurrentVersion());
+            if (info != null)
             {
-                _updateBannerText.Text = $"JB Theatre Tools {info.TagName} is available (you have v{CurrentVersion()}).";
+                _updateBannerText.Text = Versions.IsNewer(info.TagName, CurrentVersion())
+                    ? $"JB Theatre Tools {info.TagName} is available (you have v{CurrentVersion()})."
+                    : $"Back to the release: JB Theatre Tools {info.TagName} (you have the development build v{CurrentVersion()}).";
                 _updateBanner.Visible = true;
             }
             else
@@ -1382,6 +1391,7 @@ public sealed class MainForm : Form
         dlg.ApplyTheme(Theme.IsDark(_settings.Appearance));
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
+            Versions.DevChannel = _settings.DevChannel;
             _settings.Save();
             ApplyTheme();
             ApplyRowOrder();   // covers "Reset App Order" (and is a cheap no-op otherwise)
@@ -1417,6 +1427,10 @@ public sealed class MainForm : Form
 
     private static string CurrentVersion()
     {
+        // InformationalVersion carries a dev build's full tag (build-win.sh stamps JBTT_VERSION, e.g.
+        // 1.30.0-dev.1); the SDK may append "+<commit>", which is dropped. Else the numeric assembly version.
+        var info = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrWhiteSpace(info)) return info.Split('+')[0];
         var v = Assembly.GetExecutingAssembly().GetName().Version;
         return v == null ? "1.0.0" : $"{v.Major}.{v.Minor}.{v.Build}";
     }

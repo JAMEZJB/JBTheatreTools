@@ -3,6 +3,8 @@ package com.jamesbreedon.jbtheatretools.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.runtime.remember
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -154,7 +156,12 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
                     PrimaryButton("Open", Modifier.fillMaxWidth()) { vm.openApp(app) }
                     VSpace(10.dp)
                 }
-                if (status?.canInstall == true) {
+                if (status?.backToRelease == true) {
+                    SecondaryButton("Back to release v${status.latestVersion}", Modifier.fillMaxWidth()) {
+                        vm.askBackToRelease(app)
+                    }
+                    VSpace(10.dp)
+                } else if (status?.canInstall == true) {
                     SecondaryButton(
                         if (status.isInstalled) "Update" else "Install",
                         Modifier.fillMaxWidth(),
@@ -189,6 +196,30 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     SecondaryButton("Cancel", Modifier.weight(1f)) { vm.askRemove(null) }
                     DangerButton("Remove", Modifier.weight(1f)) { vm.confirmRemove(app) }
+                }
+            }
+        }
+    }
+
+    state.confirmBackToRelease?.let { app ->
+        ModalBottomSheet(
+            onDismissRequest = { vm.askBackToRelease(null) },
+            containerColor = c.raised,
+            shape = RoundedCornerShape(topStart = Radii.window, topEnd = Radii.window),
+            sheetState = rememberModalBottomSheetState(),
+        ) {
+            Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
+                TitleText("Back to the release of ${app.name}?")
+                VSpace(6.dp)
+                BodyText(
+                    "Android can't install an older version over a newer one, so the development build is removed " +
+                        "first and the release installs straight after. The app's saved settings on this device are reset.",
+                    maxLines = 5,
+                )
+                VSpace(16.dp)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SecondaryButton("Cancel", Modifier.weight(1f)) { vm.askBackToRelease(null) }
+                    DangerButton("Remove and reinstall", Modifier.weight(1f)) { vm.backToRelease(app) }
                 }
             }
         }
@@ -480,7 +511,7 @@ private fun AppTile(status: AppStatus, progress: InstallProgress?, vm: LauncherV
         )
         val version = status.installedVersion ?: status.latestVersion
         if (version != null) {
-            MonoText("v$version", color = if (status.isInstalled) c.text3 else c.text3)
+            MonoText(if (status.isDev) "v$version · dev" else "v$version", color = if (status.isDev) c.warn else c.text3)
         } else {
             SmallText(status.note ?: "", color = c.text3, weight = FontWeight.Normal, align = TextAlign.Center)
         }
@@ -573,6 +604,14 @@ private fun AppRow(status: AppStatus, progress: InstallProgress?, vm: LauncherVi
                     }
 
                     else -> SmallText(status.note ?: "No release", color = c.text3, weight = FontWeight.Normal)
+                }
+                if (status.isDev) {
+                    VSpace(4.dp)
+                    SmallText("dev build", color = c.warn, weight = FontWeight.Medium)
+                }
+                if (status.backToRelease) {
+                    VSpace(6.dp)
+                    SecondaryButton("Back to release", Modifier.width(120.dp)) { vm.askBackToRelease(status.app) }
                 }
             }
         }
@@ -688,6 +727,9 @@ private fun AboutScreen(vm: LauncherViewModel, state: LauncherUiState, gutter: a
                 SmallText(
                     "Android build ${vm.launcherVersion} (arm64)",
                     color = c.text3, weight = FontWeight.Normal,
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() }, indication = null,
+                    ) { vm.tapVersion() },
                 )
                 state.launcherUpdate?.let { version ->
                     VSpace(12.dp)
@@ -722,6 +764,25 @@ private fun AboutScreen(vm: LauncherViewModel, state: LauncherUiState, gutter: a
                 }
             }
             VSpace(12.dp)
+        }
+        if (state.devRevealed) {
+            item {
+                Panel(Modifier.fillMaxWidth()) {
+                    Column {
+                        LabelText("Development builds")
+                        VSpace(8.dp)
+                        Segmented(listOf("Off", "On"), if (state.devChannel) 1 else 0, { vm.setDevChannel(it == 1) },
+                            Modifier.fillMaxWidth())
+                        VSpace(8.dp)
+                        BodyText(
+                            "On this device only: also offer pre-release development builds (marked “dev”). " +
+                                "They're verified exactly like releases. A proper release always replaces them.",
+                            maxLines = 4,
+                        )
+                    }
+                }
+                VSpace(12.dp)
+            }
         }
         item {
             Panel(Modifier.fillMaxWidth()) {

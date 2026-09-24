@@ -56,6 +56,29 @@ class Settings(context: Context) {
         get() = prefs.getString(KEY_RELAY_OVERRIDE, "").orEmpty()
         set(value) = prefs.edit().putString(KEY_RELAY_OVERRIDE, value.trim()).apply()
 
+    /**
+     * Development builds (`vX.Y.Z-dev.N` pre-releases built on the maintainer's Mac): off unless switched on
+     * on THIS device. [devChannelRevealed] keeps the switch visible once the version line has been tapped
+     * seven times (Android's developer-options gesture); a normal user never sees it.
+     */
+    var devChannel: Boolean
+        get() = prefs.getBoolean(KEY_DEV_CHANNEL, false)
+        set(value) = prefs.edit().putBoolean(KEY_DEV_CHANNEL, value).apply()
+
+    var devChannelRevealed: Boolean
+        get() = prefs.getBoolean(KEY_DEV_REVEALED, false)
+        set(value) = prefs.edit().putBoolean(KEY_DEV_REVEALED, value).apply()
+
+    /**
+     * The release TAG each app was last installed from, by catalog id. A dev build's own versionName is the
+     * plain X.Y.Z (`0.1.0-dev.2` ships as versionName `0.1.0`), so without this the stable 0.1.0 would look
+     * "already installed" next to a dev build. Trusted only while the package still reports that X.Y.Z.
+     */
+    fun installedTag(catalogId: String): String? = prefs.getString(KEY_TAG_PREFIX + catalogId, null)
+
+    fun setInstalledTag(catalogId: String, tag: String?) =
+        prefs.edit().apply { if (tag == null) remove(KEY_TAG_PREFIX + catalogId) else putString(KEY_TAG_PREFIX + catalogId, tag) }.apply()
+
     var firstRunDone: Boolean
         get() = prefs.getBoolean(KEY_FIRST_RUN_DONE, false)
         set(value) = prefs.edit().putBoolean(KEY_FIRST_RUN_DONE, value).apply()
@@ -67,5 +90,8 @@ class Settings(context: Context) {
         const val KEY_DEBUG_FEED_KEY = "debug-feed-minisign-key"
         const val KEY_RELAY_OVERRIDE = "relay-override"
         const val KEY_FIRST_RUN_DONE = "first-run-done"
+        const val KEY_DEV_CHANNEL = "dev-channel"
+        const val KEY_DEV_REVEALED = "dev-channel-revealed"
+        const val KEY_TAG_PREFIX = "installed-tag:"
     }
 }

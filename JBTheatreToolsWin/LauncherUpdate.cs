@@ -9,10 +9,11 @@ public static class LauncherUpdate
     /// <returns>The path the new build was saved to.</returns>
     /// <remarks>`client` comes from AuthClient.SelfUpdate so the download follows the active auth
     /// mode (direct GitHub or the download-server relay); disposed here.</remarks>
-    public static async Task<string> DownloadAndRevealAsync(SelfInfo self, GitHubClient client)
+    public static async Task<string> DownloadAndRevealAsync(SelfInfo self, GitHubClient client, string currentVersion)
     {
         using var _ = client;
-        var info = await client.LatestReleaseAsync(self.Owner, self.Repo);
+        var info = await Versions.LauncherTargetAsync(client, self.Owner, self.Repo, currentVersion)
+            ?? throw new Exception("You're up to date.");
         if (!self.Assets.TryGetValue(Platform.AssetKey, out var assetName))
             throw new Exception("No Windows asset configured for this platform.");
         var asset = info.Assets.FirstOrDefault(a => a.Name == assetName)

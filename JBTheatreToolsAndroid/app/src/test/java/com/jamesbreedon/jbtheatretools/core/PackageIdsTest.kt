@@ -23,9 +23,9 @@ class PackageIdsTest {
         assertNull(PackageIds.packageId("not-an-app"))
     }
 
-    @Test fun twentyTwoApps() {
-        assertEquals(22, PackageIds.all().size)
-        assertEquals(22, PackageIds.all().distinct().size)
+    @Test fun twentyFourApps() {
+        assertEquals(24, PackageIds.all().size)
+        assertEquals(24, PackageIds.all().distinct().size)
         PackageIds.all().forEach { assertTrue(it.startsWith("com.jamesbreedon.")) }
     }
 

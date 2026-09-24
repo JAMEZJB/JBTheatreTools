@@ -15,7 +15,11 @@ val launcherProps = Properties().apply {
 fun prop(name: String): String =
     launcherProps.getProperty(name) ?: error("launcher.properties is missing '$name'")
 
-val appVersionName = prop("versionName")
+// A development build of the launcher carries its full tag as versionName (JBTT_VERSION=1.30.0-dev.1), so the
+// self-update can tell dev.1 from dev.2 and from the 1.30.0 release; versionCode stays from launcher.properties.
+val appVersionName = System.getenv("JBTT_VERSION")?.trim()?.removePrefix("v")?.takeIf { it.isNotEmpty() }?.also {
+    require(Regex("^\\d+\\.\\d+\\.\\d+-dev\\.\\d+$").matches(it)) { "JBTT_VERSION must look like 1.30.0-dev.1 (got $it)" }
+} ?: prop("versionName")
 val appVersionCode = prop("versionCode").toInt()
 
 // The catalog and the row icons live at the REPO ROOT and are shared with the macOS and

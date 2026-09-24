@@ -17,14 +17,39 @@ public static class Versions
     /// </summary>
     public static ReleaseInfo? Latest(IEnumerable<ReleaseInfo> releases)
     {
-        var list = releases.ToList();
-        var pool = list.Where(r => !r.Prerelease).ToList();
-        if (pool.Count == 0) pool = list;
-        ReleaseInfo? best = null;
-        foreach (var r in pool)
-            if (best == null || IsNewer(r.TagName, best.TagName)) best = r;
-        return best;
+        var list = releases as IList<ReleaseInfo> ?? releases.ToList();
+        var pick = VersionCompare.PickLatest(list, r => r.TagName, r => r.Prerelease, DevChannel);
+        // Dev builds are made on one Mac (mac + Android only). When the newest dev build has nothing for
+        // Windows, stay on the newest stable release rather than stranding the row; an app with ONLY dev
+        // releases keeps the dev pick, and the row says "No Windows build in this development release".
+        if (pick != null && DevChannel && VersionCompare.IsDev(pick.TagName) && !HasWindowsAsset(pick))
+            return VersionCompare.PickLatest(list, r => r.TagName, r => r.Prerelease, devChannel: false) ?? pick;
+        return pick;
     }
+
+    private static bool HasWindowsAsset(ReleaseInfo r) => r.Assets.Any(a =>
+        a.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+        a.Name.Contains("Windows", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The launcher release to offer, or null when there's nothing to do. Dev channel ON: the highest
+    /// release including the launcher's own dev builds (a dev build reports its full tag via
+    /// InformationalVersion, stamped by build-win.sh from JBTT_VERSION). OFF: the latest release — and when THIS
+    /// copy is a dev build, that release even if it's older ("back to release").</summary>
+    public static async Task<ReleaseInfo?> LauncherTargetAsync(GitHubClient client, string owner, string repo, string current)
+    {
+        if (DevChannel)
+        {
+            var pick = VersionCompare.PickLatest(await client.ReleasesAsync(owner, repo), r => r.TagName, r => r.Prerelease, true);
+            return pick != null && IsNewer(pick.TagName, current) ? pick : null;
+        }
+        var latest = await client.LatestReleaseAsync(owner, repo);
+        if (IsNewer(latest.TagName, current)) return latest;
+        return VersionCompare.IsDev(current) ? latest : null;
+    }
+
+    /// <summary>This PC's Dev channel (settings.json <c>DevChannel</c>; MainForm keeps it in step). Off by
+    /// default and for the CLI: development pre-releases are never picked.</summary>
+    public static bool DevChannel { get; set; }
 
     /// <summary>True if `a` is a strictly newer version than `b`. Delegates to the overflow-safe comparator.</summary>
     public static bool IsNewer(string a, string b) => VersionCompare.IsNewer(a, b);

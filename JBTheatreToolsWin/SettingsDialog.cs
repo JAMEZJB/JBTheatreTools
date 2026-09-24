@@ -24,6 +24,7 @@ public sealed class SettingsDialog : Form
     private readonly Button _check = new();
     private readonly Button _viewRelease = new();
     private readonly Label _checkResult = new();
+    private readonly CheckBox _devChannel = new();
     private readonly ComboBox _appearance = new();
     private readonly ComboBox _closeBehavior = new();
     private readonly CheckBox _installToApps = new();
@@ -180,6 +181,15 @@ public sealed class SettingsDialog : Form
             AutoSize = true,
             Location = new Point(16, 308),
         };
+        // Hidden Dev channel: seven clicks on the version reveal "Development builds" (like Android's
+        // developer options). Off by default; a normal user never sees it.
+        int versionClicks = 0;
+        versionLabel.Click += (_, _) => { if (++versionClicks >= 7 && !_devChannel.Visible) { _settings.DevChannelRevealed = true; RevealDevChannel(); } };
+        _devChannel.Text = "Development builds on this PC (pre-releases marked \u201cdev\u201d; mac + Android only for now)";
+        _devChannel.AutoSize = true;
+        _devChannel.Visible = false;
+        _devChannel.Checked = _settings.DevChannel;
+        _devChannel.CheckedChanged += (_, _) => _settings.DevChannel = _devChannel.Checked;
 
         _check.Text = "Check for Updates";
         _check.AutoSize = true;
@@ -196,7 +206,7 @@ public sealed class SettingsDialog : Form
             SetResult("Downloading…", Theme.Sub(Theme.CurrentDark));
             try
             {
-                var dest = await LauncherUpdate.DownloadAndRevealAsync(_selfInfo, AuthClient.SelfUpdate(_settings, _downloadServer));
+                var dest = await LauncherUpdate.DownloadAndRevealAsync(_selfInfo, AuthClient.SelfUpdate(_settings, _downloadServer), _currentVersion);
                 SetResult($"Saved {Path.GetFileName(dest)} to Downloads — quit & replace.", Theme.Ok);
             }
             catch (Exception ex)
@@ -288,13 +298,27 @@ public sealed class SettingsDialog : Form
             _tokenState, _token, _save, _remove, _tokenLink, _tokenHelp,
             _serverState, _serverPass, _serverHint, _serverSave, _serverRemove, _serverRelay,
             updatesHeading, _updateMode, _updateHint, versionLabel, _check, _viewRelease, _checkResult,
-            appearanceHeading, _appearance, closeHeading, _closeBehavior, _installToApps, openLog, resetOrder, showHidden, done
+            appearanceHeading, _appearance, closeHeading, _closeBehavior, _installToApps, openLog, resetOrder, showHidden, done,
+            _devChannel
         });
 
         UpdateServerState();
         UpdateAuthPanels();
         ResumeLayout(false);
         PerformLayout();   // the AutoScale pass runs here
+        if (_settings.DevChannelRevealed) RevealDevChannel();
+    }
+
+    /// <summary>Shows the Dev channel checkbox above the button row, growing the dialog to make room. Runs
+    /// after the AutoScale pass, so every offset goes through LogicalToDeviceUnits.</summary>
+    private void RevealDevChannel()
+    {
+        if (_devChannel.Visible) return;
+        int dy = LogicalToDeviceUnits(30), rowTop = LogicalToDeviceUnits(530);
+        foreach (Control c in Controls) if (c != _devChannel && c.Top >= rowTop) c.Top += dy;
+        ClientSize = new Size(ClientSize.Width, ClientSize.Height + dy);
+        _devChannel.Location = new Point(LogicalToDeviceUnits(16), rowTop);
+        _devChannel.Visible = true;
     }
 
     /// <summary>Shows the token panel or the server panel to match the selected auth mode.</summary>
@@ -327,10 +351,10 @@ public sealed class SettingsDialog : Form
         try
         {
             using var client = AuthClient.SelfUpdate(_settings, _downloadServer);   // public repo; never blocks on creds
-            var info = await client.LatestReleaseAsync(_selfInfo.Owner, _selfInfo.Repo);
-            if (Versions.IsNewer(info.TagName, _currentVersion))
+            var info = await Versions.LauncherTargetAsync(client, _selfInfo.Owner, _selfInfo.Repo, _currentVersion);
+            if (info != null)
             {
-                SetResult($"{info.TagName} is available.", Theme.Info);
+                SetResult(Versions.IsNewer(info.TagName, _currentVersion) ? $"{info.TagName} is available." : $"Back to the release: {info.TagName}.", Theme.Info);
                 _viewRelease.Location = new Point(_checkResult.Left + LogicalToDeviceUnits(160), LogicalToDeviceUnits(332));
                 _viewRelease.Visible = true;
             }

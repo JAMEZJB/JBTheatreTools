@@ -26,6 +26,13 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_PATH" "$APP/Contents/MacOS/$BIN_NAME"
 cp "Info.plist" "$APP/Contents/Info.plist"
+# A development build carries its full tag (JBTT_VERSION=1.30.0-dev.1) so the self-update can order dev builds.
+if [ -n "${JBTT_VERSION:-}" ]; then
+    DEV_VERSION="${JBTT_VERSION#v}"
+    [[ "$DEV_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$ ]] || { echo "JBTT_VERSION must look like 1.30.0-dev.1" >&2; exit 1; }
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${DEV_VERSION}" "$APP/Contents/Info.plist"
+    echo "==> Development build ${DEV_VERSION}"
+fi
 cp "$CATALOG" "$APP/Contents/Resources/catalog.json"
 if [ -f "AppIcon.icns" ]; then
     cp "AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"

@@ -27,7 +27,14 @@ COMMON=(-c Release
 rm -rf dist
 for RID in win-x64 win-arm64; do
     echo "==> Publishing ${RID}…"
-    dotnet publish "${COMMON[@]}" -r "$RID" -o "dist/$RID"
+    # A development build carries its full tag (JBTT_VERSION=1.30.0-dev.1) in InformationalVersion.
+    DEV_ARGS=()
+    if [ -n "${JBTT_VERSION:-}" ]; then
+        DEV_VERSION="${JBTT_VERSION#v}"
+        [[ "$DEV_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$ ]] || { echo "JBTT_VERSION must look like 1.30.0-dev.1" >&2; exit 1; }
+        DEV_ARGS=(-p:InformationalVersion="$DEV_VERSION" -p:IncludeSourceRevisionInInformationalVersion=false)
+    fi
+    dotnet publish "${COMMON[@]}" "${DEV_ARGS[@]+"${DEV_ARGS[@]}"}" -r "$RID" -o "dist/$RID"
 done
 
 echo "==> Done:"

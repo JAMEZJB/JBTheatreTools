@@ -32,6 +32,9 @@ data class LauncherUiState(
     val busyAll: Boolean = false,
     /** A newer launcher version with an Android build (e.g. "1.28.0"), or null. */
     val launcherUpdate: String? = null,
+    val devRevealed: Boolean = false,
+    val confirmBackToRelease: CatalogApp? = null,   // rule-8 confirm (it removes the app first)
+    val devChannel: Boolean = false,
 ) {
     val installedCount: Int get() = statuses.count { it.isInstalled }
     /** Apps with an update. */
@@ -40,9 +43,10 @@ data class LauncherUiState(
     val updateCount: Int get() = appUpdateCount + (if (launcherUpdate != null) 1 else 0)
 
     fun visibleStatuses(): List<AppStatus> {
+        val shown = statuses.filter { !it.hidden }
         val q = search?.trim()?.lowercase().orEmpty()
-        if (q.isEmpty()) return statuses
-        return statuses.filter {
+        if (q.isEmpty()) return shown
+        return shown.filter {
             it.app.name.lowercase().contains(q) || it.app.blurb.lowercase().contains(q)
         }
     }
@@ -57,6 +61,8 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             signedIn = repo.hasCredential(),
             appearance = repo.settings.appearance,
             statuses = repo.catalog.apps.map { AppStatus(it) },
+            devRevealed = repo.settings.devChannelRevealed,
+            devChannel = repo.settings.devChannel,
         )
     )
     val state: StateFlow<LauncherUiState> = _state.asStateFlow()
@@ -194,9 +200,57 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Cheap re-read of what's installed (no network) — after an install or a removal. */
     fun refreshInstalledOnly() {
-        val installed = com.jamesbreedon.jbtheatretools.install.InstalledApps(getApplication())
         _state.update { s ->
-            s.copy(statuses = s.statuses.map { it.copy(installedVersion = installed.forCatalogId(it.app.id)?.versionName) })
+            s.copy(statuses = s.statuses.map { it.copy(installedVersion = repo.installedVersionFor(it.app.id)) })
         }
+    }
+
+    // ── Dev channel (hidden; the maintainer's devices) ──────────────────────────────
+
+    private var versionTaps = 0
+
+    /** Seven taps on the About version line reveals "Development builds" (Android's developer-options gesture). */
+    fun tapVersion() {
+        if (_state.value.devRevealed) return
+        versionTaps++
+        if (versionTaps >= 7) {
+            repo.settings.devChannelRevealed = true
+            _state.update { it.copy(devRevealed = true, snackbar = "Development builds can now be switched on in About") }
+        }
+    }
+
+    fun askBackToRelease(app: CatalogApp?) = _state.update { it.copy(confirmBackToRelease = app, sheetFor = null) }
+
+    /**
+     * Replace an installed dev build with the release. Android refuses to install an OLDER version over a
+     * newer one, so the app is removed first (the system asks to confirm), then the release installs as soon
+     * as the package is gone. Gives up quietly if the removal is cancelled.
+     */
+    fun backToRelease(app: CatalogApp) {
+        _state.update { it.copy(confirmBackToRelease = null) }
+        if (!repo.canRequestInstalls()) {
+            _state.update { it.copy(snackbar = "Allow JB Theatre Tools to install apps, then try again.") }
+            repo.openInstallPermissionSettings()
+            return
+        }
+        repo.remove(app.id)
+        viewModelScope.launch {
+            for (i in 0 until 240) {                     // up to 2 minutes for the system uninstall dialog
+                kotlinx.coroutines.delay(500)
+                if (!repo.isInstalled(app.id)) break
+            }
+            refreshInstalledOnly()
+            if (repo.isInstalled(app.id)) {
+                _state.update { it.copy(snackbar = "${app.name} was not removed, so it's still on the dev build") }
+                return@launch
+            }
+            install(app)
+        }
+    }
+
+    fun setDevChannel(on: Boolean) {
+        repo.settings.devChannel = on
+        _state.update { it.copy(devChannel = on) }
+        refresh()
     }
 }

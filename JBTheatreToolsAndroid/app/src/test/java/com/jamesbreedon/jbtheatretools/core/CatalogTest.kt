@@ -21,7 +21,7 @@ class CatalogTest {
 
     @Test fun parsesEveryApp() {
         assertEquals(1, catalog.schemaVersion)
-        assertEquals(22, catalog.apps.size)
+        assertEquals(24, catalog.apps.size)
         catalog.apps.forEach { app ->
             assertTrue("${app.id} has no name", app.name.isNotBlank())
             assertTrue("${app.id} has no owner", app.owner.isNotBlank())

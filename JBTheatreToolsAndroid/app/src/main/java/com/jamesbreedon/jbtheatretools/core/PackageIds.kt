@@ -33,6 +33,8 @@ object PackageIds {
         "surtitletools" to "surtitle",
         "imagetools" to "image",
         "ciscoswitchtools" to "cisco",
+        "netgearswitchtools" to "netgear",
+        "mikrotikroutertools" to "mikrotik",
         "pdftools" to "pdf",
         "reporadar" to "radar",
         "convert" to "convert",

@@ -122,6 +122,9 @@ final class AppState: ObservableObject {
             if installed != nil { return true }
             switch status {
             case .unknown, .checking, .noAccess: return false
+            // Nothing released on this Mac's channel (an app with only development builds so far, or none):
+            // shown only with the Development builds switch on, so everyone else never sees a dead row.
+            case .noRelease: return AppState.devChannel
             default: return true
             }
         }
@@ -1027,11 +1030,36 @@ final class AppState: ObservableObject {
     /// ordered by creation date, so a backport/hotfix published *after* a newer release would otherwise
     /// be mis-selected as "latest" (and then offered as a downgrade) — we sort by version instead. This
     /// also matches GitHub's own semver-aware `releases/latest`, which the self-update check uses.
-    nonisolated static func latest(from releases: [ReleaseInfo]) -> ReleaseInfo? {
-        let stable = releases.filter { !$0.prerelease }
-        let pool = stable.isEmpty ? releases : stable
+    ///
+    /// Development pre-releases (`vX.Y.Z-dev.N`, built on the maintainer's Mac) are candidates ONLY when this Mac has the
+    /// Dev channel on — then the highest semver among stable + dev wins (a stable X.Y.Z supersedes its own dev
+    /// builds). Off, they're invisible, even for an app whose only releases are dev builds.
+    nonisolated static func latest(from releases: [ReleaseInfo], devChannel: Bool = AppState.devChannel) -> ReleaseInfo? {
+        let nonDev = releases.filter { !isDevTag($0.tagName) }
+        let stable = nonDev.filter { !$0.prerelease }
+        var pool = devChannel ? stable + releases.filter { isDevTag($0.tagName) } : stable
+        if pool.isEmpty { pool = nonDev }
         return pool.max { versionIsNewer($1.tagName, than: $0.tagName) }
     }
+
+    /// This Mac's Dev channel (Settings → click the version 7× to reveal). Read straight from UserDefaults so
+    /// the nonisolated release pick and the CLI (always off unless set) see the same value.
+    nonisolated static var devChannel: Bool { UserDefaults.standard.bool(forKey: devChannelKey) }
+    nonisolated static let devChannelKey = "theatre.devChannel"
+    nonisolated static let devChannelRevealedKey = "theatre.devChannelRevealed"
+
+    /// The stable tag to go back to when this Mac's Dev channel is off but the row's slot still has a dev build
+    /// installed and no release is newer (so nothing would replace it until the next release); else nil.
+    func backToReleaseTag(_ row: Row) -> String? {
+        guard !Self.devChannel, let installed = row.installed, Self.isDevTag(installed),
+              let stable = Self.latest(from: row.releases, devChannel: false), !Self.isDevTag(stable.tagName),
+              !Self.versionIsNewer(stable.tagName, than: installed),
+              stable.assets.contains(where: { $0.name == macAsset(for: row.app) }) else { return nil }
+        return stable.tagName
+    }
+
+    /// True for development pre-releases (`vX.Y.Z-dev.N`).
+    nonisolated static func isDevTag(_ tag: String) -> Bool { norm(tag).lowercased().contains("-dev.") }
 
     nonisolated private static func norm(_ s: String) -> String {
         var t = s.trimmingCharacters(in: .whitespaces)
@@ -1039,8 +1067,38 @@ final class AppState: ObservableObject {
         return t
     }
 
-    /// True if `a` is a strictly newer version string than `b` (component-wise numeric compare).
+    /// True if `a` is a strictly newer version string than `b`. Semver-aware: the numeric core compares
+    /// component-wise; a pre-release (`1.2.0-dev.3`, `1.2.0-rc1`) sorts BEFORE its release, with identifiers
+    /// compared semver-style — so `0.1.0-dev.1 < 0.1.0-dev.2 < 0.1.0`. A tag that doesn't start with a digit
+    /// (Convert's `build-20260912`) keeps the lenient digit-run parse below and is never a pre-release.
     nonisolated static func versionIsNewer(_ a: String, than b: String) -> Bool {
+        func split(_ s: String) -> (String, [Substring]?) {
+            let n = norm(s)
+            guard let first = n.first, first.isNumber, let dash = n.firstIndex(of: "-") else { return (n, nil) }
+            return (String(n[..<dash]), n[n.index(after: dash)...].split(separator: ".", omittingEmptySubsequences: false))
+        }
+        let (ca, pa) = split(a), (cb, pb) = split(b)
+        if versionCoreIsNewer(ca, than: cb) { return true }
+        if versionCoreIsNewer(cb, than: ca) { return false }
+        switch (pa, pb) {
+        case (nil, nil): return false
+        case (nil, _): return true          // 1.2.0 > 1.2.0-dev.3
+        case (_, nil): return false
+        case let (x?, y?):
+            for (p, q) in zip(x, y) where p != q {
+                switch (Int(p), Int(q)) {
+                case let (m?, n?): return m > n
+                case (_?, nil): return false    // numeric identifiers sort before words
+                case (nil, _?): return true
+                default: return p > q
+                }
+            }
+            return x.count > y.count
+        }
+    }
+
+    /// The numeric core compare (component-wise, missing parts = 0; first digit run per segment).
+    nonisolated private static func versionCoreIsNewer(_ a: String, than b: String) -> Bool {
         // First contiguous digit run per segment: skip leading non-digits, take the digits, stop at the next
         // non-digit. Handles date-style tags like "build-20260912" (→ 20260912) for a rolling app such as
         // Convert, while staying identical for ordinary semver segments ("2", "0-rc1" → 0).
@@ -1423,15 +1481,30 @@ final class AppState: ObservableObject {
         // Keychain read here (would trigger the prompt for a check that doesn't need auth).
         let client = cachedOnlyClient()
         do {
-            let info = try await client.latestRelease(owner: s.owner, repo: s.repo)
-            let newer = Self.versionIsNewer(info.tagName, than: currentVersion)
-            launcherUpdateAvailable = newer ? info.tagName : nil
-            return newer ? .available(current: currentVersion, latest: info.tagName) : .upToDate(currentVersion)
+            let target = try await launcherTarget(client: client, owner: s.owner, repo: s.repo)
+            launcherUpdateAvailable = target?.tagName
+            return target.map { .available(current: currentVersion, latest: $0.tagName) } ?? .upToDate(currentVersion)
         } catch GitHubError.noRelease {
             return .unavailable("No launcher release published yet.")
         } catch {
             return .unavailable(error.localizedDescription)
         }
+    }
+
+    /// The launcher release to offer, or nil when there's nothing to do. Dev channel ON: the highest release
+    /// including the launcher's own dev builds (`vX.Y.Z-dev.N`; a dev build reports its full tag as
+    /// CFBundleShortVersionString, stamped by build.sh from JBTT_VERSION). OFF: the latest release — and when
+    /// THIS copy is a dev build, that release even if it's older ("back to release").
+    func launcherTarget(client: GitHubClient, owner: String, repo: String) async throws -> ReleaseInfo? {
+        let current = currentVersion
+        if Self.devChannel {
+            guard let pick = Self.latest(from: try await client.releases(owner: owner, repo: repo), devChannel: true)
+            else { return nil }
+            return Self.versionIsNewer(pick.tagName, than: current) ? pick : nil
+        }
+        let latest = try await client.latestRelease(owner: owner, repo: repo)
+        if Self.versionIsNewer(latest.tagName, than: current) { return latest }
+        return Self.isDevTag(current) ? latest : nil
     }
 
     /// Downloads the launcher's latest build to ~/Downloads and reveals it in Finder.
@@ -1444,7 +1517,10 @@ final class AppState: ObservableObject {
 
         let client = cachedOnlyClient()   // public repo; no forced Keychain read
         do {
-            let info = try await client.latestRelease(owner: s.owner, repo: s.repo)
+            guard let info = try await launcherTarget(client: client, owner: s.owner, repo: s.repo) else {
+                launcherDownloadMessage = "You're up to date."
+                return
+            }
             guard let asset = info.assets.first(where: { $0.name == s.macAssetName }) else {
                 launcherDownloadMessage = "No macOS asset in \(info.tagName)."
                 return
