@@ -11,6 +11,7 @@ extension Notification.Name {
     static let jbttFind = Notification.Name("jbtt.find")
     static let jbttSettings = Notification.Name("jbtt.settings")
     static let jbttUpdateAll = Notification.Name("jbtt.updateAll")
+    static let jbttActivity = Notification.Name("jbtt.activity")
 }
 
 /// Routes `AppState.activeSheet` to its view.
@@ -334,18 +335,21 @@ struct LauncherCommands: Commands {
             Button("Settings…") { post(.jbttSettings) }
                 .keyboardShortcut(",", modifiers: .command)
         }
+        // Edit → Find: replaces the text system's Find submenu, whose own ⌘F would otherwise claim the shortcut first.
+        CommandGroup(replacing: .textEditing) {
+            Button("Find Apps") { post(.jbttFind) }
+                .keyboardShortcut("f", modifiers: .command)
+        }
         CommandMenu("Apps") {
             Button("Check for Updates") { post(.jbttRefresh) }
                 .keyboardShortcut("r", modifiers: .command)
-            Button("Find") { post(.jbttFind) }
-                .keyboardShortcut("f", modifiers: .command)
             Button("Update All") { post(.jbttUpdateAll) }
                 .keyboardShortcut("u", modifiers: .command)
                 .disabled(state.showLock || state.batchRunning || state.updatesAvailable == 0)
             Divider()
             Button(state.showLock ? "Turn Off Show Lock" : "Turn On Show Lock") { state.setShowLock(!state.showLock) }
                 .keyboardShortcut("l", modifiers: .command)
-            Button("Activity") { state.showActivity() }
+            Button("Activity") { post(.jbttActivity) }
                 .keyboardShortcut("y", modifiers: .command)
             Divider()
             Button("View as List") { UserDefaults.standard.set(AppViewMode.list.rawValue, forKey: "theatre.viewMode") }

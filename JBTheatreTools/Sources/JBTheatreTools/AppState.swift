@@ -1854,6 +1854,21 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The row menu's "Roll Back to vX…": confirms first (it's a downgrade, and the app is held afterwards).
+    func requestRollBack(_ id: String, to tag: String) {
+        guard !blockedByLock("roll back \(id)"), let row = rows.first(where: { $0.id == id }),
+              let current = row.installed else { return }
+        let alert = NSAlert()
+        alert.messageText = "Roll \(row.displayName) back to \(VersionDisplay.display(tag))?"
+        alert.informativeText = "It goes back from \(VersionDisplay.display(current)) to \(VersionDisplay.display(tag)), then stays "
+            + "held at that version so Update All and automatic updates leave it alone — release the hold from its ⋯ menu "
+            + "when you're ready."
+        alert.addButton(withTitle: "Roll Back")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Task { await self.rollBack(id, to: tag) }
+    }
+
     // MARK: - Sheets: release notes, details, activity
 
     private static func newestFirst(_ list: [ReleaseInfo]) -> [ReleaseInfo] {

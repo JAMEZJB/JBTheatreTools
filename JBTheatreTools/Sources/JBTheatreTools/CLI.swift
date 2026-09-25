@@ -99,6 +99,12 @@ enum CLI {
             serverPass = pass
         }
 
+        // Show lock (set in the app) pauses installs, updates and removals — the command line honours it too.
+        if UserDefaults.standard.bool(forKey: AppState.showLockKey), cmd == "--install" || cmd == "--uninstall" {
+            fputs("error: show lock is on — installs, updates and removals are paused. Turn it off in JB Theatre Tools (More → Turn Off Show Lock) first.\n", stderr)
+            exit(1)
+        }
+
         switch cmd {
         case "--list":       list(catalog: catalog, token: token)
         case "--installed":  installed(catalog: catalog)
@@ -236,8 +242,11 @@ enum CLI {
                 case .noManifest:     print("⚠︎ \(asset.name) installed unverified (older tag; no SHA256SUMS).")
                 case .assetNotListed: print("⚠︎ \(asset.name) installed unverified (older tag; not in SHA256SUMS).")
                 }
+                let before = im.installedVersion(app.id)
                 let dest = try im.install(app: app, version: rel.tagName, downloadedZip: zip, toApplications: toApplications)
                 try? FileManager.default.removeItem(at: zip)
+                HistoryStore.add(app: app.id, name: app.name, action: ActivityHistory.action(from: before, to: rel.tagName),
+                                 from: before, to: rel.tagName)
                 AppLog.shared.log("cli: installed \(app.id) \(rel.tagName)\(toApplications ? " (Applications)" : "")\(verification == .verified ? " (sha256 ok)" : " (unverified)")")
                 print("Installed \(app.name) \(rel.tagName) → \(dest.path)")
             } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
@@ -247,7 +256,9 @@ enum CLI {
     private static func uninstall(catalog: Catalog, id: String?) {
         guard let app = appFor(id, catalog) else { fputs("error: pass an app id.\n", stderr); exit(1) }
         do {
+            let before = InstallManager.shared.installedVersion(app.id)
             try InstallManager.shared.uninstall(app.id)
+            if let before { HistoryStore.add(app: app.id, name: app.name, action: "uninstall", from: before) }
             AppLog.shared.log("cli: uninstalled \(app.id)")
             print("Uninstalled \(app.name).")
         } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }

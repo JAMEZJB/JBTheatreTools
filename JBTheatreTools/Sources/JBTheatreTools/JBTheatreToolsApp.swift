@@ -16,6 +16,8 @@ struct JBTheatreToolsApp: App {
     /// needs no SwiftUI ownership — and `@StateObject` would subscribe the App's body to every AppState
     /// publish, re-creating `ContentView` (an `@self` change) and rendering the list a second time per event.
     private let state = AppState()
+    /// Settings → Quick launch → "Show in the menu bar".
+    @AppStorage(AppState.menuBarKey) private var showMenuBar = false
 
     var body: some Scene {
         WindowGroup("JB Theatre Tools") {
@@ -25,5 +27,10 @@ struct JBTheatreToolsApp: App {
                 .environment(\.appState, state)
         }
         .windowResizability(.contentSize)
+        .commands { LauncherCommands(state: state) }
+
+        MenuBarExtra("JB Theatre Tools", systemImage: "theatermasks", isInserted: $showMenuBar) {
+            QuickLaunchMenu(state: state)
+        }
     }
 }
