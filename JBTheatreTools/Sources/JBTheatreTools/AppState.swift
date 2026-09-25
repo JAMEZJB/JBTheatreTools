@@ -1129,6 +1129,7 @@ final class AppState: ObservableObject {
             if batchStopRequested { break }
             // Held after the batch started: an update (latest, already installed) leaves it where it is.
             if heldNow(slot) {
+                downloadTasks[slot.id]?.cancel()   // its look-ahead download, if running: no point finishing it
                 if let n = next, let d = await n.value { discard(d) }
                 next = nil
                 AppLog.shared.log("\(label): \(slot.id) is held — skipped")
@@ -1138,7 +1139,7 @@ final class AppState: ObservableObject {
             let current = next ?? Task { await self.downloadPhase(slot.id, tag: slot.tag, variantOverride: slot.variant, unattended: unattended) }
             let d = await current.value                       // download N done (or failed + recorded)
             next = nil
-            if i + 1 < work.count, !batchStopRequested {
+            if i + 1 < work.count, !batchStopRequested, !heldNow(work[i + 1]) {
                 let n = work[i + 1]                           // start download N+1 now…
                 next = Task { await self.downloadPhase(n.id, tag: n.tag, variantOverride: n.variant, unattended: unattended) }
             }

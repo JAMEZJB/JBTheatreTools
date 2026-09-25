@@ -1707,6 +1707,7 @@ public sealed class MainForm : Form
                 // Held after the batch started: an update (latest, already installed) leaves it where it is.
                 if (HeldNow(row, tag, before))
                 {
+                    if (_rowCts.TryGetValue(row, out var lookAhead)) lookAhead.Cancel();   // no point finishing it
                     if (next != null) { var skipped = await next; if (skipped != null) DiscardDownloaded(skipped); }
                     next = null;
                     Log.Write($"{title}: {row.App.Id} is held — skipped");
@@ -1718,7 +1719,8 @@ public sealed class MainForm : Form
                 if (i + 1 < work.Count && !token.IsCancellationRequested) // start download N+1 now…
                 {
                     var (nrow, nvid, ntag) = work[i + 1];
-                    next = DownloadSlotAsync(nrow, ntag, nvid, interactive: false, unattended, token);
+                    if (!HeldNow(nrow, ntag, InstallManager.Shared.InstalledVersion(nrow.App.InstallKey(nvid))))
+                        next = DownloadSlotAsync(nrow, ntag, nvid, interactive: false, unattended, token);
                 }
                 Exception? err;
                 if (d != null && HeldNow(row, tag, before)) { DiscardDownloaded(d); err = null; }

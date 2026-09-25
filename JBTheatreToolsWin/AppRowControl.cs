@@ -531,6 +531,7 @@ public sealed class AppRowControl : UserControl
                 menu.Items.Add(stop);
                 menu.Show(Cursor.Position);
             }
+            else menu.Dispose();   // never shown, so never closed
             return;
         }
         bool pinned = IsPinnedQuery?.Invoke(this) ?? false;

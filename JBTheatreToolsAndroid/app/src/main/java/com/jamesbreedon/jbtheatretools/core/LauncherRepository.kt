@@ -308,6 +308,8 @@ class LauncherRepository(private val context: Context) {
             // INSTALL_FAILED_VERIFICATION_FAILURE ("Install not allowed for file:///data/app/vmdl….tmp") when
             // James tapped several tiles in a row — each succeeded on a retry. So: serialise, and retry that
             // one error once after a pause.
+            // Show lock turned on while this downloaded / verified: install nothing (reported as cancelled).
+            if (settings.showLock) throw DownloadCancelledException()
             val outcome = sessionMutex.withLock {
                 var result = installer.install(apk, expectedPackage ?: declared, app.id)
                 if (result is ApkInstaller.Outcome.Failed && result.message.contains("VERIFICATION_FAILURE")) {
