@@ -143,7 +143,8 @@ struct ContentView: View {
         }
         // The keyboard commands and the menu-bar extra post these; the matching UI state lives here.
         .onReceive(NotificationCenter.default.publisher(for: .jbttRefresh)) { _ in
-            guard !refreshing, !state.batchRunning, state.hasCredentials else { return }
+            // Not under an open sheet: the check may need to show the Keychain explainer sheet.
+            guard !refreshing, !sheetOpen, !state.batchRunning, state.hasCredentials else { return }
             Task { await refreshAll() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .jbttFind)) { _ in
@@ -156,7 +157,7 @@ struct ContentView: View {
             if !sheetOpen { state.showActivity() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .jbttUpdateAll)) { _ in
-            guard canUpdateAll else { return }
+            guard canUpdateAll, !sheetOpen else { return }
             Task { await updateAllAction() }
         }
         .task {
@@ -1539,13 +1540,13 @@ struct AppMenuButtons: View {
                     ForEach(row.releases) { rel in
                         Button { Task { await state.install(row.id, tag: rel.tagName) } }
                             label: { Text(versionLabel(rel)) }
-                            .disabled(state.showLock)
+                            .disabled(state.showLock || row.busy)
                     }
                 }
             }
             if let tag = state.rollbackTag(row) {
                 Button("Roll Back to \(VersionDisplay.display(tag))…") { state.requestRollBack(row.id, to: tag) }
-                    .disabled(state.showLock)
+                    .disabled(state.showLock || row.busy)
             }
             if row.installed != nil {
                 Divider()
@@ -1557,7 +1558,7 @@ struct AppMenuButtons: View {
                 }
                 Divider()
                 Button("Uninstall \(row.displayName)", role: .destructive) { requestUninstall() }
-                    .disabled(state.showLock)
+                    .disabled(state.showLock || row.busy)
             }
         }
     }

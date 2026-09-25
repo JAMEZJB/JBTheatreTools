@@ -103,6 +103,12 @@ final class FeatureLogicTests: XCTestCase {
         XCTAssertEqual(notified, ["dmx 1.2.0", "psn 0.4.1"])
         XCTAssertTrue(UpdatePolicy.notify(pending, alreadyNotified: notified).toNotify.isEmpty)
         XCTAssertEqual(UpdatePolicy.notify([.init(id: "dmx", name: "DMX Tools", version: "v1.3.0")], alreadyNotified: notified).toNotify.count, 1)
+        // A check that failed for dmx keeps its key, so the next good check doesn't announce v1.2.0 again.
+        let afterFailure = UpdatePolicy.notify(Array(pending.dropFirst()), alreadyNotified: notified).notified
+        XCTAssertEqual(UpdatePolicy.remembered(afterFailure, alreadyNotified: notified, uncheckedIds: ["dmx"]), ["psn 0.4.1", "dmx 1.2.0"])
+        XCTAssertEqual(UpdatePolicy.remembered(afterFailure, alreadyNotified: notified, uncheckedIds: []), ["psn 0.4.1"])
+        XCTAssertTrue(UpdatePolicy.notify(pending, alreadyNotified: UpdatePolicy.remembered(
+            afterFailure, alreadyNotified: notified, uncheckedIds: ["dmx"])).toNotify.isEmpty)
 
         let items: [UpdatePolicy.Pending] = [
             .init(id: "a", name: "A", version: "1.0.0"), .init(id: "b", name: "B", version: "v2.0"),
@@ -278,5 +284,9 @@ final class FeatureLogicTests: XCTestCase {
         XCTAssertFalse(LauncherWhatsNew.shouldShow(lastSeen: "1.31.0", current: "1.30.0"))
         XCTAssertTrue(LauncherWhatsNew.shouldShow(lastSeen: "1.29.1", current: "1.30.0"))
         XCTAssertTrue(LauncherWhatsNew.shouldShow(lastSeen: "1.30.0-dev.2", current: "1.30.0"))
+        // Nothing recorded: an update only when the launcher was already in use (pre-1.30 recorded nothing).
+        XCTAssertTrue(LauncherWhatsNew.shouldShow(lastSeen: nil, current: "1.30.0", existingInstall: true))
+        XCTAssertTrue(LauncherWhatsNew.shouldShow(lastSeen: "", current: "1.30.0", existingInstall: true))
+        XCTAssertFalse(LauncherWhatsNew.shouldShow(lastSeen: "1.30.0", current: "1.30.0", existingInstall: true))
     }
 }

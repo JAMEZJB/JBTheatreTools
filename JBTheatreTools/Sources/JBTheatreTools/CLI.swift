@@ -45,6 +45,12 @@ enum CLI {
         // would fall through and (in main.swift) launch the GUI instead of installing.
         guard let cmd = args.first(where: { commands.contains($0) }) else { printHelp(); return }
         if cmd == "--help" || cmd == "-h" { printHelp(); return }
+        // Show lock (set in the app) pauses installs, updates and removals — the command line honours it too, and
+        // refuses before touching the Keychain.
+        if UserDefaults.standard.bool(forKey: AppState.showLockKey), cmd == "--install" || cmd == "--uninstall" {
+            fputs("error: show lock is on — installs, updates and removals are paused. Turn it off in JB Theatre Tools (⌘L) first.\n", stderr)
+            exit(1)
+        }
 
         var token = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
         var catalogPath: String?
@@ -97,12 +103,6 @@ enum CLI {
                   let pass = ServerAuthStore.load() {
             serverBase = base
             serverPass = pass
-        }
-
-        // Show lock (set in the app) pauses installs, updates and removals — the command line honours it too.
-        if UserDefaults.standard.bool(forKey: AppState.showLockKey), cmd == "--install" || cmd == "--uninstall" {
-            fputs("error: show lock is on — installs, updates and removals are paused. Turn it off in JB Theatre Tools (More → Turn Off Show Lock) first.\n", stderr)
-            exit(1)
         }
 
         switch cmd {

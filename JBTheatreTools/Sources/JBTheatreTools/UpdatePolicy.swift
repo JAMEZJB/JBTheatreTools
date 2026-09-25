@@ -65,6 +65,16 @@ enum UpdatePolicy {
         return (pending.filter { !seen.contains($0.key) }, keys)
     }
 
+    /// The keys to remember after a check: what's pending now, plus the earlier keys of apps whose check didn't
+    /// complete this time — so one check that couldn't reach the feed doesn't make the next announce it again.
+    static func remembered(_ notified: [String], alreadyNotified: [String], uncheckedIds: Set<String>) -> [String] {
+        var out = notified
+        for key in alreadyNotified where !out.contains(key) {
+            if let id = key.split(separator: " ", maxSplits: 1).first, uncheckedIds.contains(String(id)) { out.append(key) }
+        }
+        return out
+    }
+
     static func notificationTitle(_ count: Int) -> String { count == 1 ? "Update available" : "Updates available" }
 
     /// "DMX Tools v1.2.0, PSN Tools v0.4.1 and 2 more".
@@ -82,10 +92,11 @@ enum UpdatePolicy {
 
 /// When to show the launcher's own "what's new" after it has been updated.
 enum LauncherWhatsNew {
-    /// True on the first launch of a version newer than the last one seen. A fresh install (nothing seen yet)
-    /// shows nothing — the caller just records the current version.
-    static func shouldShow(lastSeen: String?, current: String) -> Bool {
-        guard let lastSeen, !lastSeen.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+    /// True on the first launch of a version newer than the last one seen. With nothing seen yet it's an update
+    /// only when the launcher was already in use before (versions before 1.30 didn't record what they were) — a
+    /// fresh install shows nothing, and the caller just records the current version.
+    static func shouldShow(lastSeen: String?, current: String, existingInstall: Bool = false) -> Bool {
+        guard let lastSeen, !lastSeen.trimmingCharacters(in: .whitespaces).isEmpty else { return existingInstall }
         return AppState.versionIsNewer(current, than: lastSeen)
     }
 }
