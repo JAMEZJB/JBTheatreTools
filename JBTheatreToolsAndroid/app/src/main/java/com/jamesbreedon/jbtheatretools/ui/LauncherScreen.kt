@@ -145,7 +145,8 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
         }
 
         // Pinned primary (§3): one per screen, full width, 48 high.
-        if (state.tab == Tab.UPDATES && (state.updateCount > 0 || state.busyAll) && !state.showLock) {
+        // While a batch runs its Stop stays here even under show lock (turning the lock on also stops it).
+        if (state.tab == Tab.UPDATES && (state.busyAll || (state.updateCount > 0 && !state.showLock))) {
             Box(
                 Modifier.fillMaxWidth().background(c.surface)
                     .padding(start = gutter, end = gutter, top = 12.dp, bottom = 12.dp),
@@ -1141,7 +1142,7 @@ private fun AboutV130Panels(vm: LauncherViewModel, state: LauncherUiState) {
                     Modifier.fillMaxWidth(),
                 )
                 VSpace(8.dp)
-                BodyText("While the launcher is open, check for new versions this often.", maxLines = 2)
+                BodyText("Check for new versions this often while the launcher is open — and in the background too when notifications are on.", maxLines = 3)
                 VSpace(12.dp)
                 LabelText("Notify me about updates")
                 VSpace(8.dp)
@@ -1170,6 +1171,11 @@ private fun AboutV130Panels(vm: LauncherViewModel, state: LauncherUiState) {
                 VSpace(10.dp)
                 SecondaryButton("Import setup", Modifier.fillMaxWidth(), enabled = !state.showLock && !state.busyAll) {
                     importFile.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
+                }
+                if (state.busyAll) {
+                    // An import runs from here, so its Stop is here too (Update all's is on the Updates tab).
+                    VSpace(10.dp)
+                    SecondaryButton("Stop", Modifier.fillMaxWidth(), onClick = vm::stopAll)
                 }
             }
         }

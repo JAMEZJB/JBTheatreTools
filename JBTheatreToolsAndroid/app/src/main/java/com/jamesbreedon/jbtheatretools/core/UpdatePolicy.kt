@@ -48,6 +48,14 @@ object UpdatePolicy {
         return pending.filter { it.key !in seen } to pending.map { it.key }.distinct()
     }
 
+    /**
+     * The keys to remember after a check: what's pending now, plus the earlier keys of apps whose check didn't
+     * complete this time — so one check that couldn't reach the feed doesn't make the next one announce the
+     * same update again.
+     */
+    fun remembered(notified: List<String>, alreadyNotified: Collection<String>, uncheckedIds: Set<String>): List<String> =
+        (notified + alreadyNotified.filter { it.substringBefore(' ') in uncheckedIds }).distinct()
+
     fun notificationTitle(count: Int): String = if (count == 1) "Update available" else "Updates available"
 
     /** "DMX Tools v1.2.0, PSN Tools v0.4.1 and 2 more". */
@@ -64,9 +72,13 @@ object UpdatePolicy {
 
 /** When to show the launcher's own "what's new" after it has been updated. */
 object LauncherWhatsNew {
-    /** True on the first launch of a version newer than the last one seen; a fresh install shows nothing. */
-    fun shouldShow(lastSeen: String?, current: String): Boolean =
-        !lastSeen.isNullOrBlank() && VersionCompare.isNewer(current, lastSeen)
+    /**
+     * True on the first launch of a version newer than the last one seen. With nothing seen yet it's an update only
+     * when the launcher was already installed before (versions before 1.30 didn't record what they were) — a fresh
+     * install shows nothing.
+     */
+    fun shouldShow(lastSeen: String?, current: String, existingInstall: Boolean = false): Boolean =
+        if (lastSeen.isNullOrBlank()) existingInstall else VersionCompare.isNewer(current, lastSeen)
 }
 
 /**

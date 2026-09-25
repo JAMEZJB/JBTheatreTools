@@ -111,6 +111,11 @@ class FeatureLogicTest {
         assertEquals(listOf("dmx 1.2.0", "psn 0.4.1"), notified)
         assertTrue(UpdatePolicy.notify(pending, notified).first.isEmpty())
         assertEquals(1, UpdatePolicy.notify(listOf(UpdatePolicy.Pending("dmx", "DMX Tools", "v1.3.0")), notified).first.size)
+        // A check that failed for dmx keeps its key, so the next good check doesn't announce v1.2.0 again.
+        val (_, afterFailure) = UpdatePolicy.notify(pending.drop(1), notified)
+        assertEquals(listOf("psn 0.4.1", "dmx 1.2.0"), UpdatePolicy.remembered(afterFailure, notified, setOf("dmx")))
+        assertEquals(listOf("psn 0.4.1"), UpdatePolicy.remembered(afterFailure, notified, emptySet()))
+        assertTrue(UpdatePolicy.notify(pending, UpdatePolicy.remembered(afterFailure, notified, setOf("dmx"))).first.isEmpty())
 
         val items = listOf(
             UpdatePolicy.Pending("a", "A", "1.0.0"), UpdatePolicy.Pending("b", "B", "v2.0"),
@@ -278,5 +283,9 @@ class FeatureLogicTest {
         assertFalse(LauncherWhatsNew.shouldShow("1.31.0", "1.30.0"))
         assertTrue(LauncherWhatsNew.shouldShow("1.29.1", "1.30.0"))
         assertTrue(LauncherWhatsNew.shouldShow("1.30.0-dev.2", "1.30.0"))
+        // Nothing recorded: an update only when the launcher was already installed (pre-1.30 recorded nothing).
+        assertTrue(LauncherWhatsNew.shouldShow(null, "1.30.0", existingInstall = true))
+        assertTrue(LauncherWhatsNew.shouldShow("", "1.30.0", existingInstall = true))
+        assertFalse(LauncherWhatsNew.shouldShow("1.30.0", "1.30.0", existingInstall = true))
     }
 }

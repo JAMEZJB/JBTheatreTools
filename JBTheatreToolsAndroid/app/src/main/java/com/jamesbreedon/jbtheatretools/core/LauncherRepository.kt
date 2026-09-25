@@ -99,13 +99,14 @@ class LauncherRepository(private val context: Context) {
             AuthMode.TOKEN -> secrets.token()?.let { GitHubClient.direct(it) }
             else -> {
                 val pass = secrets.passphrase() ?: return null
-                val base = RelayPolicy.validatedOverride(settings.relayOverride)
-                    ?: catalog.downloadServer
-                    ?: return null
+                val base = relayBase() ?: return null
                 GitHubClient.server(base, pass)
             }
         }
     }
+
+    /** The download server in use in server mode (a validated override, else the catalog's) — for diagnostics. */
+    fun relayBase(): String? = RelayPolicy.validatedOverride(settings.relayOverride) ?: catalog.downloadServer
 
     fun hasCredential(): Boolean =
         (BuildConfig.ALLOW_DEBUG_FEED && settings.authMode == AuthMode.DEBUG_FEED &&
@@ -245,6 +246,8 @@ class LauncherRepository(private val context: Context) {
         app: CatalogApp,
         onProgress: (InstallProgress) -> Unit,
         tag: String? = null,
+        /** A batch's Stop (or show lock): cancels this download too, and keeps a queued one from starting. */
+        stop: () -> Boolean = { false },
     ): Boolean = withContext(Dispatchers.IO) {
         cancelRequests.remove(app.id)
         val client = client() ?: run {
@@ -273,12 +276,13 @@ class LauncherRepository(private val context: Context) {
             val free = cache.usableSpace.takeIf { it > 0 } ?: -1L
             DiskSpace.shortfall(DiskSpace.required(asset.size, assetName), free)?.let { throw IllegalStateException(it) }
 
+            if (stop()) throw DownloadCancelledException()
             onProgress(InstallProgress(app.id, InstallProgress.Phase.DOWNLOADING, 0.0))
             apk = File(cache, assetName)
             client.downloadAsset(
                 app.owner, app.repo, asset.id, apk,
                 progress = { f -> onProgress(InstallProgress(app.id, InstallProgress.Phase.DOWNLOADING, f)) },
-                shouldCancel = { app.id in cancelRequests },
+                shouldCancel = { app.id in cancelRequests || stop() },
             )
             cancelRequests.remove(app.id)   // past the download: a late Cancel no longer applies
 
@@ -422,7 +426,8 @@ class LauncherRepository(private val context: Context) {
         var done = 0
         for (status in statuses.filter { it.updatePending && it.canInstall }) {
             if (shouldStop()) break
-            if (install(status.app, onProgress)) done++
+            if (status.app.id in settings.heldApps) continue   // held after Update all started
+            if (install(status.app, onProgress, stop = shouldStop)) done++
         }
         return done
     }
@@ -461,10 +466,17 @@ class LauncherRepository(private val context: Context) {
         val self = launcherApp ?: return emptyList()
         return releasesFor(self).filter {
             !VersionCompare.isNewer(it.tagName, launcherVersion) &&
-                (since.isNullOrBlank() || VersionCompare.isNewer(it.tagName, since)) &&
+                // Nothing seen before (an update from a version that didn't record it): just this version's notes.
+                (if (since.isNullOrBlank()) VersionCompare.equal(it.tagName, launcherVersion) else VersionCompare.isNewer(it.tagName, since)) &&
                 (settings.devChannel || !VersionCompare.isDev(it.tagName))
         }
     }
+
+    /** This launcher was installed before its current version (it has been updated at least once). */
+    fun launcherWasUpdated(): Boolean = runCatching {
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        info.lastUpdateTime > info.firstInstallTime
+    }.getOrDefault(false)
 
     /** The launcher's one-line what's-new from the catalog (the offline fallback for the notes). */
     fun launcherWhatsNewLine(): String? {
@@ -539,8 +551,7 @@ class LauncherRepository(private val context: Context) {
         val intent = context.packageManager.getLaunchIntentForPackage(pkg) ?: return false
         intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(intent)
-        noteOpened(catalogId)
-        updateShortcuts()
+        noteOpened(catalogId)   // the caller refreshes the shortcuts, off the main thread
         return true
     }
 

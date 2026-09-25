@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.jamesbreedon.jbtheatretools.core.ActivityEvent
 import com.jamesbreedon.jbtheatretools.core.AppFilter
+import com.jamesbreedon.jbtheatretools.core.AppVisibility
 import com.jamesbreedon.jbtheatretools.core.Appearance
 import com.jamesbreedon.jbtheatretools.core.AppStatus
 import com.jamesbreedon.jbtheatretools.core.AuthMode
@@ -19,10 +20,14 @@ import com.jamesbreedon.jbtheatretools.core.Notifier
 import com.jamesbreedon.jbtheatretools.core.SetupPlanner
 import com.jamesbreedon.jbtheatretools.core.SetupProfile
 import com.jamesbreedon.jbtheatretools.core.StatusFilter
+import com.jamesbreedon.jbtheatretools.core.UpdateAnnouncer
+import com.jamesbreedon.jbtheatretools.core.UpdateCheckScheduler
 import com.jamesbreedon.jbtheatretools.core.UpdatePolicy
 import com.jamesbreedon.jbtheatretools.core.VersionCompare
 import com.jamesbreedon.jbtheatretools.net.ReleaseInfo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -110,7 +115,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             devChannel = repo.settings.devChannel,
             showLock = repo.settings.showLock,
             autoCheckInterval = repo.settings.autoCheckInterval,
-            notifyUpdates = repo.settings.notifyUpdates,
+            notifyUpdates = repo.settings.notifyUpdates && Notifier(app).canPost(),
             history = repo.history(),
         )
     )
@@ -120,30 +125,46 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
 
     /** When the last check ran (the scheduler's clock). */
     private var lastCheck: Instant? = null
-    /** The launcher's window is on screen — notifications are only posted when it isn't. */
-    private var foreground = true   // the view model is created with the activity, i.e. on screen
-    /** Stop pressed on Update all / an import: finish the current app, start no more. */
-    private var stopRequested = false
+    /** Stop pressed on Update all / an import (or show lock turned on): finish the current app, start no more. */
+    @Volatile private var stopRequested = false
+    /** The apps of the Update all / import that's running — what Stop cancels (never a separate, manual install). */
+    private val batchIds: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    /** The release-notes load in flight — replaced (cancelled) by the next one, and by closing the sheet. */
+    private var notesJob: Job? = null
     /** Apps handed to the system uninstaller, with the version they had — recorded once they're gone. */
     private val pendingRemovals = HashMap<String, String?>()
 
     init {
+        AppVisibility.foreground = true   // the view model is created with the activity, i.e. on screen
         prepareLauncherWhatsNew()
         if (repo.hasCredential()) refresh()
         updateShortcuts()
-        // "While open, check every…": one tick a minute; a check runs when it's due and nothing else is happening.
+        syncBackgroundChecks()
+        // "While open, check every…": one tick a minute; a check runs when it's due, the launcher is on screen and
+        // nothing else is happening. (Closed, the background job takes over when notifications are on.)
         viewModelScope.launch {
             while (true) {
                 delay(60_000)
                 val s = _state.value
-                if (s.signedIn && !s.loading && !s.anyInstallRunning &&
+                if (AppVisibility.foreground && s.signedIn && !s.loading && !s.anyInstallRunning &&
                     UpdatePolicy.isDue(lastCheck, Instant.now(), repo.settings.autoCheckInterval)
                 ) refresh()
             }
         }
     }
 
-    fun setForeground(on: Boolean) { foreground = on }
+    fun setForeground(on: Boolean) {
+        AppVisibility.foreground = on
+        // Notifications may have been switched off for the app in Android settings meanwhile.
+        if (on) {
+            _state.update { it.copy(notifyUpdates = repo.settings.notifyUpdates && notifier.canPost()) }
+            syncBackgroundChecks()
+        }
+    }
+
+    /** The background check runs only when notifications are on and allowed (it has nothing else to do). */
+    private fun syncBackgroundChecks() =
+        UpdateCheckScheduler.sync(getApplication(), repo.settings, repo.hasCredential() && notifier.canPost())
 
     fun refresh() {
         if (_state.value.loading) return
@@ -162,14 +183,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     /** One notification per new update (never for held apps), and only while the launcher isn't on screen. */
     private fun announceNewUpdates() {
         val s = _state.value
-        val pending = s.statuses.filter { it.updatePending && it.latestVersion != null }
-            .map { UpdatePolicy.Pending(it.app.id, it.app.name, it.latestVersion!!) } +
-            listOfNotNull(s.launcherUpdate?.let { UpdatePolicy.Pending("jbtheatretools", "JB Theatre Tools", it) })
-        val (toNotify, notified) = UpdatePolicy.notify(pending, repo.settings.notifiedUpdates)
-        repo.settings.notifiedUpdates = notified.toSet()
-        if (toNotify.isNotEmpty() && repo.settings.notifyUpdates && !foreground) {
-            notifier.post(UpdatePolicy.notificationTitle(toNotify.size), UpdatePolicy.notificationBody(toNotify))
-        }
+        UpdateAnnouncer.announce(repo.settings, notifier, s.statuses, s.launcherUpdate)
     }
 
     /** Update this launcher (same verification as any app). Android closes the app to replace it. */
@@ -233,6 +247,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         repo.settings.authMode = mode
         repo.settings.firstRunDone = true
         _state.update { it.copy(signedIn = repo.hasCredential()) }
+        syncBackgroundChecks()
         refresh()
     }
 
@@ -243,6 +258,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(signedIn = false, statuses = repo.catalog.apps.map { a -> AppStatus(a) })
         }
+        syncBackgroundChecks()
     }
 
     // ── Show lock ───────────────────────────────────────────────────────────
@@ -250,6 +266,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     fun setShowLock(on: Boolean) {
         repo.settings.showLock = on
         _state.update { it.copy(showLock = on, sheetFor = null) }
+        if (on && _state.value.busyAll) stopAll()   // nothing more installs once the lock is on
     }
 
     /** The model-level guard behind every install / update / removal (the UI hides them too). */
@@ -302,10 +319,13 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         stopRequested = false
+        val pending = _state.value.statuses.filter { it.updatePending && it.canInstall }
+        batchIds.clear()
+        batchIds.addAll(pending.map { it.app.id })
         _state.update { it.copy(busyAll = true) }
         viewModelScope.launch {
-            val pending = _state.value.statuses.filter { it.updatePending && it.canInstall }
             val done = repo.updateAll(pending, { stopRequested }) { p -> onProgress(p) }
+            batchIds.clear()
             refreshInstalledOnly()
             _state.update {
                 it.copy(
@@ -314,14 +334,15 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
             // The launcher goes LAST: replacing it ends this process, so every app update must be done first.
-            if (_state.value.launcherUpdate != null && !stopRequested) runLauncherUpdate()
+            if (_state.value.launcherUpdate != null && !stopRequested && !_state.value.showLock) runLauncherUpdate()
         }
     }
 
-    /** Stop on Update all / an import: cancel the download in flight and start nothing more. */
+    /** Stop on Update all / an import: cancel the batch's download in flight and start nothing more. */
     fun stopAll() {
         stopRequested = true
-        _state.value.progress.values.filter { it.phase == InstallProgress.Phase.DOWNLOADING }
+        _state.value.progress.values
+            .filter { it.phase == InstallProgress.Phase.DOWNLOADING && it.catalogId in batchIds }
             .forEach { repo.requestCancel(it.catalogId) }
     }
 
@@ -353,6 +374,8 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(sheetFor = null) }
         if (!repo.open(app.id)) {
             _state.update { it.copy(snackbar = "${app.name} isn’t installed") }
+        } else {
+            updateShortcuts()
         }
     }
 
@@ -389,8 +412,10 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     fun showReleaseNotes(app: CatalogApp) {
         val installed = _state.value.statuses.firstOrNull { it.app.id == app.id }?.installedVersion
         _state.update { it.copy(sheetFor = null, notes = NotesSheet("${app.name} — release notes", installed)) }
-        viewModelScope.launch {
+        notesJob?.cancel()
+        notesJob = viewModelScope.launch {
             val result = runCatching { repo.releasesFor(app) }
+            ensureActive()   // closed, or another sheet opened, while loading: drop this result
             _state.update { s ->
                 val sheet = s.notes ?: return@update s
                 result.fold(
@@ -401,7 +426,11 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun closeNotes() = _state.update { it.copy(notes = null) }
+    fun closeNotes() {
+        notesJob?.cancel()
+        notesJob = null
+        _state.update { it.copy(notes = null) }
+    }
 
     private fun sortNewestFirst(list: List<ReleaseInfo>): List<ReleaseInfo> =
         list.sortedWith { a, b -> VersionCompare.compare(b.tagName, a.tagName) }
@@ -411,8 +440,11 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     private fun prepareLauncherWhatsNew() {
         val last = repo.settings.lastSeenLauncherVersion
         val cur = launcherVersion
-        if (LauncherWhatsNew.shouldShow(last, cur)) _state.update { it.copy(launcherWhatsNew = cur) }
-        else if (!VersionCompare.equal(last, cur)) repo.settings.lastSeenLauncherVersion = cur
+        if (LauncherWhatsNew.shouldShow(last, cur, existingInstall = last.isBlank() && repo.launcherWasUpdated())) {
+            _state.update { it.copy(launcherWhatsNew = cur) }
+        } else if (!VersionCompare.equal(last, cur)) {
+            repo.settings.lastSeenLauncherVersion = cur
+        }
     }
 
     fun dismissLauncherWhatsNew() {
@@ -424,8 +456,10 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         val since = repo.settings.lastSeenLauncherVersion
         dismissLauncherWhatsNew()
         _state.update { it.copy(notes = NotesSheet("JB Theatre Tools — what's new", launcherVersion)) }
-        viewModelScope.launch {
+        notesJob?.cancel()
+        notesJob = viewModelScope.launch {
             val list = runCatching { repo.launcherReleasesSince(since) }.getOrDefault(emptyList())
+            ensureActive()
             _state.update { s ->
                 val sheet = s.notes ?: return@update s
                 s.copy(notes = sheet.copy(
@@ -441,6 +475,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     fun setAutoCheckInterval(raw: String) {
         repo.settings.autoCheckInterval = raw
         _state.update { it.copy(autoCheckInterval = raw) }
+        syncBackgroundChecks()
     }
 
     /** Notifications on/off. The screen asks for the Android 13+ permission first and passes the answer here. */
@@ -452,6 +487,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                 snackbar = if (on && !notifier.canPost()) "Notifications are off for JB Theatre Tools in Android settings" else it.snackbar,
             )
         }
+        syncBackgroundChecks()
     }
 
     // ── Storage ─────────────────────────────────────────────────────────────
@@ -555,21 +591,27 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(snackbar = "Setup applied — nothing new to install") }
             return
         }
-        if (_state.value.busyAll) return
+        if (_state.value.busyAll) {
+            _state.update { it.copy(snackbar = "Holds applied — wait for the running updates to finish, then import again to install the apps.") }
+            return
+        }
         if (!repo.canRequestInstalls()) {
             _state.update { it.copy(snackbar = "Allow JB Theatre Tools to install apps, then import again.") }
             repo.openInstallPermissionSettings()
             return
         }
         stopRequested = false
+        batchIds.clear()
+        batchIds.addAll(preview.plan.toInstall.map { it.appId })
         _state.update { it.copy(busyAll = true) }
         viewModelScope.launch {
             var done = 0
             for (item in preview.plan.toInstall) {
                 if (stopRequested) break
                 val app = repo.catalog.apps.firstOrNull { it.id == item.appId } ?: continue
-                if (repo.install(app, { p -> onProgress(p) }, item.tag)) done++
+                if (repo.install(app, { p -> onProgress(p) }, item.tag, stop = { stopRequested })) done++
             }
+            batchIds.clear()
             refreshInstalledOnly()
             _state.update {
                 it.copy(busyAll = false, history = repo.history(), snackbar = "Installed $done of ${preview.plan.toInstall.size} from the setup file")
@@ -583,7 +625,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     fun diagnostics(): String {
         val s = _state.value
         val relayHost = if (repo.settings.authMode == AuthMode.SERVER) {
-            runCatching { java.net.URL(repo.catalog.downloadServer ?: "").host }.getOrNull()
+            runCatching { java.net.URL(repo.relayBase() ?: "").host }.getOrNull()
         } else null
         return Diagnostics.build(Diagnostics.Info(
             launcherVersion = launcherVersion,

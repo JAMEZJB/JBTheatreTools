@@ -31,7 +31,9 @@ The Apps tab has a search field and an All / Installed / Updates / Not installed
 also offer its release notes (newest first, with dates), its details (version, install date, size,
 latest release) and **Hold at this version**; a download in progress can be cancelled, and Update all
 has a Stop. Up to four installed apps (most recently opened first) become shortcuts on the launcher's
-icon, and after the launcher updates itself it offers its own release notes once. The rules behind these
+icon, and after the launcher updates itself it offers its own release notes once. With update notifications on,
+checks also run while the launcher is closed — a periodic JobScheduler job that needs a network connection and only
+ever notifies (it never installs). The rules behind these
 (filtering, notes cleanup, schedules, the setup file, the history, redaction) match the desktop
 launchers', with the same unit-test cases on all three.
 
