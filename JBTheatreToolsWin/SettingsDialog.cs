@@ -1,5 +1,12 @@
 namespace JBTheatreTools;
 
+/// <summary>What Settings needs from the main window for the Storage and Support panels.</summary>
+public sealed record SettingsExtras(
+    Func<Task<(long Installed, long Cache)>> Storage,
+    Func<bool> CanClearCache,
+    Func<Task> ClearCache,
+    Action CopyDiagnostics);
+
 public sealed class SettingsDialog : Form
 {
     private readonly AppSettings _settings;
@@ -31,8 +38,22 @@ public sealed class SettingsDialog : Form
 
     private readonly string? _downloadServer;
 
-    public SettingsDialog(AppSettings settings, SelfInfo? selfInfo, string currentVersion, string? downloadServer)
+    // Right-hand column: show lock, automatic checks, quick launch, storage, support.
+    private readonly CheckBox _showLock = new();
+    private readonly Label _intervalLabel = new();
+    private readonly ComboBox _interval = new();
+    private readonly CheckBox _notify = new();
+    private readonly CheckBox _autoInstall = new();
+    private readonly CheckBox _tray = new();
+    private readonly Label _storage = new();
+    private readonly Button _clearCache = new();
+    private readonly List<Label> _hints = new();
+    private readonly SettingsExtras? _extras;
+
+    public SettingsDialog(AppSettings settings, SelfInfo? selfInfo, string currentVersion, string? downloadServer,
+                          SettingsExtras? extras = null)
     {
+        _extras = extras;
         _settings = settings;
         _selfInfo = selfInfo;
         _currentVersion = currentVersion;
@@ -50,7 +71,7 @@ public sealed class SettingsDialog : Form
         SuspendLayout();
         AutoScaleDimensions = new SizeF(96f, 96f);
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(460, 568);
+        ClientSize = new Size(900, 568);   // two columns: the original settings, then the v1.30 ones
 
         // --- Download access (auth mode + per-mode credentials) ---
         var tokenHeading = Bold("Download access", new Point(16, 16));
@@ -167,6 +188,7 @@ public sealed class SettingsDialog : Form
         {
             _settings.UpdateMode = _updateMode.SelectedIndex switch { 1 => "manual", 2 => "never", _ => "everyLaunch" };
             _updateHint.Text = UpdateHint();
+            UpdateIntervalEnabled();
         };
 
         _updateHint.AutoSize = false;
@@ -299,6 +321,8 @@ public sealed class SettingsDialog : Form
         };
         AcceptButton = done;
 
+        var rightColumn = BuildRightColumn();
+
         Controls.AddRange(new Control[]
         {
             tokenHeading, _authMode,
@@ -308,14 +332,131 @@ public sealed class SettingsDialog : Form
             appearanceHeading, _appearance, closeHeading, _closeBehavior, _installToApps, openLog, resetOrder, showHidden, done,
             _devChannel
         });
+        Controls.AddRange(rightColumn.ToArray());
 
         UpdateServerState();
         UpdateAuthPanels();
+        UpdateIntervalEnabled();
         ResumeLayout(false);
         PerformLayout();   // the AutoScale pass runs here
         // Shown only while dev mode is ON (or after the gesture above, this session only): switch it off and the
         // checkbox is gone next time Settings opens.
         if (_settings.DevChannel) RevealDevChannel();
+    }
+
+    /// <summary>The second column (x 480–884): show lock, automatic checks, quick launch, storage and support —
+    /// laid out at fixed 96-DPI positions like the first column, all above the button row.</summary>
+    private List<Control> BuildRightColumn()
+    {
+        const int X = 484, W = 400;
+        var list = new List<Control>();
+        Label Hint(string text, int y, int h = 34)
+        {
+            var l = new Label { Text = text, AutoSize = false, Location = new Point(X, y), Size = new Size(W, h),
+                                ForeColor = Theme.Sub(Theme.CurrentDark), UseMnemonic = false };
+            _hints.Add(l);
+            return l;
+        }
+        // A hairline between the columns.
+        list.Add(new Panel { Location = new Point(466, 16), Size = new Size(1, 500), BackColor = Theme.Line(Theme.CurrentDark), Tag = "divider" });
+
+        list.Add(Bold("Show lock", new Point(X, 16)));
+        _showLock.Text = "Pause installs, updates and removals";
+        _showLock.AutoSize = true;
+        _showLock.Location = new Point(X, 40);
+        _showLock.Checked = _settings.ShowLock;
+        _showLock.CheckedChanged += (_, _) => { _settings.ShowLock = _showLock.Checked; UpdateCacheButton(); };
+        list.Add(_showLock);
+        list.Add(Hint("For show time: launching still works, nothing changes underneath you. Ctrl+L in the main window.", 64));
+
+        list.Add(Bold("Automatic checks", new Point(X, 110)));
+        _intervalLabel.Text = "While open, check every";
+        _intervalLabel.AutoSize = true;
+        _intervalLabel.Location = new Point(X, 138);
+        list.Add(_intervalLabel);
+        _interval.DropDownStyle = ComboBoxStyle.DropDownList;
+        foreach (var (_, label) in UpdatePolicy.Intervals) _interval.Items.Add(label);
+        int idx = Array.FindIndex(UpdatePolicy.Intervals, i => i.Raw == _settings.AutoCheckInterval);
+        _interval.SelectedIndex = idx < 0 ? 0 : idx;
+        _interval.Location = new Point(X + 170, 134);
+        _interval.Width = 130;
+        _interval.SelectedIndexChanged += (_, _) =>
+            _settings.AutoCheckInterval = UpdatePolicy.Intervals[Math.Max(0, _interval.SelectedIndex)].Raw;
+        list.Add(_interval);
+        _notify.Text = "Notify me about new updates";
+        _notify.AutoSize = true;
+        _notify.Location = new Point(X, 168);
+        _notify.Checked = _settings.NotifyUpdates;
+        _notify.CheckedChanged += (_, _) => _settings.NotifyUpdates = _notify.Checked;
+        list.Add(_notify);
+        _autoInstall.Text = "Install updates automatically";
+        _autoInstall.AutoSize = true;
+        _autoInstall.Location = new Point(X, 194);
+        _autoInstall.Checked = _settings.AutoInstallUpdates;
+        _autoInstall.CheckedChanged += (_, _) => _settings.AutoInstallUpdates = _autoInstall.Checked;
+        list.Add(_autoInstall);
+        list.Add(Hint("Held apps and apps that are open are left alone, and nothing installs during show lock.", 218));
+
+        list.Add(Bold("Quick launch", new Point(X, 264)));
+        _tray.Text = "Always show the icon in the notification area";
+        _tray.AutoSize = true;
+        _tray.Location = new Point(X, 288);
+        _tray.Checked = _settings.AlwaysShowTray;
+        _tray.CheckedChanged += (_, _) => _settings.AlwaysShowTray = _tray.Checked;
+        list.Add(_tray);
+        list.Add(Hint("Right-click it to launch any installed app, or check for updates.", 312, 20));
+
+        list.Add(Bold("Storage", new Point(X, 346)));
+        _storage.AutoSize = false;
+        _storage.Location = new Point(X, 370);
+        _storage.Size = new Size(W, 20);
+        _storage.Text = _extras == null ? "" : "Calculating…";
+        list.Add(_storage);
+        _clearCache.Text = "Clear Download Cache";
+        _clearCache.AutoSize = true;
+        _clearCache.Location = new Point(X, 394);
+        _clearCache.Visible = _extras != null;
+        _clearCache.Click += async (_, _) =>
+        {
+            if (_extras == null || !_extras.CanClearCache()) { UpdateCacheButton(); return; }
+            _clearCache.Enabled = false;
+            await _extras.ClearCache();
+            await RefreshStorageAsync();
+            UpdateCacheButton();
+        };
+        list.Add(_clearCache);
+
+        list.Add(Bold("Support", new Point(X, 440)));
+        var diag = new Button { Text = "Copy Diagnostics", AutoSize = true, Location = new Point(X, 464), Visible = _extras != null };
+        diag.Click += (_, _) => _extras?.CopyDiagnostics();
+        list.Add(diag);
+        list.Add(Hint("Versions, settings and recent log lines for a support question — never passwords or tokens.", 494));
+
+        Shown += async (_, _) => { await RefreshStorageAsync(); UpdateCacheButton(); };
+        return list;
+    }
+
+    private async Task RefreshStorageAsync()
+    {
+        if (_extras == null) return;
+        try
+        {
+            var (installed, cache) = await _extras.Storage();
+            if (!IsDisposed) _storage.Text = $"Installed apps: {ByteSize.Format(installed)}   ·   Download cache: {ByteSize.Format(cache)}";
+        }
+        catch (Exception ex) { if (!IsDisposed) _storage.Text = $"Couldn't measure storage: {ex.Message}"; }
+    }
+
+    /// <summary>Clearing the cache is off during show lock and while anything is downloading or installing.</summary>
+    private void UpdateCacheButton() =>
+        _clearCache.Enabled = _extras != null && !_settings.ShowLock && _extras.CanClearCache();
+
+    /// <summary>Scheduled checks only run in "Every launch" mode — the interval is greyed out otherwise.</summary>
+    private void UpdateIntervalEnabled()
+    {
+        bool on = _settings.UpdateMode == "everyLaunch";
+        _interval.Enabled = on;
+        _intervalLabel.Enabled = on;
     }
 
     /// <summary>Shows the Dev channel checkbox above the button row, growing the dialog to make room. Runs
@@ -442,6 +583,9 @@ public sealed class SettingsDialog : Form
         _serverRelay.ForeColor = Theme.Muted(dark);
         _updateHint.ForeColor = Theme.Sub(dark);
         _checkResult.ForeColor = Theme.Sub(dark);
+        foreach (var h in _hints) h.ForeColor = Theme.Sub(dark);
+        foreach (Control c in Controls)
+            if (c is Panel { Tag: "divider" } line) line.BackColor = Theme.Line(dark);
         UpdateTokenState();
         UpdateServerState();
         if (IsHandleCreated) Theme.ApplyTitleBar(this, dark);

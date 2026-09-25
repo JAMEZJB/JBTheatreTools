@@ -131,4 +131,7 @@ public sealed class SelfInfo
     [JsonPropertyName("owner")] public string Owner { get; set; } = "";
     [JsonPropertyName("repo")] public string Repo { get; set; } = "";
     [JsonPropertyName("assets")] public Dictionary<string, string> Assets { get; set; } = new();
+    /// <summary>The launcher's own one-line what's-new (the fallback for the "Updated to vX" notes).</summary>
+    [JsonPropertyName("whatsNew")] public string? WhatsNew { get; set; }
+    [JsonPropertyName("whatsNewVersion")] public string? WhatsNewVersion { get; set; }
 }

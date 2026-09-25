@@ -4,6 +4,8 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- "Updates available" notifications (Android 13+ asks at runtime, when the user switches them on in About). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- The launcher IS the installer (§1a): it commits PackageInstaller sessions itself,
          so it asks for "Install unknown apps" once and explains why in one line. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />

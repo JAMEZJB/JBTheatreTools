@@ -18,6 +18,14 @@ public sealed class AppSettings
     public List<string> CategoryOrder { get; set; } = new();       // user's category section order; empty = catalog order
     public List<string> CollapsedCategories { get; set; } = new(); // category keys the user collapsed
     public Dictionary<string, string> AppVariants { get; set; } = new(); // app id → selected variant id (e.g. NDI standard/full)
+    public bool ShowLock { get; set; }                    // show lock: installs / updates / removals paused, Launch still works
+    public List<string> HeldApps { get; set; } = new();   // app ids held at their installed version (Update All leaves them)
+    public string AutoCheckInterval { get; set; } = UpdatePolicy.DefaultInterval; // "off" | "1h" | "4h" | "12h" | "24h" (while open)
+    public bool NotifyUpdates { get; set; } = true;       // notify (tray balloon) when a check finds new updates
+    public bool AutoInstallUpdates { get; set; }          // install updates automatically after a check (never for open apps)
+    public List<string> NotifiedUpdates { get; set; } = new(); // "id version" keys already announced
+    public string LastSeenLauncherVersion { get; set; } = ""; // drives the one-time "Updated to vX" banner
+    public bool AlwaysShowTray { get; set; }              // keep the notification-area icon (quick launch) while the window is open
     public string ServerUrl { get; set; } = "";           // user-INVISIBLE relay-URL override (settings.json only, no UI); normally
                                                           // empty — the URL comes from the catalog's downloadServer
 

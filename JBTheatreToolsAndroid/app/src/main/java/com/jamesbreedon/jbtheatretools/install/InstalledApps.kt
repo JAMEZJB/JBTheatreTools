@@ -14,7 +14,15 @@ import com.jamesbreedon.jbtheatretools.core.PackageIds
  */
 class InstalledApps(private val context: Context) {
 
-    data class Installed(val packageName: String, val versionName: String, val versionCode: Long)
+    data class Installed(
+        val packageName: String,
+        val versionName: String,
+        val versionCode: Long,
+        /** When this version was installed (PackageInfo.lastUpdateTime, epoch ms). */
+        val lastUpdateTime: Long = 0,
+        /** The size of the installed APK(s) — base plus any splits. */
+        val apkBytes: Long = 0,
+    )
 
     /** The installed record for a catalog id, or null when that app isn't installed. */
     fun forCatalogId(catalogId: String): Installed? {
@@ -24,10 +32,14 @@ class InstalledApps(private val context: Context) {
 
     fun forPackage(packageName: String): Installed? = try {
         val info = context.packageManager.getPackageInfo(packageName, 0)
+        val appInfo = info.applicationInfo
+        val apks = listOfNotNull(appInfo?.sourceDir) + (appInfo?.splitSourceDirs?.toList() ?: emptyList())
         Installed(
             packageName = packageName,
             versionName = info.versionName.orEmpty(),
             versionCode = androidx.core.content.pm.PackageInfoCompat.getLongVersionCode(info),
+            lastUpdateTime = info.lastUpdateTime,
+            apkBytes = apks.sumOf { runCatching { java.io.File(it).length() }.getOrDefault(0L) },
         )
     } catch (e: PackageManager.NameNotFoundException) {
         null

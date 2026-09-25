@@ -30,6 +30,21 @@ internal static class Log
         catch { /* logging never throws into the caller */ }
     }
 
+    /// <summary>The last <paramref name="count"/> lines of the log (for Copy Diagnostics); empty if unreadable.</summary>
+    public static List<string> Tail(int count)
+    {
+        try
+        {
+            lock (Gate)
+            {
+                if (!File.Exists(FilePath)) return new List<string>();
+                var lines = File.ReadAllLines(FilePath);
+                return lines.Skip(Math.Max(0, lines.Length - count)).ToList();
+            }
+        }
+        catch { return new List<string>(); }
+    }
+
     /// <summary>Opens the log in the user's default text viewer.</summary>
     public static void Open()
     {

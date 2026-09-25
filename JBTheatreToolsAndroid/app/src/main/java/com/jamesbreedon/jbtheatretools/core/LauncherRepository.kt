@@ -5,6 +5,7 @@ import com.jamesbreedon.jbtheatretools.BuildConfig
 import com.jamesbreedon.jbtheatretools.install.ApkInstaller
 import com.jamesbreedon.jbtheatretools.install.ApkVerifier
 import com.jamesbreedon.jbtheatretools.install.InstalledApps
+import com.jamesbreedon.jbtheatretools.net.DownloadCancelledException
 import com.jamesbreedon.jbtheatretools.net.GitHubClient
 import com.jamesbreedon.jbtheatretools.net.GitHubException
 import com.jamesbreedon.jbtheatretools.net.RelayPolicy
@@ -15,6 +16,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 
 /** What the launcher knows about one app right now. */
 data class AppStatus(
@@ -30,6 +33,10 @@ data class AppStatus(
     val backToRelease: Boolean = false,
     /** Not shown in the lists (an app with no release on this device's channel, not installed). */
     val hidden: Boolean = false,
+    /** The latest release's publish time (ISO 8601), for "3 days ago". */
+    val latestPublished: String? = null,
+    /** Held at the installed version: no Update, left out of Update all and notifications. */
+    val held: Boolean = false,
 ) {
     val isInstalled: Boolean get() = installedVersion != null
     /** A development build is installed, or is what's on offer (Dev channel on). */
@@ -40,6 +47,8 @@ data class AppStatus(
         get() = installedVersion != null && latestVersion != null &&
             VersionCompare.isNewer(latestVersion, installedVersion)
     val canInstall: Boolean get() = apkAssetName != null
+    /** An update is on offer AND the app isn't held — what Update all, the badges and notifications act on. */
+    val updatePending: Boolean get() = hasUpdate && !held
 }
 
 /** Progress of one install, for the row and the Updates tab. */
@@ -49,7 +58,10 @@ data class InstallProgress(
     val fraction: Double = 0.0,
     val message: String? = null,
 ) {
-    enum class Phase { DOWNLOADING, VERIFYING, INSTALLING, DONE, FAILED }
+    enum class Phase { DOWNLOADING, VERIFYING, INSTALLING, DONE, FAILED, CANCELLED }
+
+    /** Still running (a finished, failed or cancelled install shows no progress bar). */
+    val isActive: Boolean get() = phase == Phase.DOWNLOADING || phase == Phase.VERIFYING || phase == Phase.INSTALLING
 }
 
 /**
@@ -185,6 +197,8 @@ class LauncherRepository(private val context: Context) {
                 app = app,
                 installedVersion = installedVersion,
                 latestVersion = VersionCompare.norm(release.tagName),
+                latestPublished = release.publishedAt,
+                held = installedVersion != null && app.id in settings.heldApps,
                 apkAssetName = if (asset != null) assetName else null,
                 apkSizeBytes = asset?.size ?: 0,
                 note = if (asset == null) "No Android build yet" else null,
@@ -203,6 +217,7 @@ class LauncherRepository(private val context: Context) {
             val noRelease = e is GitHubException && e.kind == GitHubException.Kind.NO_RELEASE
             AppStatus(
                 app = app, installedVersion = installedVersion,
+                held = installedVersion != null && app.id in settings.heldApps,
                 note = if (noRelease) "No release yet" else (e.message ?: "Couldn’t reach the release feed"),
                 whatsNew = line, whatsNewVersion = lineVersion,
                 hidden = noRelease && installedVersion == null && !settings.devChannel,
@@ -215,6 +230,12 @@ class LauncherRepository(private val context: Context) {
     /** Guards the PackageInstaller session step — see the note in [install]. */
     private val sessionMutex = Mutex()
 
+    /** Catalog ids whose download should stop (the Cancel button, or Stop on Update all). */
+    private val cancelRequests: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Asks an in-flight download of [catalogId] to stop; a no-op once it has moved on to verify / install. */
+    fun requestCancel(catalogId: String) { cancelRequests.add(catalogId) }
+
     /**
      * Download -> verify -> install one app, reporting progress. The chain:
      *   size -> suite-signed SHA256SUMS (trusted comment `<repo> <tag>`) -> the APK's SHA-256 ->
@@ -223,15 +244,24 @@ class LauncherRepository(private val context: Context) {
     suspend fun install(
         app: CatalogApp,
         onProgress: (InstallProgress) -> Unit,
+        tag: String? = null,
     ): Boolean = withContext(Dispatchers.IO) {
+        cancelRequests.remove(app.id)
         val client = client() ?: run {
             onProgress(InstallProgress(app.id, InstallProgress.Phase.FAILED, message = "Not signed in"))
             return@withContext false
         }
         val cache = File(context.cacheDir, "downloads").apply { mkdirs() }
         var apk: File? = null
+        val before = installedVersionFor(app.id)
+        var releaseTag: String? = tag
         try {
-            val release = pickRelease(client, app)
+            // A specific version (a setup file's held version), or the channel's latest.
+            val release = if (tag != null) {
+                client.releases(app.owner, app.repo).firstOrNull { VersionCompare.equal(it.tagName, tag) }
+                    ?: throw IllegalStateException("version $tag not found")
+            } else pickRelease(client, app)
+            releaseTag = release.tagName
             val assetName = AndroidAsset.resolve(app, release.tagName, release.assets.map { it.name })
                 ?: throw IllegalStateException(
                     "release ${release.tagName} has no Android build (looked for " +
@@ -239,11 +269,18 @@ class LauncherRepository(private val context: Context) {
                 )
             val asset = release.assets.first { it.name == assetName }
 
+            // Refuse up front rather than failing mid-install on a full device (usableSpace is 0 when unknown).
+            val free = cache.usableSpace.takeIf { it > 0 } ?: -1L
+            DiskSpace.shortfall(DiskSpace.required(asset.size, assetName), free)?.let { throw IllegalStateException(it) }
+
             onProgress(InstallProgress(app.id, InstallProgress.Phase.DOWNLOADING, 0.0))
             apk = File(cache, assetName)
-            client.downloadAsset(app.owner, app.repo, asset.id, apk) { f ->
-                onProgress(InstallProgress(app.id, InstallProgress.Phase.DOWNLOADING, f))
-            }
+            client.downloadAsset(
+                app.owner, app.repo, asset.id, apk,
+                progress = { f -> onProgress(InstallProgress(app.id, InstallProgress.Phase.DOWNLOADING, f)) },
+                shouldCancel = { app.id in cancelRequests },
+            )
+            cancelRequests.remove(app.id)   // past the download: a late Cancel no longer applies
 
             if (asset.size > 0 && apk.length() != asset.size) {
                 throw IllegalStateException(
@@ -280,20 +317,29 @@ class LauncherRepository(private val context: Context) {
                 is ApkInstaller.Outcome.Succeeded -> {
                     settings.setInstalledTag(app.id, release.tagName)
                     log.log("install ${app.id} ${release.tagName}: $assetName verified + installed")
+                    addHistory(app.id, app.name, ActivityHistory.actionFor(before, release.tagName), before, release.tagName)
                     onProgress(InstallProgress(app.id, InstallProgress.Phase.DONE, 1.0))
                     true
                 }
                 is ApkInstaller.Outcome.Failed -> {
                     log.log("install ${app.id} ${release.tagName}: ${outcome.message}")
+                    addHistory(app.id, app.name, "failed", null, release.tagName, outcome.message)
                     onProgress(
                         InstallProgress(app.id, InstallProgress.Phase.FAILED, message = outcome.message)
                     )
                     false
                 }
             }
+        } catch (e: DownloadCancelledException) {
+            cancelRequests.remove(app.id)
+            apk?.delete()
+            log.log("install ${app.id}: download cancelled")
+            onProgress(InstallProgress(app.id, InstallProgress.Phase.CANCELLED))
+            false
         } catch (e: Exception) {
             apk?.delete()
             log.log("install ${app.id}: refused — ${e.message}")
+            addHistory(app.id, app.name, "failed", null, releaseTag, e.message)
             onProgress(
                 InstallProgress(app.id, InstallProgress.Phase.FAILED, message = e.message ?: "install failed")
             )
@@ -364,16 +410,119 @@ class LauncherRepository(private val context: Context) {
         return Minisign.SUITE_PUBLIC_KEY
     }
 
-    /** Update every app with a pending update, one session at a time; a failure never blocks the rest. */
+    /**
+     * Update every app with a pending update (never a held one), one session at a time; a failure never blocks
+     * the rest. [shouldStop] ends the run between apps (Stop).
+     */
     suspend fun updateAll(
         statuses: List<AppStatus>,
+        shouldStop: () -> Boolean,
         onProgress: (InstallProgress) -> Unit,
     ): Int {
         var done = 0
-        for (status in statuses.filter { it.hasUpdate && it.canInstall }) {
+        for (status in statuses.filter { it.updatePending && it.canInstall }) {
+            if (shouldStop()) break
             if (install(status.app, onProgress)) done++
         }
         return done
+    }
+
+    // ── v1.30: history, release notes, storage, launcher shortcuts ──────────
+
+    private val historyFile = File(context.filesDir, "history.json")
+    private val historyLock = Any()
+
+    /** The activity history, oldest first. */
+    fun history(): List<ActivityEvent> = synchronized(historyLock) {
+        runCatching { if (historyFile.isFile) ActivityHistory.parse(historyFile.readText()) else emptyList() }
+            .getOrDefault(emptyList())
+    }
+
+    /** Records one event (best effort, written atomically — history never gets in the way of an install). */
+    fun addHistory(app: String, name: String, action: String, from: String? = null, to: String? = null, note: String? = null) {
+        synchronized(historyLock) {
+            runCatching {
+                val list = ActivityHistory.append(history(), ActivityEvent(Instant.now(), app, name, action, from, to, note))
+                val tmp = File(historyFile.path + ".tmp")
+                tmp.writeText(ActivityHistory.serialize(list))
+                if (!tmp.renameTo(historyFile)) { historyFile.delete(); tmp.renameTo(historyFile) }
+            }.onFailure { log.log("history: could not record $action $app: ${it.message}") }
+        }
+    }
+
+    /** Every (non-draft) release of an app, for the in-app release notes. Throws on a network / access error. */
+    suspend fun releasesFor(app: CatalogApp): List<ReleaseInfo> = withContext(Dispatchers.IO) {
+        val client = client() ?: throw IllegalStateException("Sign in to see release notes")
+        client.releases(app.owner, app.repo)
+    }
+
+    /** The launcher's own releases newer than [since] and not newer than this build (for "what's new"). */
+    suspend fun launcherReleasesSince(since: String?): List<ReleaseInfo> {
+        val self = launcherApp ?: return emptyList()
+        return releasesFor(self).filter {
+            !VersionCompare.isNewer(it.tagName, launcherVersion) &&
+                (since.isNullOrBlank() || VersionCompare.isNewer(it.tagName, since)) &&
+                (settings.devChannel || !VersionCompare.isDev(it.tagName))
+        }
+    }
+
+    /** The launcher's one-line what's-new from the catalog (the offline fallback for the notes). */
+    fun launcherWhatsNewLine(): String? {
+        val self = catalog.selfInfo ?: return null
+        val line = self.whatsNew?.takeIf { it.isNotBlank() } ?: return null
+        return self.whatsNewVersion?.takeIf { it.isNotBlank() }?.let { "New in $it: $line" } ?: line
+    }
+
+    /** When [catalogId]'s installed version was installed (epoch ms) and its APK size, or null if not installed. */
+    fun installedDetails(catalogId: String): Pair<Long, Long>? =
+        installed.forCatalogId(catalogId)?.let { it.lastUpdateTime to it.apkBytes }
+
+    private val downloadsDir: File get() = File(context.cacheDir, "downloads")
+
+    /** Bytes in the download cache. */
+    fun cacheBytes(): Long = downloadsDir.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
+
+    /** Bytes of every installed suite app's APK(s). */
+    fun installedBytes(): Long = installed.scan().values.sumOf { it.apkBytes }
+
+    /** Empties the download cache (the caller makes sure nothing is downloading). */
+    fun clearCache() {
+        downloadsDir.listFiles()?.forEach { runCatching { it.deleteRecursively() } }
+        log.log("download cache cleared")
+    }
+
+    /** Remembers that [catalogId] was just opened (the launcher-icon shortcuts list recent apps first). */
+    fun noteOpened(catalogId: String) {
+        settings.recentOpens = listOf(catalogId) + settings.recentOpens.filter { it != catalogId }
+    }
+
+    /**
+     * The launcher icon's long-press shortcuts: up to four installed apps, most recently opened first, each
+     * opening that app directly.
+     */
+    fun updateShortcuts() {
+        runCatching {
+            val sm = context.getSystemService(android.content.pm.ShortcutManager::class.java) ?: return
+            val max = minOf(4, sm.maxShortcutCountPerActivity)
+            val ids = (settings.recentOpens + catalog.apps.map { it.id }).distinct().filter { isInstalled(it) }.take(max)
+            val shortcuts = ids.mapNotNull { id ->
+                val app = catalog.apps.firstOrNull { it.id == id } ?: return@mapNotNull null
+                val pkg = PackageIds.packageId(id) ?: return@mapNotNull null
+                val intent = context.packageManager.getLaunchIntentForPackage(pkg) ?: return@mapNotNull null
+                val bitmap = runCatching {
+                    context.assets.open("icons/$id.png").use { android.graphics.BitmapFactory.decodeStream(it) }
+                }.getOrNull()
+                val icon = if (bitmap != null) android.graphics.drawable.Icon.createWithBitmap(bitmap)
+                else android.graphics.drawable.Icon.createWithResource(context, com.jamesbreedon.jbtheatretools.R.mipmap.ic_launcher)
+                android.content.pm.ShortcutInfo.Builder(context, "app-$id")
+                    .setShortLabel(app.name)
+                    .setLongLabel("Open ${app.name}")
+                    .setIcon(icon)
+                    .setIntent(intent)
+                    .build()
+            }
+            sm.setDynamicShortcuts(shortcuts)
+        }.onFailure { log.log("shortcuts: ${it.message}") }
     }
 
     /** True while the app's package is on the device (cheap PackageManager read, no network). */
@@ -390,6 +539,8 @@ class LauncherRepository(private val context: Context) {
         val intent = context.packageManager.getLaunchIntentForPackage(pkg) ?: return false
         intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(intent)
+        noteOpened(catalogId)
+        updateShortcuts()
         return true
     }
 

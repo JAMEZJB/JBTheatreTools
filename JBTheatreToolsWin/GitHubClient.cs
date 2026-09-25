@@ -18,6 +18,11 @@ public sealed class ReleaseInfo
     [JsonPropertyName("assets")] public List<ReleaseAsset> Assets { get; set; } = new();
     [JsonPropertyName("prerelease")] public bool Prerelease { get; set; }
     [JsonPropertyName("draft")] public bool Draft { get; set; }
+    /// <summary>The release's Markdown notes (shown in-app via <see cref="ReleaseNotesText"/>).</summary>
+    [JsonPropertyName("body")] public string? Body { get; set; }
+    /// <summary>ISO 8601 publish time, kept as text so an odd value can never fail the whole release list.</summary>
+    [JsonPropertyName("published_at")] public string? PublishedAt { get; set; }
+    [JsonIgnore] public DateTimeOffset? Published => RelativeAge.ParseIso(PublishedAt);
 }
 
 public enum GitHubErrorKind { NoRelease, NotAccessible, Unauthorized, Http, AssetNotFound, Bad }
@@ -200,10 +205,11 @@ public sealed class GitHubClient : IDisposable
     /// <c>Location</c> against the current URL, and WITHOUT forwarding the Authorization header (S3
     /// rejects a request carrying both a Bearer header and its own signed query params).</summary>
     private async Task<HttpResponseMessage> SendFollowingRedirectsAsync(string url, string accept,
-                                                                        HttpCompletionOption completion)
+                                                                        HttpCompletionOption completion,
+                                                                        CancellationToken cancellationToken)
     {
         using var req = NewRequest(url, accept);
-        var resp = await _http.SendAsync(req, completion).ConfigureAwait(false);
+        var resp = await _http.SendAsync(req, completion, cancellationToken).ConfigureAwait(false);
         var current = new Uri(url);
         for (int hop = 0; hop < 5 && (int)resp.StatusCode is >= 300 and < 400 && resp.Headers.Location != null; hop++)
         {
@@ -222,17 +228,20 @@ public sealed class GitHubClient : IDisposable
             current = location;
             using var hopReq = new HttpRequestMessage(HttpMethod.Get, location);
             hopReq.Headers.TryAddWithoutValidation("User-Agent", "JBTheatreTools");
-            resp = await _http.SendAsync(hopReq, completion).ConfigureAwait(false);
+            resp = await _http.SendAsync(hopReq, completion, cancellationToken).ConfigureAwait(false);
         }
         return resp;
     }
 
+    /// <summary>Downloads a release asset to <paramref name="dest"/>. Cancelling <paramref name="cancellationToken"/>
+    /// stops the transfer and removes the partial file (the caller sees an <see cref="OperationCanceledException"/>).</summary>
     public async Task DownloadAssetAsync(string owner, string repo, long assetId, string dest,
-                                         IProgress<double>? progress = null)
+                                         IProgress<double>? progress = null, CancellationToken cancellationToken = default)
     {
         var url = $"{_apiBase}/repos/{owner}/{repo}/releases/assets/{assetId}";
         using var resp = await SendFollowingRedirectsAsync(url, "application/octet-stream",
-                                                           HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+                                                           HttpCompletionOption.ResponseHeadersRead,
+                                                           cancellationToken).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
             throw new GitHubException(GitHubErrorKind.Http, $"Download failed: HTTP {(int)resp.StatusCode}.");
 
@@ -251,14 +260,14 @@ public sealed class GitHubClient : IDisposable
             // ConfigureAwait(false) throughout the loop: each of the ~5,000+ chunk continuations for a Full
             // edition otherwise bounced through the WinForms message pump (progress still marshals correctly —
             // Progress<T> captured the UI context when it was created).
-            await using (var src = await resp.Content.ReadAsStreamAsync().ConfigureAwait(false))
+            await using (var src = await resp.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
             await using (var dst = File.Create(part))
             {
                 var buffer = new byte[81920];
                 int n;
-                while ((n = await src.ReadAsync(buffer).ConfigureAwait(false)) > 0)
+                while ((n = await src.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
                 {
-                    await dst.WriteAsync(buffer.AsMemory(0, n)).ConfigureAwait(false);
+                    await dst.WriteAsync(buffer.AsMemory(0, n), cancellationToken).ConfigureAwait(false);
                     received += n;
                     if (total > 0)
                     {

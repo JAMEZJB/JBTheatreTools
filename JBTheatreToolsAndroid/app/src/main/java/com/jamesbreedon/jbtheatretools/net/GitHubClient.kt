@@ -25,7 +25,14 @@ data class ReleaseInfo(
     val assets: List<ReleaseAsset> = emptyList(),
     val prerelease: Boolean = false,
     val draft: Boolean = false,
+    /** The release's Markdown notes (shown in-app via ReleaseNotesText). */
+    val body: String? = null,
+    /** ISO 8601 publish time, kept as text so an odd value can never fail the whole release list. */
+    @SerialName("published_at") val publishedAt: String? = null,
 )
+
+/** Thrown out of [GitHubClient.downloadAsset] when its `shouldCancel` check says stop. Not a failure. */
+class DownloadCancelledException : IOException("Download cancelled")
 
 class GitHubException(val kind: Kind, message: String) : IOException(message) {
     enum class Kind { NO_RELEASE, NOT_ACCESSIBLE, UNAUTHORIZED, HTTP, ASSET_NOT_FOUND, BAD_RESPONSE, BAD_URL }
@@ -176,13 +183,18 @@ class GitHubClient private constructor(
         }
     }
 
-    /** Downloads a release asset by id to [dest], reporting fractional progress (0…1). */
+    /**
+     * Downloads a release asset by id to [dest], reporting fractional progress (0…1). [shouldCancel] is polled
+     * between chunks; when it returns true the transfer stops with [DownloadCancelledException] (the caller
+     * removes the partial file).
+     */
     fun downloadAsset(
         owner: String,
         repo: String,
         assetId: Long,
         dest: File,
         progress: ((Double) -> Unit)? = null,
+        shouldCancel: (() -> Boolean)? = null,
     ) {
         var target = url("/repos/$owner/$repo/releases/assets/$assetId")
         var carryAuth = true
@@ -215,7 +227,7 @@ class GitHubClient private constructor(
                 }
                 val total = conn.contentLengthLong
                 dest.parentFile?.mkdirs()
-                conn.inputStream.use { input -> copy(input, dest, total, progress) }
+                conn.inputStream.use { input -> copy(input, dest, total, progress, shouldCancel) }
                 progress?.invoke(1.0)
                 return
             } finally {
@@ -224,11 +236,18 @@ class GitHubClient private constructor(
         }
     }
 
-    private fun copy(input: InputStream, dest: File, total: Long, progress: ((Double) -> Unit)?) {
+    private fun copy(
+        input: InputStream,
+        dest: File,
+        total: Long,
+        progress: ((Double) -> Unit)?,
+        shouldCancel: (() -> Boolean)?,
+    ) {
         dest.outputStream().use { out ->
             val buf = ByteArray(1 shl 16)
             var written = 0L
             while (true) {
+                if (shouldCancel?.invoke() == true) throw DownloadCancelledException()
                 val n = input.read(buf)
                 if (n <= 0) break
                 out.write(buf, 0, n)

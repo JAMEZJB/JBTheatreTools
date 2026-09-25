@@ -38,6 +38,9 @@ public sealed class InstalledRecord
     /// <summary>The payload generation folder to remove on uninstall (EXE or ZIP). Null for a
     /// legacy single-file install (older manifests have no field → treated as single-file).</summary>
     public string? InstallDir { get; set; }
+    /// <summary>The version this slot held before the most recent install changed it — the one-click "Roll back"
+    /// target. Null until an install replaces a different version (older manifests have no field).</summary>
+    public string? PreviousVersion { get; set; }
 }
 
 /// <summary>
@@ -229,7 +232,10 @@ public sealed class InstallManager
                         InstalledAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                         StartMenuShortcut = previous?.StartMenuShortcut,
                         DesktopShortcut = previous?.DesktopShortcut,
-                        Variant = variant, InstallDir = staged.Directory
+                        Variant = variant, InstallDir = staged.Directory,
+                        // Remember what this install replaced (a reinstall of the same version keeps the older one).
+                        PreviousVersion = previous == null ? null
+                            : VersionCompare.Equal(previous.Version, version) ? previous.PreviousVersion : previous.Version,
                     };
                     WriteManifest(m, strict: true); // the commit point; failure leaves old install intact
                 }
@@ -423,6 +429,70 @@ public sealed class InstallManager
             }
             WriteManifest(m);
         }
+    }
+
+    /// <summary>A copy of one slot's manifest record (for the details view and roll back), or null.</summary>
+    public InstalledRecord? Record(string installKey) =>
+        Manifest().TryGetValue(installKey, out var r) ? r : null;
+
+    /// <summary>Bytes on disk for one installed slot: its whole payload folder, or its single exe. Walks the disk —
+    /// call it off the UI thread. 0 when not installed or unreadable.</summary>
+    public long SizeOnDisk(string installKey)
+    {
+        var r = Record(installKey);
+        if (r == null) return 0;
+        if (r.InstallDir != null && Directory.Exists(r.InstallDir)) return DirectorySize(r.InstallDir);
+        try { return File.Exists(r.Path) ? new FileInfo(r.Path).Length : 0; } catch { return 0; }
+    }
+
+    /// <summary>Bytes on disk for everything this launcher installed (the apps folder). Off the UI thread.</summary>
+    public long InstalledSize() => DirectorySize(AppsDir);
+
+    /// <summary>Bytes in the download cache (downloads awaiting verification, leftovers of interrupted ones).</summary>
+    public long CacheSize() => DirectorySize(CacheDir);
+
+    /// <summary>Empties the download cache. Only call it when nothing is downloading or installing (the caller
+    /// checks); anything that can't be deleted is left and reported in the log.</summary>
+    public void ClearCache()
+    {
+        try
+        {
+            foreach (var f in Directory.EnumerateFiles(CacheDir)) TryDelete(f);
+            foreach (var d in Directory.EnumerateDirectories(CacheDir))
+            {
+                try { Directory.Delete(d, recursive: true); }
+                catch (Exception ex) { Log.Write($"cache: could not remove {Path.GetFileName(d)}: {ex.Message}"); }
+            }
+        }
+        catch (Exception ex) { Log.Write($"cache: clear failed: {ex.Message}"); }
+    }
+
+    /// <summary>Total size of the files under <paramref name="dir"/> (0 if it doesn't exist or can't be read).</summary>
+    public static long DirectorySize(string dir)
+    {
+        long total = 0;
+        try
+        {
+            if (!Directory.Exists(dir)) return 0;
+            foreach (var f in new DirectoryInfo(dir).EnumerateFiles("*", new EnumerationOptions
+                     { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint }))
+            {
+                try { total += f.Length; } catch { /* vanished mid-walk */ }
+            }
+        }
+        catch { /* unreadable → what we have */ }
+        return total;
+    }
+
+    /// <summary>Free bytes on the drive holding the download cache, or -1 if it can't be read.</summary>
+    public long FreeSpace()
+    {
+        try
+        {
+            var root = Path.GetPathRoot(Path.GetFullPath(CacheDir));
+            return string.IsNullOrEmpty(root) ? -1 : new DriveInfo(root).AvailableFreeSpace;
+        }
+        catch { return -1; }
     }
 
     // --- Download integrity (SHA-256) ---

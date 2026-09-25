@@ -55,6 +55,39 @@ public sealed class InstallManagerIntegrationTests : IDisposable
     }
 
     [Fact]
+    public void RecordsThePreviousVersionForRollBack()
+    {
+        manager.Install(app, "v1", Exe(), "Demo.exe", false);
+        Assert.Null(manager.Record("demo")!.PreviousVersion);           // a first install replaced nothing
+        manager.Install(app, "v2", Exe(), "Demo.exe", false);
+        Assert.Equal("v1", manager.Record("demo")!.PreviousVersion);
+        manager.Install(app, "2", Exe(), "Demo.exe", false);             // a reinstall of the same version…
+        Assert.Equal("v1", manager.Record("demo")!.PreviousVersion);     // …keeps the older one
+        manager.Install(app, "v1", Exe(), "Demo.exe", false);            // roll back
+        Assert.Equal("2", manager.Record("demo")!.PreviousVersion);      // → rolling forward is one click too
+        Assert.Null(manager.Record("demo@full"));
+    }
+
+    [Fact]
+    public void MeasuresAndClearsTheDownloadCache()
+    {
+        string installed = manager.Install(app, "v1", Exe("12345"), "Demo.exe", false);
+        Assert.Equal(5, manager.SizeOnDisk("demo"));
+        Assert.Equal(0, manager.SizeOnDisk("demo@full"));
+        Assert.True(manager.InstalledSize() >= 5);
+        File.WriteAllText(Path.Combine(manager.CacheDir, "leftover.part"), "0123456789");
+        Directory.CreateDirectory(Path.Combine(manager.CacheDir, "extract-x"));
+        File.WriteAllText(Path.Combine(manager.CacheDir, "extract-x", "f"), "abc");
+        Assert.True(manager.CacheSize() >= 13);
+        manager.ClearCache();
+        Assert.Equal(0, manager.CacheSize());
+        Assert.True(Directory.Exists(manager.CacheDir));
+        Assert.True(File.Exists(installed));                              // installs are never in the cache
+        Assert.True(manager.FreeSpace() > 0);
+        Assert.Equal(0, InstallManager.DirectorySize(Path.Combine(root, "does-not-exist")));
+    }
+
+    [Fact]
     public void FailedExtractionPreservesMetadataPayloadAndShortcuts()
     {
         string old = manager.Install(app, "v1", Exe(), "Demo.exe", true);
