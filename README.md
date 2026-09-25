@@ -15,6 +15,51 @@ built by James Breedon & Claude Code.
 - Download the right asset for the current OS/arch from each tool's GitHub **Releases**, then
   install / launch it, with update checks.
 
+### Managing the suite
+
+The same features on every launcher (the few that don't apply to Android are marked *desktop*):
+
+- **Find & filter** — a search box (⌘F / Ctrl+F; Esc clears) matches every word against each app's name,
+  description and section, and a status filter shows All / Installed / Updates / Not installed, with a
+  "3 of 24 apps" count. Reordering is paused while a filter is on.
+- **Release notes in the launcher** — every release of an app, newest first, with its date and notes;
+  releases newer than yours are marked "New since your version".
+- **Download sizes and release dates** — each row shows how old the latest release is and how big its
+  download is, and Update All / Download All show the total download.
+- **Hold an app at its version** — Update All, automatic updates and update notifications leave a held app
+  alone (it shows "Held" instead of "Update") until the hold is released.
+- **Show lock** — for show time: installs, updates, roll backs, removals and imports are paused, while
+  launching still works (⌘L / Ctrl+L). The command line honours it too.
+- **One-click roll back** *(desktop)* — go back to the version you had before the last update; the app is
+  then held there.
+- **Activity history** — installs, updates, downgrades, removals and failures, newest first, with times
+  (⌘Y on macOS, Ctrl+H on Windows).
+- **Export / import a setup** — save which apps (and editions) are installed, their versions, holds and
+  the list layout to a small JSON file; importing it on another machine previews exactly what will be
+  installed or skipped before anything happens. Any launcher reads any other's file.
+- **Scheduled checks** — while the launcher is open it checks again every 1, 4 (default), 12 or 24 hours.
+- **Update notifications** — a system notification when a check finds new updates while the launcher is in
+  the background, once per version.
+- **Automatic updates** *(desktop, opt-in)* — after each check, updates install on their own: never for
+  held apps, apps that are open, or under show lock.
+- **Cancel and Stop** — cancel a single download; Stop ends an Update All / Download All after the app that's
+  installing.
+- **Disk-space check** — before a download, the launcher makes sure there's room for it (and for unpacking
+  it), and says how much more space is needed instead of failing half-way.
+- **Storage** — how much the installed apps and the download cache take, and a button to clear the cache.
+- **App details** — version, install date, location, size on disk, latest release and download size,
+  previous version and hold state (desktop: with Show in Finder / Explorer).
+- **Quick launch** — a menu-bar icon on macOS and a Launch submenu in the Windows tray (optionally always
+  shown) open any installed app directly; on Android up to four installed apps, most recently opened
+  first, become shortcuts on the launcher's icon.
+- **Keyboard shortcuts** *(desktop)* — check for updates (⌘R / F5), find, update all (⌘U / Ctrl+U),
+  show lock, activity, settings (⌘, / Ctrl+,) and list / grid view (⌘1 ⌘2 / Ctrl+1 Ctrl+2).
+- **Diagnostics** — one click copies (or on Android shares) a plain-text support report: versions,
+  settings, every app's state and recent log lines. Tokens, passphrases and credentials in URLs are
+  always redacted.
+- **What's new in the launcher** — after the launcher updates itself it offers, once, the notes of every
+  release since the version you had.
+
 ## App catalog (the installable apps it launches)
 
 | App | Repo | Download assets |
