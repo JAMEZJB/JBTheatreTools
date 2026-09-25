@@ -39,7 +39,10 @@ public sealed class AppSettings
         try
         {
             if (File.Exists(FilePath))
+            {
                 s = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath)) ?? new AppSettings();
+                s.LoadedFromFile = true;
+            }
         }
         catch { /* fall through to defaults */ }
         // First run of this build generation: materialise the default auth mode. Server (passphrase)
@@ -54,12 +57,19 @@ public sealed class AppSettings
         return s;
     }
 
+    /// <summary>Settings existed on disk at start-up (the launcher has been used before).</summary>
+    [System.Text.Json.Serialization.JsonIgnore] public bool LoadedFromFile { get; private set; }
+
+    /// <summary>Written to a temp file, then moved over the old one: a crash mid-write can't leave a truncated file
+    /// (which would load as defaults — dropping show lock and holds, which the command line also reads).</summary>
     public void Save()
     {
         try
         {
             Directory.CreateDirectory(Dir);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this));
+            var tmp = FilePath + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(this));
+            File.Move(tmp, FilePath, overwrite: true);
         }
         catch { /* non-fatal */ }
     }

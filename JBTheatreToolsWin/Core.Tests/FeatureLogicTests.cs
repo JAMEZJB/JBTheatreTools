@@ -187,6 +187,18 @@ public class UpdatePolicyTests
     }
 
     [Fact]
+    public void AFailedCheckDoesNotReannounce()
+    {
+        var pending = new[] { new UpdatePolicy.Pending("dmx", "DMX Tools", "v1.2.0"), new UpdatePolicy.Pending("psn", "PSN Tools", "0.4.1") };
+        var notified = new List<string> { "dmx 1.2.0", "psn 0.4.1" };
+        var (_, afterFailure) = UpdatePolicy.Notify(pending.Skip(1), notified);   // dmx's check failed this time
+        Assert.Equal(new[] { "psn 0.4.1", "dmx 1.2.0" }, UpdatePolicy.Remembered(afterFailure, notified, new HashSet<string> { "dmx" }));
+        Assert.Equal(new[] { "psn 0.4.1" }, UpdatePolicy.Remembered(afterFailure, notified, new HashSet<string>()));
+        var kept = UpdatePolicy.Remembered(afterFailure, notified, new HashSet<string> { "dmx" });
+        Assert.Empty(UpdatePolicy.Notify(pending, kept).ToNotify);
+    }
+
+    [Fact]
     public void Wording()
     {
         var items = new List<UpdatePolicy.Pending>
@@ -444,5 +456,9 @@ public class LauncherWhatsNewTests
         Assert.False(LauncherWhatsNew.ShouldShow("1.31.0", "1.30.0"));
         Assert.True(LauncherWhatsNew.ShouldShow("1.29.1", "1.30.0"));
         Assert.True(LauncherWhatsNew.ShouldShow("1.30.0-dev.2", "1.30.0"));
+        // Nothing recorded: an update only when the launcher was already in use (pre-1.30 recorded nothing).
+        Assert.True(LauncherWhatsNew.ShouldShow(null, "1.30.0", existingInstall: true));
+        Assert.True(LauncherWhatsNew.ShouldShow("", "1.30.0", existingInstall: true));
+        Assert.False(LauncherWhatsNew.ShouldShow("1.30.0", "1.30.0", existingInstall: true));
     }
 }

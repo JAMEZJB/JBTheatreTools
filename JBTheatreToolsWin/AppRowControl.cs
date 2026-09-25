@@ -520,6 +520,7 @@ public sealed class AppRowControl : UserControl
     private void ShowMoreMenu()
     {
         var menu = new ContextMenuStrip();
+        DialogKit.DisposeWhenClosed(menu, this);
         // While busy the only action is to stop the download (the grid tile has no Cancel button of its own).
         if (IsBusy)
         {

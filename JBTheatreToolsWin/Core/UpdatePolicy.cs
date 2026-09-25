@@ -49,6 +49,20 @@ public static class UpdatePolicy
         return (list.Where(p => !seen.Contains(p.Key)).ToList(), list.Select(p => p.Key).Distinct().ToList());
     }
 
+    /// <summary>The keys to remember after a check: what's pending now, plus the earlier keys of apps whose check
+    /// didn't complete this time — so one check that couldn't reach the feed doesn't make the next announce it again.</summary>
+    public static List<string> Remembered(IEnumerable<string> notified, IEnumerable<string> alreadyNotified, ISet<string> uncheckedIds)
+    {
+        var outList = notified.ToList();
+        foreach (var key in alreadyNotified)
+        {
+            if (outList.Contains(key)) continue;
+            var id = key.Split(' ', 2)[0];
+            if (uncheckedIds.Contains(id)) outList.Add(key);
+        }
+        return outList;
+    }
+
     public static string NotificationTitle(int count) => count == 1 ? "Update available" : "Updates available";
 
     /// <summary>"DMX Tools v1.2.0, PSN Tools v0.4.1 and 2 more".</summary>

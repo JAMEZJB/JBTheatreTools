@@ -54,8 +54,9 @@ public static class Diagnostics
 /// <summary>When to show the launcher's own "what's new" after it has been updated.</summary>
 public static class LauncherWhatsNew
 {
-    /// <summary>True on the first launch of a version newer than the last one seen. A fresh install (nothing
-    /// seen yet) shows nothing — the caller just records the current version.</summary>
-    public static bool ShouldShow(string? lastSeen, string current) =>
-        !string.IsNullOrWhiteSpace(lastSeen) && VersionCompare.IsNewer(current, lastSeen);
+    /// <summary>True on the first launch of a version newer than the last one seen. With nothing seen yet it's an
+    /// update only when the launcher was already in use before (versions before 1.30 didn't record what they were)
+    /// — a fresh install shows nothing, and the caller just records the current version.</summary>
+    public static bool ShouldShow(string? lastSeen, string current, bool existingInstall = false) =>
+        string.IsNullOrWhiteSpace(lastSeen) ? existingInstall : VersionCompare.IsNewer(current, lastSeen);
 }

@@ -7,8 +7,12 @@ namespace JBTheatreTools;
 /// docking (no hand-placed pixels), so the framework's DPI AutoScale pass sizes it on any monitor.</summary>
 internal static class DialogKit
 {
+    /// <remarks>Leaves the form's layout SUSPENDED: each dialog adds its controls and then calls
+    /// <c>ResumeLayout(false)</c>, so the DPI AutoScale pass runs once, on the first layout, over the finished form
+    /// (sizes, minimum size and paddings included) — the same order as SettingsDialog.</remarks>
     public static void Style(Form f, bool dark, Size logicalClientSize, bool sizable)
     {
+        f.SuspendLayout();
         f.AutoScaleDimensions = new SizeF(96f, 96f);
         f.AutoScaleMode = AutoScaleMode.Dpi;
         f.ClientSize = logicalClientSize;
@@ -25,6 +29,10 @@ internal static class DialogKit
         f.HandleCreated += (_, _) => Theme.ApplyTitleBar(f, dark);
         f.FormClosed += (_, _) => font.Dispose();
     }
+
+    /// <summary>A pop-up menu built for one showing is disposed once it has closed (after its click has run).</summary>
+    public static void DisposeWhenClosed(ContextMenuStrip menu, Control owner)
+        => menu.Closed += (_, _) => { if (owner.IsHandleCreated) owner.BeginInvoke(new Action(menu.Dispose)); else menu.Dispose(); };
 
     /// <summary>A right-aligned button row docked to the bottom; returns it so callers can add buttons (added in
     /// right-to-left order).</summary>
@@ -93,6 +101,7 @@ internal sealed class ReleaseNotesDialog : Form
         CancelButton = close;
         Controls.Add(DialogKit.Padded(reader, dark));
         Controls.Add(buttons);
+        ResumeLayout(false);
 
         var list = releases.ToList();
         list.Sort((a, b) => VersionCompare.Compare(b.TagName, a.TagName));
@@ -144,6 +153,7 @@ internal sealed class HistoryDialog : Form
         CancelButton = close;
         Controls.Add(DialogKit.Padded(reader, dark));
         Controls.Add(buttons);
+        ResumeLayout(false);
         Load += (_, _) =>
         {
             Font F(float pt, bool semi = false) { var f = Theme.Ui(pt, semi, DeviceDpi); _fonts.Add(f); return f; }
@@ -243,6 +253,7 @@ internal sealed class AppDetailsDialog : Form
         }
         Controls.Add(table);
         Controls.Add(buttons);
+        ResumeLayout(false);
 
         if (sizeOnDisk != null)
         {
@@ -261,7 +272,9 @@ internal sealed class AppDetailsDialog : Form
 internal sealed class ImportPreviewDialog : Form
 {
     private readonly CheckBox _layout = new();
-    public bool ApplyLayout => _layout.Visible && _layout.Checked;
+    private readonly bool _hasLayout;
+    /// <summary>Read after the dialog has closed — so not from <c>_layout.Visible</c>, which is false once the form is hidden.</summary>
+    public bool ApplyLayout => _hasLayout && _layout.Checked;
 
     public ImportPreviewDialog(string summary, bool hasLayout, bool installs, string source, bool dark)
     {
@@ -275,6 +288,7 @@ internal sealed class ImportPreviewDialog : Form
         };
         _layout.Text = "Also use this file's list layout (pinned, hidden and order of apps and sections)";
         _layout.AutoSize = true;
+        _hasLayout = hasLayout;
         _layout.Visible = hasLayout;
         _layout.Dock = DockStyle.Bottom;
         _layout.Padding = new Padding(14, 8, 14, 0);
@@ -290,5 +304,6 @@ internal sealed class ImportPreviewDialog : Form
         Controls.Add(DialogKit.Padded(text, dark));
         Controls.Add(_layout);
         Controls.Add(buttons);
+        ResumeLayout(false);
     }
 }
