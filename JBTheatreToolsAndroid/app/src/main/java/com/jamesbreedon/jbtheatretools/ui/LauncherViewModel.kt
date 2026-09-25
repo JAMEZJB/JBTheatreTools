@@ -61,7 +61,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             signedIn = repo.hasCredential(),
             appearance = repo.settings.appearance,
             statuses = repo.catalog.apps.map { AppStatus(it) },
-            devRevealed = repo.settings.devChannelRevealed,
+            devRevealed = repo.settings.devChannel,
             devChannel = repo.settings.devChannel,
         )
     )
@@ -207,15 +207,16 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
 
     // ── Dev channel (hidden; the maintainer's devices) ──────────────────────────────
 
-    private var versionTaps = 0
+    private val versionTaps = ArrayDeque<Long>()
 
-    /** Seven taps on the About version line reveals "Development builds" (Android's developer-options gesture). */
+    /** Seven taps within three seconds on the About version line reveal "Development builds" for this session. */
     fun tapVersion() {
         if (_state.value.devRevealed) return
-        versionTaps++
-        if (versionTaps >= 7) {
-            repo.settings.devChannelRevealed = true
-            _state.update { it.copy(devRevealed = true, snackbar = "Development builds can now be switched on in About") }
+        val now = android.os.SystemClock.elapsedRealtime()
+        versionTaps.addLast(now)
+        while (versionTaps.isNotEmpty() && now - versionTaps.first() >= 3_000) versionTaps.removeFirst()
+        if (versionTaps.size >= 7) {
+            _state.update { it.copy(devRevealed = true, snackbar = "Development builds can be switched on below") }
         }
     }
 

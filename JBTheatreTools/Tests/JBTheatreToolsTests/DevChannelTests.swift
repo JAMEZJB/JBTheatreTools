@@ -3,8 +3,19 @@ import XCTest
 
 /// Semver pre-release ordering and the Dev-channel release pick.
 final class DevChannelTests: XCTestCase {
-    private func rel(_ tag: String, pre: Bool = false) -> ReleaseInfo {
-        try! JSONDecoder().decode(ReleaseInfo.self, from: Data(#"{"tag_name":"\#(tag)","prerelease":\#(pre),"draft":false,"assets":[]}"#.utf8))
+    private func rel(_ tag: String, pre: Bool = false, assets: [String] = []) -> ReleaseInfo {
+        let list = assets.enumerated().map { #"{"id":\#($0.offset + 1),"name":"\#($0.element)","size":1}"# }.joined(separator: ",")
+        return try! JSONDecoder().decode(ReleaseInfo.self, from: Data(#"{"tag_name":"\#(tag)","prerelease":\#(pre),"draft":false,"assets":[\#(list)]}"#.utf8))
+    }
+
+    /// PDF Tools v0.9.2-dev.1 ships only the Light zip: with dev on, Light gets the dev build and Full stays on
+    /// its release (it used to read "No macOS build").
+    func testDevPickIsPerEdition() {
+        let list = [rel("v0.9.1", assets: ["PDFTools-macOS.zip", "PDFTools-Full-macOS-arm64.zip"]),
+                    rel("v0.9.2-dev.1", pre: true, assets: ["PDFTools-macOS.zip"])]
+        XCTAssertEqual(AppState.latest(from: list, for: "PDFTools-macOS.zip", devChannel: true)?.tagName, "v0.9.2-dev.1")
+        XCTAssertEqual(AppState.latest(from: list, for: "PDFTools-Full-macOS-arm64.zip", devChannel: true)?.tagName, "v0.9.1")
+        XCTAssertEqual(AppState.latest(from: list, for: "PDFTools-Full-macOS-arm64.zip", devChannel: false)?.tagName, "v0.9.1")
     }
 
     func testPreReleasesSortBeforeTheirRelease() {

@@ -27,6 +27,19 @@ public static class Versions
         return pick;
     }
 
+    /// <summary>The release for ONE edition (asset name). A development build may not carry every edition, so
+    /// when the dev pick lacks this asset, take the newest release that has it (e.g. Light gets the dev build
+    /// while Full stays on its release) instead of reading "No Windows build".</summary>
+    public static ReleaseInfo? LatestFor(IEnumerable<ReleaseInfo> releases, string? assetName)
+    {
+        var list = releases as IList<ReleaseInfo> ?? releases.ToList();
+        var pick = Latest(list);
+        if (pick == null || assetName == null || !VersionCompare.IsDev(pick.TagName) ||
+            pick.Assets.Any(a => a.Name == assetName)) return pick;
+        return VersionCompare.PickLatest(list.Where(r => r.Assets.Any(a => a.Name == assetName)),
+                   r => r.TagName, r => r.Prerelease, DevChannel) ?? pick;
+    }
+
     private static bool HasWindowsAsset(ReleaseInfo r) => r.Assets.Any(a =>
         a.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
         a.Name.Contains("Windows", StringComparison.OrdinalIgnoreCase));

@@ -790,6 +790,7 @@ struct AppRowView: View, Equatable {
     }
     @State private var hovering = false
     @State private var confirmingUninstall = false
+    @State private var menuOpen = false
 
     private var isDragging: Bool { draggingId == row.id }
 
@@ -822,8 +823,22 @@ struct AppRowView: View, Equatable {
                 .opacity(hovering || isDragging ? 0 : 1)
         }
         .overlay(alignment: .leading) { gripOverlay }
+        // The ⋯ is drawn HERE only, never in the rasterised core (which just reserves its space): the static
+        // glyph normally, the live menu while hovered. Drawing both — the core's glyph plus the menu laid over
+        // it at a slightly different size — showed a doubled ⋯ on hover and while the menu was open.
         .overlay(alignment: .trailing) {
-            if hovering && !isDragging { liveMenu.padding(.trailing, 10) }
+            Group {
+                if (hovering || menuOpen) && !isDragging { liveMenu } else { rowMenuGlyph }
+            }
+            .padding(.trailing, 10)
+        }
+        // Moving into the open menu ends the row's hover; without this the live menu was swapped back to the
+        // static glyph underneath its own open menu. Latch while THIS row's menu is tracking.
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            if hovering { menuOpen = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+            if menuOpen { menuOpen = false }
         }
         // The download bar is an OVERLAY on the row, not a child of the info column: inserting it into the
         // layout changed the row's height, which re-laid-out every row below it. It ticks ~12×/s, so it
@@ -1106,15 +1121,18 @@ struct AppRowView: View, Equatable {
         .controlSize(.small)
     }
 
-    /// The ⋯ glyph drawn in the rasterised core for every row. The REAL menu (`liveMenu`) is layered exactly
-    /// over it while the row is hovered — the same glyph, same size — so the swap is invisible.
+    /// The ⋯ slot in the rasterised core: the glyph's size, drawn invisibly (see the overlay in `body`).
     private var rowMenu: some View {
+        rowMenuGlyph.hidden()
+    }
+
+    /// The static ⋯ (every row that isn't hovered); `liveMenu` replaces it on hover.
+    private var rowMenuGlyph: some View {
         Image(systemName: "ellipsis.circle")
             .font(.system(size: 11, weight: .medium))
             .foregroundStyle(Color.selectorBlue)
             .padding(2)
             .opacity(row.busy ? 0.45 : 1)
-            .help("Variant, reorder, other versions & uninstall")
     }
 
     /// Overflow menu: pin/hide/reorder, pick a variant, install a specific (older) version, or uninstall.
@@ -1124,7 +1142,7 @@ struct AppRowView: View, Equatable {
         Menu {
             AppMenuButtons(row: row, requestUninstall: { confirmingUninstall = true })
         } label: {
-            Image(systemName: "ellipsis.circle")
+            Image(systemName: "ellipsis.circle").font(.system(size: 11, weight: .medium))   // = rowMenuGlyph
         }
         .jbMenuPill(.icon)   // house rule 21: selectors/menus are slate-blue, not the purple accent
         .fixedSize()

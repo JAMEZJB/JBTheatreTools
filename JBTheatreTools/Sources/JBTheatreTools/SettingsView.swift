@@ -14,9 +14,11 @@ struct SettingsView: View {
     @State private var launcherResult: AppState.LauncherCheck?
     @State private var confirmingTokenRemove = false
     @State private var confirmingServerRemove = false
-    @State private var versionClicks = 0
+    @State private var versionClicks: [Date] = []
+    /// Shown only while dev mode is ON, or right after seven quick clicks on the version in THIS Settings
+    /// session. Nothing about the reveal is stored: switch dev mode off and the switch is gone next time.
+    @State private var devRevealed = false
     @AppStorage(AppState.devChannelKey) private var devChannel = false
-    @AppStorage(AppState.devChannelRevealedKey) private var devRevealed = false
 
     /// The kit's panel heading (`.panel > h2`): a 10.5/600 caps micro-label in the tertiary text tone.
     private func panelLabel(_ title: String, _ symbol: String) -> some View {
@@ -132,7 +134,11 @@ struct SettingsView: View {
                     HStack {
                         Text("JB Theatre Tools v\(state.currentVersion)").font(JBFont.body)
                             // Hidden Dev channel: seven clicks reveal it (Android's developer-options gesture).
-                            .onTapGesture { versionClicks += 1; if versionClicks >= 7 { devRevealed = true } }
+                            .onTapGesture {
+                                let now = Date()
+                                versionClicks = versionClicks.filter { now.timeIntervalSince($0) < 3 } + [now]
+                                if versionClicks.count >= 7 { devRevealed = true }   // 7 clicks within 3 s
+                            }
                         Spacer()
                         Button(checkingLauncher ? "Checking…" : "Check for Updates") {
                             Task {
@@ -144,7 +150,7 @@ struct SettingsView: View {
                         .disabled(checkingLauncher)
                     }
                     if let result = launcherResult { launcherResultView(result) }
-                    if devRevealed {
+                    if devRevealed || devChannel {
                         Divider()
                         Toggle("Development builds on this Mac", isOn: $devChannel)
                             .onChange(of: devChannel) { _ in Task { await state.refreshAll() } }

@@ -255,6 +255,7 @@ final class AppState: ObservableObject {
         }
         hasServerAuth = serverBase != nil && ServerAuthStore.exists()
         if let cached = WhatsNewNotes.loadCached() { applyWhatsNew(cached) }   // last relay copy, for offline starts
+        UserDefaults.standard.removeObject(forKey: Self.devChannelRevealedKey)   // retired: the reveal is never stored
         AppLog.shared.log("launched v\(currentVersion)")
     }
 
@@ -480,7 +481,7 @@ final class AppState: ObservableObject {
         let slot = installKey(for: app)
         switch outcome {
         case .releases(let all):
-            guard let latest = Self.latest(from: all) else {
+            guard let latest = Self.latest(from: all, for: macAsset(for: app)) else {
                 update(id) { $0.releases = all; $0.latestRelease = nil; $0.latest = nil; $0.latestAssetId = nil; $0.status = .noRelease }
                 return
             }
@@ -546,12 +547,12 @@ final class AppState: ObservableObject {
     /// disk. Update All used to act on `row.status == .updateAvailable`, which reflects only the SELECTED
     /// variant — so an installed Full edition was never updated unless its toggle happened to be on.
     private func slotsToUpdate(_ app: CatalogApp) -> [String?] {
-        guard let row = rows.first(where: { $0.id == app.id }),
-              let latest = row.latestRelease else { return [] }
+        guard let row = rows.first(where: { $0.id == app.id }), row.latestRelease != nil else { return [] }
         var variants: [String?] = [app.hasVariants ? app.variants?.first?.id : nil]
         if let vs = app.variants { variants += vs.dropFirst().map { $0.id } }
         return variants.filter { vid in
             guard let name = app.macAssetName(variantId: vid),
+                  let latest = Self.latest(from: row.releases, for: name),   // per edition (dev builds may lack one)
                   latest.assets.contains(where: { $0.name == name }),
                   let installed = InstallManager.shared.installedVersion(app.installKey(variantId: vid)) else { return false }
             return Self.versionIsNewer(latest.tagName, than: installed)
@@ -769,10 +770,14 @@ final class AppState: ObservableObject {
     /// With no cached releases yet (pre-refresh), the row simply reflects whether the slot is installed.
     private func recomputeRow(_ i: Int) {
         guard rows.indices.contains(i) else { return }
-        guard let latest = rows[i].latestRelease else {
+        guard rows[i].latestRelease != nil,
+              let latest = Self.latest(from: rows[i].releases, for: macAsset(for: rows[i].app)) else {
             rows[i].status = rows[i].installed != nil ? .installed : .unknown
             return
         }
+        // Re-pick for the newly selected edition (a dev build may carry only one of them).
+        rows[i].latestRelease = latest
+        rows[i].latest = latest.tagName
         let assetId = latest.assets.first { $0.name == macAsset(for: rows[i].app) }?.id
         rows[i].latestAssetId = assetId
         rows[i].status = Self.status(installed: rows[i].installed, latest: latest.tagName, hasAsset: assetId != nil)
@@ -994,12 +999,12 @@ final class AppState: ObservableObject {
     /// Which variant slots of an app need fetching now: a slot whose asset exists in the latest release
     /// (so it's reachable on this OS/arch) and that isn't already installed at the latest version.
     private func slotsToDownload(_ app: CatalogApp, includeFull: Bool) -> [String?] {
-        guard let row = rows.first(where: { $0.id == app.id }),
-              let latest = row.latestRelease else { return [] }
+        guard let row = rows.first(where: { $0.id == app.id }), row.latestRelease != nil else { return [] }
         var variants: [String?] = [app.hasVariants ? app.variants?.first?.id : nil]
         if includeFull, let vs = app.variants { variants += vs.dropFirst().map { $0.id } }
         return variants.filter { vid in
             guard let name = app.macAssetName(variantId: vid),
+                  let latest = Self.latest(from: row.releases, for: name),   // per edition (dev builds may lack one)
                   latest.assets.contains(where: { $0.name == name }) else { return false }   // no asset for this arch → skip
             let installed = InstallManager.shared.installedVersion(app.installKey(variantId: vid))
             return installed == nil || Self.versionIsNewer(latest.tagName, than: installed!)
@@ -1040,6 +1045,17 @@ final class AppState: ObservableObject {
         var pool = devChannel ? stable + releases.filter { isDevTag($0.tagName) } : stable
         if pool.isEmpty { pool = nonDev }
         return pool.max { versionIsNewer($1.tagName, than: $0.tagName) }
+    }
+
+    /// The release for ONE edition (asset). A development build may not carry every edition (PDF Tools' dev
+    /// builds ship Light only), so when the dev pick lacks this asset, take the newest release that has it —
+    /// e.g. Light gets v0.9.2-dev.1 while Full stays on v0.9.1 instead of reading "No macOS build".
+    nonisolated static func latest(from releases: [ReleaseInfo], for assetName: String?,
+                                   devChannel: Bool = AppState.devChannel) -> ReleaseInfo? {
+        let pick = latest(from: releases, devChannel: devChannel)
+        guard let pick, let name = assetName, isDevTag(pick.tagName),
+              !pick.assets.contains(where: { $0.name == name }) else { return pick }
+        return latest(from: releases.filter { $0.assets.contains { $0.name == name } }, devChannel: devChannel) ?? pick
     }
 
     /// This Mac's Dev channel (Settings → click the version 7× to reveal). Read straight from UserDefaults so
@@ -1227,16 +1243,17 @@ final class AppState: ObservableObject {
         if releases.isEmpty {
             do { releases = try await client.releases(owner: app.owner, repo: app.repo) }
             catch { update(id) { $0.status = .error(error.localizedDescription) }; endBusy(id); return nil }
-            let picked = Self.latest(from: releases)
+            let picked = Self.latest(from: releases, for: macAsset(for: app))
             update(id) { $0.releases = releases; $0.latestRelease = picked }
         }
 
+        let variantId = variantOverride ?? selectedVariantId(app)
+        // Per edition: a dev build may carry only some editions (PDF Tools' dev builds are Light only).
         let release = tag != nil ? releases.first { $0.tagName == tag }
-                                 : (rows.first(where: { $0.id == id })?.latestRelease ?? Self.latest(from: releases))
+                                 : Self.latest(from: releases, for: app.macAssetName(variantId: variantId))
         guard let rel = release else {
             update(id) { $0.status = .error("Version \(tag ?? "latest") not found.") }; endBusy(id); return nil
         }
-        let variantId = variantOverride ?? selectedVariantId(app)
         guard let asset = rel.assets.first(where: { $0.name == app.macAssetName(variantId: variantId) }) else {
             update(id) { $0.status = .error("No macOS asset in \(rel.tagName).") }; endBusy(id); return nil
         }

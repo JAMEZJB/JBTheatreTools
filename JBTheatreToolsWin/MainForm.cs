@@ -487,7 +487,8 @@ public sealed class MainForm : Form
     /// <summary>Re-derives a row's latest-asset id + status from its cached releases (after a variant change).</summary>
     private void RecomputeRow(AppRowControl row)
     {
-        var latest = row.LatestRelease;
+        var latest = row.LatestRelease == null ? null
+            : Versions.LatestFor(row.Releases, row.App.WindowsAsset(SelectedVariant(row.App)));   // per edition
         if (latest == null)
         {
             // No cached releases yet (pre-refresh): the row just reflects whether the slot is installed.
@@ -875,7 +876,7 @@ public sealed class MainForm : Form
                     case FetchKind.Releases:
                         accessible = true;
                         row.SetReleases(res.Releases!);
-                        var latest = Versions.Latest(res.Releases!);
+                        var latest = Versions.LatestFor(res.Releases!, row.App.WindowsAsset(SelectedVariant(row.App)));
                         if (latest == null)
                         {
                             // Nothing released on this PC's channel (only dev builds so far, or none): only the
@@ -982,9 +983,10 @@ public sealed class MainForm : Form
         foreach (var vid in variants)
         {
             var name = row.App.WindowsAsset(vid);
-            if (name == null || !latest.Assets.Any(a => a.Name == name)) continue;   // no asset for this arch → skip
+            var rel = Versions.LatestFor(row.Releases, name);   // per edition (a dev build may lack one)
+            if (name == null || rel == null || !rel.Assets.Any(a => a.Name == name)) continue;   // no asset for this arch → skip
             var installed = InstallManager.Shared.InstalledVersion(row.App.InstallKey(vid));
-            if (installed == null || Versions.IsNewer(latest.TagName, installed)) yield return vid;
+            if (installed == null || Versions.IsNewer(rel.TagName, installed)) yield return vid;
         }
     }
 
@@ -1028,9 +1030,10 @@ public sealed class MainForm : Form
         foreach (var vid in variants)
         {
             var name = row.App.WindowsAsset(vid);
-            if (name == null || !latest.Assets.Any(a => a.Name == name)) continue;
+            var rel = Versions.LatestFor(row.Releases, name);   // per edition (a dev build may lack one)
+            if (name == null || rel == null || !rel.Assets.Any(a => a.Name == name)) continue;
             var installed = InstallManager.Shared.InstalledVersion(row.App.InstallKey(vid));
-            if (installed != null && Versions.IsNewer(latest.TagName, installed)) yield return vid;
+            if (installed != null && Versions.IsNewer(rel.TagName, installed)) yield return vid;
         }
     }
 
@@ -1136,7 +1139,7 @@ public sealed class MainForm : Form
                 : await client.ReleasesAsync(row.App.Owner, row.App.Repo);
             var rel = tag != null
                 ? releases.FirstOrDefault(r => r.TagName == tag)
-                : Versions.Latest(releases);
+                : Versions.LatestFor(releases, assetName);   // per edition
             if (rel == null) throw new Exception($"Version {tag ?? "latest"} not found.");
             var asset = rel.Assets.FirstOrDefault(a => a.Name == assetName)
                 ?? throw new Exception($"No Windows asset in {rel.TagName}.");

@@ -12,7 +12,6 @@ public sealed class AppSettings
     public string AuthMode { get; set; } = "";            // "token" (GitHub PAT) | "server" (relay, DEFAULT); "" = resolved in Load()
     public string ViewMode { get; set; } = "list";        // "list" | "grid" (icon-tile layout)
     public bool DevChannel { get; set; }                  // offer vX.Y.Z-dev.N pre-releases (hidden: Settings → click the version 7×)
-    public bool DevChannelRevealed { get; set; }          // the Development builds switch has been revealed on this PC
     public List<string> AppOrder { get; set; } = new();   // user's row order (app ids); empty = catalog order
     public List<string> PinnedApps { get; set; } = new(); // app ids pinned to the top of the list
     public List<string> HiddenApps { get; set; } = new(); // app ids hidden from the list

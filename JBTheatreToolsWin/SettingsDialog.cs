@@ -183,8 +183,15 @@ public sealed class SettingsDialog : Form
         };
         // Hidden Dev channel: seven clicks on the version reveal "Development builds" (like Android's
         // developer options). Off by default; a normal user never sees it.
-        int versionClicks = 0;
-        versionLabel.Click += (_, _) => { if (++versionClicks >= 7 && !_devChannel.Visible) { _settings.DevChannelRevealed = true; RevealDevChannel(); } };
+        // Seven clicks within three seconds; nothing about the reveal is stored (see below).
+        var versionClicks = new List<DateTime>();
+        versionLabel.Click += (_, _) =>
+        {
+            var now = DateTime.UtcNow;
+            versionClicks.RemoveAll(t => (now - t).TotalSeconds >= 3);
+            versionClicks.Add(now);
+            if (versionClicks.Count >= 7) RevealDevChannel();
+        };
         _devChannel.Text = "Development builds on this PC (pre-releases marked \u201cdev\u201d; mac + Android only for now)";
         _devChannel.AutoSize = true;
         _devChannel.Visible = false;
@@ -306,7 +313,9 @@ public sealed class SettingsDialog : Form
         UpdateAuthPanels();
         ResumeLayout(false);
         PerformLayout();   // the AutoScale pass runs here
-        if (_settings.DevChannelRevealed) RevealDevChannel();
+        // Shown only while dev mode is ON (or after the gesture above, this session only): switch it off and the
+        // checkbox is gone next time Settings opens.
+        if (_settings.DevChannel) RevealDevChannel();
     }
 
     /// <summary>Shows the Dev channel checkbox above the button row, growing the dialog to make room. Runs
