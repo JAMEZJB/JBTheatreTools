@@ -18,4 +18,11 @@ object ReleasePick {
         }
         return pool.maxWithOrNull { x, y -> VersionCompare.compare(x.tagName, y.tagName) }
     }
+
+    /**
+     * The release a setup file's held [version] names: matched by version equality ("1.2.0" finds the tag "v1.2.0"),
+     * so the caller installs from the release's REAL tag. A development build is never a match unless [allowDev].
+     */
+    fun byVersion(releases: List<ReleaseInfo>, version: String, allowDev: Boolean): ReleaseInfo? =
+        releases.firstOrNull { (allowDev || !VersionCompare.isDev(it.tagName)) && VersionCompare.equal(it.tagName, version) }
 }

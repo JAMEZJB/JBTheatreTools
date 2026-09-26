@@ -3,7 +3,20 @@ package com.jamesbreedon.jbtheatretools.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.setValue
+import androidx.compose.material3.Text
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import com.jamesbreedon.jbtheatretools.core.UpdatePolicy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -101,8 +114,8 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
         )
         if (state.showLock) {
             Banner(
-                "Show lock is on — installs, updates and removals are paused. Opening apps still works.",
-                c.info, "Unlock", { vm.setShowLock(false) },
+                "Show lock is on — installs, updates and uninstalls are paused. Opening apps still works.",
+                c.info, "Turn off", { vm.requestShowLock(false) },
             )
         }
         state.launcherWhatsNew?.let { version ->
@@ -121,11 +134,14 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
                 when (state.tab) {
                     Tab.APPS -> Column(Modifier.fillMaxSize()) {
                         // Find & filter: the status chips (the app bar's search narrows further).
+                        // Segments size to their labels and wrap onto a second row when they don't fit (a 360dp
+                        // phone at a large font scale), so "Not installed" is never cut off.
                         Segmented(
                             StatusFilter.entries.map { it.label },
                             state.statusFilter.ordinal,
                             { vm.setStatusFilter(StatusFilter.entries[it]) },
-                            Modifier.fillMaxWidth().padding(start = gutter, end = gutter, top = 10.dp),
+                            Modifier.padding(start = gutter, end = gutter, top = 10.dp).fillMaxWidth(),
+                            role = Role.Tab,
                         )
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             if (state.visibleStatuses().isEmpty() && AppFilter.isActive(state.search, state.statusFilter)) {
@@ -176,7 +192,10 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
     state.sheetFor?.let { app ->
         val status = state.statuses.firstOrNull { it.app.id == app.id }
         val progress = state.progress[app.id]
-        val details = remember(app.id, status?.installedVersion) { vm.repo.installedDetails(app.id) }
+        // Measures the APK on disk: off the main thread, never during composition.
+        val details by produceState<Pair<Long, Long>?>(null, app.id, status?.installedVersion) {
+            value = withContext(Dispatchers.IO) { vm.repo.installedDetails(app.id) }
+        }
         ModalBottomSheet(
             onDismissRequest = { vm.showSheet(null) },
             containerColor = c.raised,
@@ -198,7 +217,7 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
                     if (status.held && status.hasUpdate) {
                         SmallText(
                             "v${status.latestVersion} is available — held at v${status.installedVersion}",
-                            color = c.selector, weight = FontWeight.Medium, maxLines = 2,
+                            color = c.text2, weight = FontWeight.Medium, maxLines = 2,
                         )
                     }
                 }
@@ -256,7 +275,11 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
             Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
                 TitleText("Import setup")
                 VSpace(10.dp)
-                BodyText(preview.summary, color = c.text, maxLines = 40)
+                // The summary scrolls and the buttons stay pinned: a full-rig import is ~27 lines, which pushed
+                // Install / Cancel off a small screen.
+                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                    BodyText(preview.summary, color = c.text, maxLines = Int.MAX_VALUE)
+                }
                 VSpace(16.dp)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     SecondaryButton("Cancel", Modifier.weight(1f), onClick = vm::cancelImport)
@@ -277,7 +300,7 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
             Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
                 TitleText("Remove ${app.name}?")
                 VSpace(6.dp)
-                BodyText("The app is uninstalled from this device. Its saved settings go with it.")
+                BodyText("The app is uninstalled from this device. Its saved settings go with it.", maxLines = Int.MAX_VALUE)
                 VSpace(16.dp)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     SecondaryButton("Cancel", Modifier.weight(1f)) { vm.askRemove(null) }
@@ -300,12 +323,34 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
                 BodyText(
                     "Android can't install an older version over a newer one, so the development build is removed " +
                         "first and the release installs straight after. The app's saved settings on this device are reset.",
-                    maxLines = 5,
+                    maxLines = Int.MAX_VALUE,
                 )
                 VSpace(16.dp)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     SecondaryButton("Cancel", Modifier.weight(1f)) { vm.askBackToRelease(null) }
                     DangerButton("Remove and reinstall", Modifier.weight(1f)) { vm.backToRelease(app) }
+                }
+            }
+        }
+    }
+
+    // Turning show lock off always asks first — one stray tap mid-show must not reopen installs. "Keep on" is the
+    // default: it's the primary button, and dismissing the sheet keeps the lock too.
+    if (state.confirmShowLockOff) {
+        ModalBottomSheet(
+            onDismissRequest = vm::keepShowLock,
+            containerColor = c.raised,
+            shape = RoundedCornerShape(topStart = Radii.window, topEnd = Radii.window),
+            sheetState = rememberModalBottomSheetState(),
+        ) {
+            Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
+                TitleText("Turn off show lock?", maxLines = 2)
+                VSpace(6.dp)
+                BodyText("Installs, updates and uninstalls can run again.", maxLines = Int.MAX_VALUE)
+                VSpace(16.dp)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SecondaryButton("Turn off", Modifier.weight(1f), onClick = vm::confirmShowLockOff)
+                    PrimaryButton("Keep on", Modifier.weight(1f), onClick = vm::keepShowLock)
                 }
             }
         }
@@ -321,7 +366,7 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
                 containerColor = c.raised,
                 contentColor = c.text,
                 modifier = Modifier.padding(horizontal = 20.dp),
-            ) { BodyText(message, color = c.text, maxLines = 2) }
+            ) { BodyText(message, color = c.text, maxLines = 5) }
         }
     }
 }
@@ -597,14 +642,14 @@ private fun AppTile(status: AppStatus, progress: InstallProgress?, vm: LauncherV
         )
         val version = status.installedVersion ?: status.latestVersion
         if (version != null) {
-            val suffix = when {
-                status.isDev -> " · dev"
-                status.held -> " · held"
-                else -> ""
+            val tag = when {
+                status.isDev -> "dev"
+                status.held -> "held"
+                else -> null
             }
-            MonoText("v$version$suffix", color = if (status.isDev) c.warn else c.text3)
+            TileVersion("v$version", tag, if (status.isDev) c.warn else c.text3)
         } else {
-            SmallText(status.note ?: "", color = c.text3, weight = FontWeight.Normal, align = TextAlign.Center)
+            SmallText(status.note ?: "", color = c.text3, weight = FontWeight.Normal, align = TextAlign.Center, maxLines = 2)
         }
         if (progress != null && progress.isActive) {
             VSpace(4.dp)
@@ -686,7 +731,7 @@ private fun AppRow(status: AppStatus, progress: InstallProgress?, vm: LauncherVi
                     status.isInstalled -> {
                         MonoText("v${status.installedVersion}" + if (status.held) " · held" else "", color = c.text3)
                         if (status.held && status.hasUpdate) {
-                            SmallText("v${status.latestVersion} available", color = c.selector, weight = FontWeight.Normal)
+                            SmallText("v${status.latestVersion} available", color = c.text2, weight = FontWeight.Normal)
                         }
                         VSpace(6.dp)
                         SecondaryButton("Open", Modifier.width(120.dp)) { vm.openApp(status.app) }
@@ -703,7 +748,7 @@ private fun AppRow(status: AppStatus, progress: InstallProgress?, vm: LauncherVi
                         }
                     }
 
-                    else -> SmallText(status.note ?: "No release", color = c.text3, weight = FontWeight.Normal)
+                    else -> SmallText(status.note ?: "No release", color = c.text3, weight = FontWeight.Normal, maxLines = 3)
                 }
                 if (status.isDev) {
                     VSpace(4.dp)
@@ -720,7 +765,10 @@ private fun AppRow(status: AppStatus, progress: InstallProgress?, vm: LauncherVi
             Row(verticalAlignment = Alignment.CenterVertically) {
                 SmallText(progressLine(progress), Modifier.weight(1f), color = c.text2, weight = FontWeight.Normal)
                 if (progress.phase == InstallProgress.Phase.DOWNLOADING) {
-                    GhostButton("Cancel", Modifier.width(88.dp)) { vm.cancelInstall(status.app) }
+                    GhostButton(
+                        "Cancel",
+                        Modifier.width(88.dp).semantics { contentDescription = "Cancel the download of ${status.app.name}" },
+                    ) { vm.cancelInstall(status.app) }
                 }
             }
             VSpace(4.dp)
@@ -753,9 +801,14 @@ private fun UpdatesList(vm: LauncherViewModel, state: LauncherUiState, gutter: a
                 ) {
                     Glyph(HouseIcons.Check, 28.dp, c.ok)
                     VSpace(10.dp)
-                    TitleText("Everything is up to date")
+                    // Held apps with a newer version are listed below: "everything is up to date" would be untrue.
+                    TitleText(if (held.isEmpty()) "Everything is up to date" else "No updates to install", maxLines = 2)
                     VSpace(4.dp)
-                    BodyText("${state.installedCount} apps installed", maxLines = 1)
+                    BodyText(
+                        if (held.isEmpty()) "${state.installedCount} apps installed"
+                        else "Held apps stay at their version until you release the hold.",
+                        maxLines = Int.MAX_VALUE,
+                    )
                 }
             }
         } else if (pending.isNotEmpty()) {
@@ -795,7 +848,7 @@ private fun LauncherUpdateRow(version: String, progress: InstallProgress?, vm: L
         VSpace(6.dp)
         SmallText(
             "The launcher closes while Android installs its update — open it again afterwards.",
-            color = c.text3, weight = FontWeight.Normal,
+            color = c.text3, weight = FontWeight.Normal, maxLines = Int.MAX_VALUE,
         )
         if (progress != null && progress.phase != InstallProgress.Phase.DONE) {
             VSpace(8.dp)
@@ -890,7 +943,7 @@ private fun AboutScreen(vm: LauncherViewModel, state: LauncherUiState, gutter: a
                         BodyText(
                             "On this device only: also offer pre-release development builds (marked “dev”). " +
                                 "They're verified exactly like releases. A proper release always replaces them.",
-                            maxLines = 4,
+                            maxLines = Int.MAX_VALUE,
                         )
                     }
                 }
@@ -906,7 +959,7 @@ private fun AboutScreen(vm: LauncherViewModel, state: LauncherUiState, gutter: a
                         "Releases are verified before they install: the release's checksum list must " +
                             "carry the suite signature, the file must match its checksum, and the app " +
                             "must be signed with the suite certificate.",
-                        maxLines = 6,
+                        maxLines = Int.MAX_VALUE,
                     )
                     VSpace(12.dp)
                     SecondaryButton("Sign out", Modifier.fillMaxWidth()) { vm.signOut() }
@@ -919,15 +972,14 @@ private fun AboutScreen(vm: LauncherViewModel, state: LauncherUiState, gutter: a
                 Column {
                     LabelText("Log")
                     VSpace(8.dp)
-                    BodyText(
-                        vm.repo.logText().lines().takeLast(6).joinToString("\n").ifBlank { "No entries yet." },
-                        maxLines = 8,
-                    )
+                    BodyText(state.logTail.ifBlank { "No entries yet." }, maxLines = 8)
                     VSpace(12.dp)
-                    SecondaryButton("Share log", Modifier.fillMaxWidth()) { shareLog(context, vm) }
+                    SecondaryButton("Share log", Modifier.fillMaxWidth()) {
+                        vm.shareLog { text -> shareText(context, "JB Theatre Tools log", text, "Share log") }
+                    }
                     VSpace(10.dp)
                     SecondaryButton("Share diagnostics", Modifier.fillMaxWidth()) {
-                        shareText(context, "JB Theatre Tools diagnostics", vm.diagnostics(), "Share diagnostics")
+                        vm.shareDiagnostics { text -> shareText(context, "JB Theatre Tools diagnostics", text, "Share diagnostics") }
                     }
                 }
             }
@@ -941,7 +993,7 @@ private fun AboutScreen(vm: LauncherViewModel, state: LauncherUiState, gutter: a
                     BodyText(
                         "Convert is a repackage of the open-source p2r3/convert, under the GPL-2.0. " +
                             "Its source is at github.com/p2r3/convert.",
-                        maxLines = 4,
+                        maxLines = Int.MAX_VALUE,
                     )
                     VSpace(12.dp)
                     SecondaryButton("Open the Convert source", Modifier.fillMaxWidth()) {
@@ -959,18 +1011,6 @@ private fun openUrl(context: android.content.Context, url: String) {
             android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
                 .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
         )
-    }
-}
-
-private fun shareLog(context: android.content.Context, vm: LauncherViewModel) {
-    runCatching {
-        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(android.content.Intent.EXTRA_SUBJECT, "JB Theatre Tools log")
-            putExtra(android.content.Intent.EXTRA_TEXT, vm.repo.logText())
-            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(android.content.Intent.createChooser(intent, "Share log"))
     }
 }
 
@@ -1009,7 +1049,11 @@ private fun installedLine(installed: String, details: Pair<Long, Long>?): String
     return bits.joinToString(" · ")
 }
 
-/** A full-width notice band (the kit's `.banner`): a 10% wash of the tint, text in the tint, up to two actions. */
+/**
+ * A full-width notice band (the kit's `.banner`): a 10% wash of the tint with the tint on its edge and actions; the
+ * text is `--text` (the tint itself is below 4.5:1 on its own wash) and wraps as far as it needs to. With two actions
+ * they sit under the text, so a narrow phone at a large font scale doesn't squeeze the text into a sliver.
+ */
 @Composable
 private fun Banner(
     text: String,
@@ -1021,15 +1065,51 @@ private fun Banner(
 ) {
     val c = House.colors
     Column(Modifier.fillMaxWidth().background(c.surface).background(tint.copy(alpha = 0.10f))) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            SmallText(text, Modifier.weight(1f), color = tint, weight = FontWeight.SemiBold, maxLines = 3)
-            if (secondary != null && onSecondary != null) BannerAction(secondary, c.text2, onSecondary)
-            BannerAction(action, tint, onAction)
+        if (secondary != null && onSecondary != null) {
+            SmallText(
+                text, Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 10.dp),
+                color = c.text, weight = FontWeight.SemiBold, maxLines = Int.MAX_VALUE,
+            )
+            Row(
+                Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 2.dp),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                BannerAction(secondary, c.text2, onSecondary)
+                BannerAction(action, tint, onAction)
+            }
+        } else {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SmallText(text, Modifier.weight(1f), color = c.text, weight = FontWeight.SemiBold, maxLines = Int.MAX_VALUE)
+                BannerAction(action, tint, onAction)
+            }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(tint.copy(alpha = 0.40f)))
+    }
+}
+
+/**
+ * The tile's "v1.12.0 · held": on one line when it fits; when it doesn't (a 3-column phone grid at a large font scale)
+ * the version keeps its own line and the tag drops underneath — never "v1.12.0 · h…".
+ */
+@Composable
+private fun TileVersion(version: String, tag: String?, color: Color) {
+    if (tag == null) {
+        MonoText(version, color = color)
+        return
+    }
+    var stacked by remember(version, tag) { mutableStateOf(false) }
+    if (!stacked) {
+        Text(
+            "$version · $tag", color = color, maxLines = 1, softWrap = false,
+            style = TextStyle(fontFamily = HouseType.mono, fontWeight = FontWeight.Medium, fontSize = HouseType.smallSize),
+            onTextLayout = { if (it.hasVisualOverflow) stacked = true },
+        )
+    } else {
+        MonoText(version, color = color)
+        MonoText(tag, color = color)
     }
 }
 
@@ -1108,8 +1188,8 @@ private fun ReleaseNotesSheet(notes: NotesSheet, onClose: () -> Unit) {
 private fun AboutV130Panels(vm: LauncherViewModel, state: LauncherUiState) {
     val c = House.colors
     val context = LocalContext.current
-    val notifyPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        vm.setNotifyUpdates(granted)
+    val notifyPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
+        vm.setNotifyUpdates(true)   // the view model sees a refusal (canPost() false) and says so
     }
     val exportFile = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         uri?.let(vm::exportSetup)
@@ -1124,27 +1204,36 @@ private fun AboutV130Panels(vm: LauncherViewModel, state: LauncherUiState) {
             Column {
                 LabelText("Show lock")
                 VSpace(8.dp)
-                Segmented(listOf("Off", "On"), if (state.showLock) 1 else 0, { vm.setShowLock(it == 1) }, Modifier.fillMaxWidth())
+                Segmented(listOf("Off", "On"), if (state.showLock) 1 else 0, { vm.requestShowLock(it == 1) }, Modifier.fillMaxWidth())
                 VSpace(8.dp)
-                BodyText("For show time: nothing installs, updates or is removed. Opening apps still works.", maxLines = 3)
+                BodyText("For show time: nothing installs, updates or is removed. Opening apps still works.", maxLines = Int.MAX_VALUE)
             }
         }
         VSpace(12.dp)
         Panel(Modifier.fillMaxWidth()) {
             Column {
-                LabelText("Automatic checks")
+                LabelText("While open, check again")
                 VSpace(8.dp)
-                val choices = listOf("off" to "Off", "1h" to "1 h", "4h" to "4 h", "12h" to "12 h", "24h" to "24 h")
+                // The same choices and wording as the desktop launchers (shortest first); an unknown stored value
+                // shows the default, which is also what it behaves as.
+                val choices = UpdatePolicy.intervals
+                val current = choices.indexOfFirst { it.first == state.autoCheckInterval }
+                    .takeIf { it >= 0 } ?: choices.indexOfFirst { it.first == UpdatePolicy.DEFAULT_INTERVAL }
                 Segmented(
                     choices.map { it.second },
-                    choices.indexOfFirst { it.first == state.autoCheckInterval }.coerceAtLeast(0),
+                    current,
                     { vm.setAutoCheckInterval(choices[it].first) },
                     Modifier.fillMaxWidth(),
                 )
                 VSpace(8.dp)
-                BodyText("Check for new versions this often while the launcher is open — and in the background too when notifications are on.", maxLines = 3)
+                BodyText(
+                    "While the launcher is open it checks for new versions this often. With notifications on, it also " +
+                        "checks in the background on Wi-Fi, roughly this often — Android picks the exact time, and " +
+                        "waits while the battery is low.",
+                    maxLines = Int.MAX_VALUE,
+                )
                 VSpace(12.dp)
-                LabelText("Notify me about updates")
+                LabelText("Notify me when updates are available")
                 VSpace(8.dp)
                 Segmented(listOf("Off", "On"), if (state.notifyUpdates) 1 else 0, { on ->
                     if (on == 1 && android.os.Build.VERSION.SDK_INT >= 33 &&
@@ -1163,7 +1252,7 @@ private fun AboutV130Panels(vm: LauncherViewModel, state: LauncherUiState) {
             Column {
                 LabelText("Setup")
                 VSpace(8.dp)
-                BodyText("Save which apps are installed, then set up another device the same way (any JB Theatre Tools reads the file).", maxLines = 4)
+                BodyText("Save which apps are installed, then set up another device the same way (any JB Theatre Tools reads the file).", maxLines = Int.MAX_VALUE)
                 VSpace(12.dp)
                 SecondaryButton("Export setup", Modifier.fillMaxWidth()) {
                     exportFile.launch(SetupProfile.suggestedFileName(LocalDate.now()))
@@ -1201,18 +1290,20 @@ private fun AboutV130Panels(vm: LauncherViewModel, state: LauncherUiState) {
                 LabelText("Recent activity")
                 VSpace(8.dp)
                 if (state.history.isEmpty()) {
-                    BodyText("Nothing yet — installs, updates and removals will be listed here.", maxLines = 2)
+                    BodyText("Nothing yet — installs, updates and uninstalls will be listed here.", maxLines = 2)
                 } else {
                     val now = LocalDateTime.now()
                     state.history.takeLast(20).asReversed().forEach { e ->
+                        // The date wraps ("12 Sep 2026" / "14:02") rather than being cut off at a large font scale.
                         Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
                             SmallText(
                                 ActivityHistory.`when`(LocalDateTime.ofInstant(e.at, ZoneId.systemDefault()), now),
-                                Modifier.width(110.dp), color = c.text3, weight = FontWeight.Normal,
+                                Modifier.width(116.dp), color = c.text3, weight = FontWeight.Normal, maxLines = 2,
                             )
+                            HSpace(6.dp)
                             SmallText(
                                 ActivityHistory.describe(e), Modifier.weight(1f),
-                                color = if (e.action == "failed") c.danger else c.text2, weight = FontWeight.Normal, maxLines = 2,
+                                color = if (e.action == "failed") c.danger else c.text2, weight = FontWeight.Normal, maxLines = 3,
                             )
                         }
                     }

@@ -19,19 +19,33 @@ import com.jamesbreedon.jbtheatretools.R
  */
 class Notifier(private val context: Context) {
 
-    fun canPost(): Boolean =
-        Build.VERSION.SDK_INT < 33 ||
+    fun canPost(): Boolean {
+        val permitted = Build.VERSION.SDK_INT < 33 ||
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        val nm = context.getSystemService(NotificationManager::class.java)
+        return permitted && (nm?.areNotificationsEnabled() ?: false)
+    }
+
+    /**
+     * The "Updates" channel, created up front so it can be configured before the first notification. LOW importance:
+     * it shows in the shade but never makes a sound — a phone on the prompt desk must not chime mid-show.
+     */
+    fun ensureChannel() {
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        runCatching {
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL, "Updates", NotificationManager.IMPORTANCE_LOW).apply {
+                    description = "New versions of the suite's apps"
+                }
+            )
+        }
+    }
 
     fun post(title: String, body: String) {
         if (!canPost()) return
         val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        ensureChannel()
         runCatching {
-            nm.createNotificationChannel(
-                NotificationChannel(CHANNEL, "Updates", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                    description = "New versions of the suite's apps"
-                }
-            )
             val open = PendingIntent.getActivity(
                 context, 0,
                 Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),

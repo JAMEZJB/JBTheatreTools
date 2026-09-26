@@ -59,6 +59,7 @@ struct SheetFrame<Content: View>: View {
         .frame(width: width, height: height, alignment: .topLeading)
         .background(Color.jbGround)
         .tint(.jbAccent)
+        .onExitCommand { state.activeSheet = nil }   // Escape closes it too (these sheets only show information)
     }
 }
 
@@ -227,7 +228,7 @@ struct ActivityView: View {
     var body: some View {
         SheetFrame(title: "Activity", width: 600, height: 480) {
             if events.isEmpty {
-                Text("Nothing yet — installs, updates and removals will be listed here.")
+                Text("Nothing yet — installs, updates and uninstalls will be listed here.")
                     .font(JBFont.body).foregroundStyle(Color.jbText2)
                 Spacer()
             } else {
@@ -301,10 +302,11 @@ struct ImportPreviewView: View {
 /// The menu-bar extra (Settings → "Show in the menu bar"): launch any installed app directly, check for updates,
 /// open the window, quit.
 struct QuickLaunchMenu: View {
-    @ObservedObject var state: AppState
+    let state: AppState
+    @ObservedObject var chrome: ChromeState
 
     var body: some View {
-        let slots = state.installedSlotsForLaunch
+        let slots = chrome.launchSlots
         if slots.isEmpty {
             Text("No apps installed")
         } else {
@@ -313,7 +315,7 @@ struct QuickLaunchMenu: View {
             }
         }
         Divider()
-        Button("Check for Updates") { NotificationCenter.default.post(name: .jbttRefresh, object: nil) }
+        Button("Refresh") { NotificationCenter.default.post(name: .jbttRefresh, object: nil) }
         Button("Open JB Theatre Tools") {
             NSApp.unhide(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -326,7 +328,8 @@ struct QuickLaunchMenu: View {
 
 /// Keyboard shortcuts: ⌘R check, ⌘F find, ⌘, settings, ⌘U update all, ⌘L show lock, ⌘Y activity, ⌘1 / ⌘2 view.
 struct LauncherCommands: Commands {
-    @ObservedObject var state: AppState
+    let state: AppState
+    @ObservedObject var chrome: ChromeState
 
     private func post(_ name: Notification.Name) { NotificationCenter.default.post(name: name, object: nil) }
 
@@ -341,15 +344,15 @@ struct LauncherCommands: Commands {
                 .keyboardShortcut("f", modifiers: .command)
         }
         CommandMenu("Apps") {
-            Button("Check for Updates") { post(.jbttRefresh) }
+            Button("Refresh") { post(.jbttRefresh) }
                 .keyboardShortcut("r", modifiers: .command)
             Button("Update All") { post(.jbttUpdateAll) }
                 .keyboardShortcut("u", modifiers: .command)
-                .disabled(state.showLock || state.batchRunning || state.updatesAvailable == 0)
+                .disabled(!chrome.canUpdateAll)
             Divider()
-            Button(state.showLock ? "Turn Off Show Lock" : "Turn On Show Lock") { state.setShowLock(!state.showLock) }
+            Button(chrome.showLock ? "Turn Off Show Lock" : "Turn On Show Lock") { state.requestShowLock(!chrome.showLock) }
                 .keyboardShortcut("l", modifiers: .command)
-            Button("Activity") { post(.jbttActivity) }
+            Button("Activity…") { post(.jbttActivity) }
                 .keyboardShortcut("y", modifiers: .command)
             Divider()
             Button("View as List") { UserDefaults.standard.set(AppViewMode.list.rawValue, forKey: "theatre.viewMode") }

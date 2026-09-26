@@ -8,9 +8,9 @@ import java.time.Instant
  * so they're unit-tested and identical on every launcher.
  */
 object UpdatePolicy {
-    /** The "While open, check every" choices (settings value to label). The first is the default. */
+    /** The "While open, check again" choices (settings value to label), shortest first. Default: [DEFAULT_INTERVAL]. */
     val intervals: List<Pair<String, String>> = listOf(
-        "4h" to "4 hours", "1h" to "Hour", "12h" to "12 hours", "24h" to "Day", "off" to "Off",
+        "1h" to "Every hour", "4h" to "Every 4 hours", "12h" to "Every 12 hours", "24h" to "Once a day", "off" to "Never",
     )
     const val DEFAULT_INTERVAL = "4h"
 

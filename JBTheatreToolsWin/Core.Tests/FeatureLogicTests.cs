@@ -158,7 +158,7 @@ public class UpdatePolicyTests
         Assert.Equal(TimeSpan.FromHours(24), UpdatePolicy.Interval("24h"));
         Assert.Equal(TimeSpan.FromHours(4), UpdatePolicy.Interval("garbage"));
         Assert.Equal(TimeSpan.FromHours(4), UpdatePolicy.Interval(null));
-        Assert.Equal("4h", UpdatePolicy.Intervals[0].Raw);
+        Assert.Contains(UpdatePolicy.Intervals, i => i.Raw == UpdatePolicy.DefaultInterval);
     }
 
     [Fact]
@@ -366,6 +366,34 @@ public class SetupProfileTests
         var plan = SetupPlanner.Build(Sample(), Catalog, new HashSet<string>(), supportsVariants: false);
         Assert.DoesNotContain(plan.ToInstall, i => i.VariantId != null);
         Assert.Contains("NDI Tools (Full) — not available here", plan.Skipped);
+    }
+
+    [Fact]
+    public void HeldDevBuildsSkipWithoutDevelopmentBuilds()
+    {
+        var p = new SetupProfile
+        {
+            Apps = new()
+            {
+                new("dmx", null, "1.3.0-dev.2", true),        // held at a dev build (an export without the "v")
+                new("psn", null, "v0.5.0-dev.1", false),      // not held: installs the latest, dev tag irrelevant
+                new("ndi", "full", "v2.1.0-dev.4", true),
+            },
+        };
+        var off = SetupPlanner.Build(p, Catalog, new HashSet<string> { "ndi@full" }, allowDevTags: false);
+        Assert.Equal(new[] { "PSN Tools" }, off.ToInstall.Select(i => i.Label));
+        Assert.Null(off.ToInstall[0].Tag);
+        Assert.Empty(off.HoldIds);                               // skipped entries are never held
+        Assert.Empty(off.AlreadyInstalled);                      // …even when that slot is already here
+        Assert.Contains("DMX Tools v1.3.0-dev.2 — a development build (not switched on here)", off.Skipped);
+        Assert.Contains("NDI Tools (Full) v2.1.0-dev.4 — a development build (not switched on here)", off.Skipped);
+        Assert.DoesNotContain("DMX Tools", SetupPlanner.Summary(off).Split("Skipped:")[0]);
+
+        var on = SetupPlanner.Build(p, Catalog, new HashSet<string> { "ndi@full" }, allowDevTags: true);
+        Assert.Equal("1.3.0-dev.2", on.ToInstall.Single(i => i.AppId == "dmx").Tag);
+        Assert.Equal(new[] { "dmx", "ndi" }, on.HoldIds);
+        Assert.Equal(new[] { "NDI Tools (Full)" }, on.AlreadyInstalled);
+        Assert.Empty(on.Skipped);
     }
 
     [Fact]

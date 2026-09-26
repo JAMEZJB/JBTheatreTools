@@ -188,10 +188,14 @@ enum SetupPlanner {
         var alreadyInstalled: [String]
         var skipped: [String]
         var holdIds: [String]
+        /// The held apps' names, for the preview (the ids alone told the user nothing).
+        var holdNames: [String] = []
     }
 
+    /// `allowDevTags` false (Development builds off here): an entry held at a development build is skipped — listed
+    /// under Skipped, not installed and not held — so the preview never promises what the import won't do.
     static func build(_ profile: SetupProfile, catalog: [CatalogEntry], installedKeys: Set<String>,
-                      supportsVariants: Bool = true) -> Plan {
+                      supportsVariants: Bool = true, allowDevTags: Bool = true) -> Plan {
         var byId: [String: CatalogEntry] = [:]
         for c in catalog where byId[c.id] == nil { byId[c.id] = c }
         var plan = Plan(toInstall: [], alreadyInstalled: [], skipped: [], holdIds: [])
@@ -211,7 +215,11 @@ enum SetupPlanner {
             let key = variant.map { "\(app.id)@\($0)" } ?? app.id
             guard seenKeys.insert(key).inserted else { continue }
             let label = variantLabel.map { "\(app.name) (\($0))" } ?? app.name
-            if e.held && !plan.holdIds.contains(app.id) { plan.holdIds.append(app.id) }
+            if e.held, let v = e.version, !allowDevTags, VersionDisplay.norm(v).lowercased().contains("-dev.") {
+                plan.skipped.append("\(label) \(VersionDisplay.display(v)) — a development build (not switched on here)")
+                continue
+            }
+            if e.held && !plan.holdIds.contains(app.id) { plan.holdIds.append(app.id); plan.holdNames.append(app.name) }
             if installedKeys.contains(key) { plan.alreadyInstalled.append(label); continue }
             plan.toInstall.append(Install(appId: app.id, variantId: variant, tag: e.held ? e.version : nil, label: label))
         }
@@ -233,6 +241,8 @@ enum SetupPlanner {
         }
         if !plan.holdIds.isEmpty {
             s += "\n\nHeld at their versions: \(plan.holdIds.count) app\(plan.holdIds.count == 1 ? "" : "s")"
+                + (plan.holdNames.isEmpty ? "" : " (" + plan.holdNames.joined(separator: ", ") + ")")
+                + " — Update All and automatic updates leave them at the version this machine has"
         }
         if !plan.skipped.isEmpty {
             s += "\n\nSkipped:\n  • " + plan.skipped.joined(separator: "\n  • ")

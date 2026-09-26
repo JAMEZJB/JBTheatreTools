@@ -22,9 +22,9 @@ enum VersionDisplay {
 /// The rules behind the launcher's unattended behaviour — scheduled checks, update notifications and automatic
 /// updates — kept pure so they're unit-tested and identical on every launcher.
 enum UpdatePolicy {
-    /// The "While open, check every" choices (settings value → label). The first is the default.
+    /// The "While open, check again" choices (settings value → label), shortest first. Default: `defaultInterval`.
     static let intervals: [(raw: String, label: String)] = [
-        ("4h", "4 hours"), ("1h", "Hour"), ("12h", "12 hours"), ("24h", "Day"), ("off", "Off"),
+        ("1h", "Every hour"), ("4h", "Every 4 hours"), ("12h", "Every 12 hours"), ("24h", "Once a day"), ("off", "Never"),
     ]
     static let defaultInterval = "4h"
 

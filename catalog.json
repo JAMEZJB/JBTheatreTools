@@ -17,8 +17,8 @@
       "windows-x64": "JBTheatreTools-Windows-x64.exe",
       "windows-arm64": "JBTheatreTools-Windows-arm64.exe"
     },
-    "whatsNew": "Now on Android too: the launcher installs the suite on phones and tablets.",
-    "whatsNewVersion": "v1.27.0"
+    "whatsNew": "Find and filter the list, activity history, setup files, hold and roll back, scheduled checks with notifications, and a show lock.",
+    "whatsNewVersion": "v1.30.0"
   },
   "apps": [
     {

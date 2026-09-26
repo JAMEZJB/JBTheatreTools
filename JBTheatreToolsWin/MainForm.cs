@@ -53,6 +53,8 @@ public sealed class MainForm : Form
     private readonly Dictionary<AppRowControl, CancellationTokenSource> _rowCts = new();
     private bool _hiddenToTray;
     private bool _balloonShowing;
+    private bool _historyOpening;
+    private readonly ToolTip _headerTip = new();
 
     // DPI: every pixel number in this form is a 96-DPI design value scaled through S() at the form's
     // DeviceDpi (Theme.Px); the house-font labels are built in device pixels for the same DPI. The
@@ -84,14 +86,14 @@ public sealed class MainForm : Form
     // Notice-banner messages (the banner doubles as the no-creds / bad-creds / no-access notice).
     // Worded per auth mode: "token" = GitHub PAT, "server" = download-server relay + suite passphrase.
     private string NoCredsMsg => _settings.AuthMode == "server"
-        ? "Enter the suite passphrase to enable downloads  —  Settings → Download access (ask James)."
+        ? "Enter the suite passphrase to enable downloads  —  Settings → Download access (ask whoever set up your access)."
         : "Add a GitHub token to enable downloads  —  Settings → paste a fine-grained PAT.";
     private string BadCredsMsg => _settings.AuthMode == "server"
         ? "The download server rejected the passphrase  —  check it in Settings."
         : "Your GitHub token is invalid or expired  —  open Settings to paste a new one.";
     private string NoAccessMsg => _settings.AuthMode == "server"
-        ? "No apps are reachable right now  —  check the passphrase in Settings, or ask James."
-        : "This token can’t access any apps  —  check its repository access, or ask James.";
+        ? "No apps are reachable right now  —  check the passphrase in Settings, or ask whoever set up your access."
+        : "This token can’t access any apps  —  check its repository access, or ask whoever set up your access.";
 
     public MainForm()
     {
@@ -257,23 +259,26 @@ public sealed class MainForm : Form
         _updateBanner.Controls.Add(_updateBannerText);
         _updateBanner.Controls.Add(download);
         _updateBanner.Resize += (_, _) => LayoutBanner(_updateBanner, _updateBannerText, download);
+        _updateBannerText.TextChanged += (_, _) => LayoutBanner(_updateBanner, _updateBannerText, download);   // new text, new height
         return _updateBanner;
     }
 
     /// <summary>A banner's height and the placement of its text + action button, from the DPI: the text
-    /// sits at (14, 13) and the button right-aligned at y=8 in the 44px design. The height is floored so
-    /// the banner never clips its text if a pixel-rounded font outgrows the scaled height (inert at 100%
-    /// and at the standard scales — a safety net, not the design).</summary>
+    /// sits at (14, 13) and the button right-aligned at y=8 in the 44px design. The text wraps within the
+    /// space left of the buttons (a long notice ran on under them at the default and minimum widths), and
+    /// the banner grows to fit it: its height is the 44px design, floored at what the wrapped text needs.</summary>
     private void LayoutBanner(Panel banner, Label text, params Button[] actions)
     {
-        text.Location = new Point(S(14), S(13));
-        banner.Height = Math.Max(S(44), text.Bottom + S(10));
         int x = banner.Width - S(14);
         foreach (var action in actions)   // right to left, in the order given
         {
             action.Location = new Point(x - action.Width, S(8));
             x = action.Left - S(8);
         }
+        text.Location = new Point(S(14), S(13));
+        // AutoSize + a maximum width = a label that wraps and grows downwards.
+        text.MaximumSize = new Size(Math.Max(S(120), x - S(12) - text.Left), 0);
+        banner.Height = Math.Max(S(44), text.Bottom + S(10));
     }
 
     /// <summary>Closes a banner the way the kit's `.banner` does: a 40% hairline of the semantic colour
@@ -291,14 +296,15 @@ public sealed class MainForm : Form
         _lockBanner.Visible = false;
         _lockBannerText.AutoSize = true;
         _lockBannerText.UseMnemonic = false;
-        _lockBannerText.Text = "Show lock is on — installs, updates and removals are paused. Launching still works.";
+        _lockBannerText.Text = "Show lock is on — installs, updates and uninstalls are paused. Launching still works.";
         _lockBanner.Paint += (_, e) => BannerEdge(e, _lockBanner, Theme.Info);
-        _unlockBtn.Text = "Unlock";
+        _unlockBtn.Text = "Turn Off";
         _unlockBtn.AutoSize = true;
-        _unlockBtn.Click += (_, _) => SetShowLock(false);
+        _unlockBtn.Click += (_, _) => RequestShowLock(false);
         _lockBanner.Controls.Add(_lockBannerText);
         _lockBanner.Controls.Add(_unlockBtn);
         _lockBanner.Resize += (_, _) => LayoutBanner(_lockBanner, _lockBannerText, _unlockBtn);
+        _lockBannerText.TextChanged += (_, _) => LayoutBanner(_lockBanner, _lockBannerText, _unlockBtn);
         return _lockBanner;
     }
 
@@ -320,6 +326,7 @@ public sealed class MainForm : Form
         _whatsNewBanner.Controls.Add(_whatsNewBtn);
         _whatsNewBanner.Controls.Add(_whatsNewDismiss);
         _whatsNewBanner.Resize += (_, _) => LayoutBanner(_whatsNewBanner, _whatsNewText, _whatsNewDismiss, _whatsNewBtn);
+        _whatsNewText.TextChanged += (_, _) => LayoutBanner(_whatsNewBanner, _whatsNewText, _whatsNewDismiss, _whatsNewBtn);
         return _whatsNewBanner;
     }
 
@@ -379,6 +386,7 @@ public sealed class MainForm : Form
         _tokenBanner.Controls.Add(_tokenBannerText);
         _tokenBanner.Controls.Add(open);
         _tokenBanner.Resize += (_, _) => LayoutBanner(_tokenBanner, _tokenBannerText, open);
+        _tokenBannerText.TextChanged += (_, _) => LayoutBanner(_tokenBanner, _tokenBannerText, open);
         return _tokenBanner;
     }
 
@@ -521,6 +529,7 @@ public sealed class MainForm : Form
             var row = new AppRowControl(app) { Width = Math.Max(S(400), ListInnerWidth) };
             row.InstallRequested += InstallAsync;
             row.InstallVersionRequested += InstallVersionAsync;
+            row.InstallPickedVersionRequested += (r, t) => InstallSlotAsync(r, t, null, lenient: true);
             row.UninstallRequested += Uninstall;
             row.LaunchRequested += Launch;
             row.MoveRequested += MoveRow;
@@ -543,6 +552,7 @@ public sealed class MainForm : Form
             row.ReleaseNotesRequested += ShowReleaseNotes;
             row.RollbackTagQuery = RollbackTag;
             row.RollbackRequested += async (r, tag) => await RollbackAsync(r, tag);
+            row.LaunchBlockedQuery = r => _slotsInstalling.Contains(InstallKey(r.App));
             row.SetLocked(_settings.ShowLock);
             row.SetSelectedVariant(SelectedVariant(app));
             var slot = InstallKey(app);
@@ -768,6 +778,16 @@ public sealed class MainForm : Form
     // ── Show lock (installs / updates / removals paused; Launch still works) ───────────────────
 
     private bool Locked => _settings.ShowLock;
+
+    /// <summary>From the UI (Ctrl+L, the banner, the More menu): turning the lock ON is one step; turning it OFF asks
+    /// (the same confirmation as the Settings checkbox), so a stray keystroke or click mid-show can't re-enable
+    /// installs and automatic updates.</summary>
+    private void RequestShowLock(bool on)
+    {
+        if (on == Locked) return;
+        if (!on && !DialogKit.ConfirmTurnOffShowLock(this)) return;
+        SetShowLock(on);
+    }
 
     private void SetShowLock(bool on)
     {
@@ -1033,24 +1053,30 @@ public sealed class MainForm : Form
     // --- Actions ---
 
     private enum FetchKind { Releases, NoAccess, Unauthorized, NoRelease, Error }
+
+    /// <summary>Apps whose check didn't complete in the last run (a network error, or rejected credentials) — they keep
+    /// what they were announced at (see AfterCheck), even when a scheduled check left their row as it was.</summary>
+    private readonly HashSet<string> _uncheckedIds = new();
     private sealed record FetchResult(AppRowControl Row, FetchKind Kind, List<ReleaseInfo>? Releases, string? ErrorMsg);
 
     /// <summary>Checks every app for updates (one at a time — a second request while one runs is ignored), then
     /// runs the after-check work: update notifications and, when switched on, automatic updates.</summary>
     /// <param name="announce">Say the result even when nothing is new (a check the user asked for from the tray).</param>
-    private async Task<bool> RefreshAllAsync(bool announce = false)
+    private async Task<bool> RefreshAllAsync(bool announce = false, bool quiet = false)
     {
         if (_refreshing) return false;
         _refreshing = true;
         bool ok;
-        try { ok = await RefreshCoreAsync(); }
+        try { ok = await RefreshCoreAsync(quiet); }
         finally { _refreshing = false; }
         _lastCheck = DateTimeOffset.UtcNow;   // an attempt counts: bad credentials mustn't mean a retry every minute
         if (ok) AfterCheck(announce);
         return ok;
     }
 
-    private async Task<bool> RefreshCoreAsync()
+    /// <param name="quiet">A scheduled background check: rows keep what they show until a result lands (no
+    /// "Checking…", which hid every Install / Update button for the length of the check).</param>
+    private async Task<bool> RefreshCoreAsync(bool quiet = false)
     {
         // These handlers run as `async void` (Shown / Refresh.Click), so an exception that escapes here —
         // e.g. AuthClient.Active → Credential Manager P/Invoke throwing on a corrupt blob or a locked-down
@@ -1081,10 +1107,11 @@ public sealed class MainForm : Form
             // Mark every row "checking" up front, then fetch all apps CONCURRENTLY (HttpClient handles
             // parallel requests; the OS caps connections per host, so this self-throttles). The old
             // sequential loop did ~one network round-trip × 20 in series — seconds of lag on boot.
-            foreach (var row in _rows)
-            {
-                row.SetChecking();
-            }
+            if (!quiet)
+                foreach (var row in _rows)
+                {
+                    row.SetChecking();
+                }
 
             // The relay's editable "New in" lines ride along with the update check (server mode only; null =
             // keep what we have). Applied after the release results, under one SuspendLayout.
@@ -1107,6 +1134,7 @@ public sealed class MainForm : Form
             }));
 
             // Apply outcomes on the UI thread (we're back on it after the await).
+            _uncheckedIds.Clear();
             foreach (var res in results)
             {
                 var row = res.Row;
@@ -1131,13 +1159,18 @@ public sealed class MainForm : Form
                             row.SetState(installed, latest.TagName, asset?.Id, ComputeStatus(installed, latest.TagName, asset != null));
                         }
                         break;
-                    case FetchKind.Unauthorized: unauthorized = true; accessible = false; break;
+                    case FetchKind.Unauthorized: unauthorized = true; accessible = false; _uncheckedIds.Add(row.App.Id); break;
                     case FetchKind.NoRelease:
                         accessible = Versions.DevChannel; row.SetReleases(new List<ReleaseInfo>());
                         row.SetState(installed, null, null, RowStatus.NoRelease); break;
                     case FetchKind.Error:
-                        accessible = true; row.SetState(installed, null, null, RowStatus.Error);
-                        Log.Write($"refresh {row.App.Id} error: {res.ErrorMsg}"); break;
+                        // A scheduled (quiet) check that couldn't reach the feed leaves the row as it was: an offline
+                        // show machine shouldn't turn every row into an error with a Retry button every few hours. The
+                        // launch check and Refresh still show the error.
+                        // Quiet: visibility stays as it was too (a hidden app mustn't appear because the feed was down).
+                        accessible = !quiet || _eligible.Contains(row.App.Id); _uncheckedIds.Add(row.App.Id);
+                        if (!quiet) row.SetState(installed, null, null, RowStatus.Error);
+                        Log.Write($"refresh {row.App.Id} error{(quiet ? " (scheduled check — row left as it was)" : "")}: {res.ErrorMsg}"); break;
                     default: accessible = false; break;   // NoAccess: token can't see this repo → hidden
                 }
                 // Eligible iff installed locally OR the token reached the repo. ReindexList turns that (minus
@@ -1177,7 +1210,12 @@ public sealed class MainForm : Form
                     || (!Locked && _rows.Any(WouldShow)
                         && AuthClient.HasCredentials(_settings, _catalog.DownloadServer)
                         && (updates > 0 || HasAnyToDownload(false)));
-        _downloadAll.Text = _batchRunning ? "Stop  ■" : updates > 0 ? $"Update All ({updates})  ▾" : "Download All  ▾";
+        bool stopping = _batchRunning && _batchCts?.IsCancellationRequested == true;
+        _downloadAll.Text = stopping ? "Stopping…" : _batchRunning ? "Stop  ■" : updates > 0 ? $"Update All ({updates})  ▾" : "Download All  ▾";
+        _downloadAll.Enabled = !stopping;
+        _headerTip.SetToolTip(_downloadAll, _batchRunning
+            ? "Stop after the app that's installing now — the download in progress is cancelled"
+            : "Install or update every app in one go");
         _downloadAll.Visible = show;
         LayoutHeaderButtons();   // the label width changed
     }
@@ -1335,7 +1373,8 @@ public sealed class MainForm : Form
         _tray.ContextMenuStrip = menu;
         _tray.DoubleClick += (_, _) => RestoreFromTray();
         _tray.BalloonTipClicked += (_, _) => { _balloonShowing = false; RestoreFromTray(); };
-        _tray.BalloonTipClosed += (_, _) => { _balloonShowing = false; UpdateTrayVisibility(); };
+        // The icon stays after a notification: hiding it removed the notification from Action Center too.
+        _tray.BalloonTipClosed += (_, _) => { };
         UpdateTrayVisibility();
     }
 
@@ -1353,9 +1392,33 @@ public sealed class MainForm : Form
             launch.DropDownItems.Add(name, null, (_, _) => LaunchKey(key, name));
         if (launch.DropDownItems.Count == 0) launch.DropDownItems.Add(new ToolStripMenuItem("No apps installed") { Enabled = false });
         menu.Items.Add(launch);
-        menu.Items.Add("Check for updates", null, async (_, _) => await RefreshAllAsync(announce: true));
+        menu.Items.Add("Check for updates", null, async (_, _) => await TrayCheckAsync());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Quit", null, (_, _) => { _reallyQuit = true; Close(); });
+    }
+
+    /// <summary>The tray's "Check for updates" always answers: the result (see AfterCheck), or why there is none — a
+    /// check already running, no download access set up, or a check that failed.</summary>
+    private async Task TrayCheckAsync()
+    {
+        try
+        {
+            if (_refreshing) { ShowBalloon("JB Theatre Tools", "Already checking for updates."); return; }
+            if (!AuthClient.HasCredentials(_settings, _catalog.DownloadServer))
+            {
+                ShowBalloon("Can't check for updates", _settings.AuthMode == "server"
+                    ? "Enter the suite passphrase in Settings → Download access first."
+                    : "Add a GitHub token in Settings → Download access first.");
+                return;
+            }
+            if (!await RefreshAllAsync(announce: true))
+                ShowBalloon("Couldn't check for updates", _tokenBanner.Visible ? _tokenBannerText.Text : "Try again in a moment.");
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"tray check failed: {ex.Message}");
+            ShowBalloon("Couldn't check for updates", ex.Message);
+        }
     }
 
     /// <summary>Every installed slot as (install key, name) — pinned apps first, then the list order.</summary>
@@ -1375,6 +1438,15 @@ public sealed class MainForm : Form
 
     private void LaunchKey(string key, string name)
     {
+        // Never start an app while it's being verified / installed / removed (the tray has no busy state of its own).
+        // While it is only downloading it can be opened: the install step asks to quit it (or an automatic update
+        // leaves it for later).
+        if (_slotsInstalling.Contains(key))
+        {
+            MessageBox.Show(this, $"{name} is being installed. Open it when that has finished.", "JB Theatre Tools",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
         try { InstallManager.Shared.Launch(key); Log.Write($"launched {key} (tray)"); }
         catch (Exception ex)
         {
@@ -1432,7 +1504,8 @@ public sealed class MainForm : Form
     /// variant, so a background Full-edition install doesn't hijack the row's display.</summary>
     /// <summary>Everything phase 1 hands to phase 2: the resolved release/asset and the (verified-later) cache file.</summary>
     private sealed record Downloaded(AppRowControl Row, GitHubClient Client, ReleaseInfo Rel, ReleaseAsset Asset,
-                                     string Cache, string AssetName, string? VariantId, string? Tag, bool Unattended);
+                                     string Cache, string AssetName, string? VariantId, string? Tag, bool Unattended,
+                                     bool Lenient = false);
 
     /// <summary>The most recent failure of each row's install (set by FailSlot, cleared when a download starts) —
     /// how a batch tells a real failure from a silent skip or a cancel.</summary>
@@ -1445,10 +1518,14 @@ public sealed class MainForm : Form
     /// dialog immediately; batch runs pass false and show ONE summary at the end instead of halting the batch
     /// on a modal box nobody is there to click.</summary>
     private async Task<Exception?> InstallSlotAsync(AppRowControl row, string? tag, string? variantOverride, bool interactive = true,
-                                                    bool unattended = false, CancellationToken batchToken = default)
+                                                    bool unattended = false, CancellationToken batchToken = default,
+                                                    bool lenient = false)
     {
-        var d = await DownloadSlotAsync(row, tag, variantOverride, interactive, unattended, batchToken);
-        return d == null ? null : await InstallDownloadedAsync(d, interactive);
+        var d = await DownloadSlotAsync(row, tag, variantOverride, interactive, unattended, batchToken, lenient && tag != null);
+        if (d == null) return null;
+        // Only a hand-picked older version may skip the signed-manifest requirement (see InstallPickedVersionRequested).
+        if (lenient && tag != null) d = d with { Lenient = true };
+        return await InstallDownloadedAsync(d, interactive);
     }
 
     /// <summary>Cancels the row's in-flight download (Cancel button / menu). Not an error: the row goes back to how
@@ -1468,11 +1545,13 @@ public sealed class MainForm : Form
         if (_batchCts == null) return;
         Log.Write("batch: stop requested");
         _batchCts.Cancel();
+        RefreshDownloadAllButton();   // "Stopping…" until the app that's installing finishes
     }
 
     /// <summary>Drops a finished download that won't be installed (a stopped batch).</summary>
     private void DiscardDownloaded(Downloaded d)
     {
+        _slotsInFlight.Remove(d.Row.App.InstallKey(d.VariantId));   // a dropped download releases its slot too
         d.Client.Dispose();
         _ = Task.Run(() => InstallManager.TryDelete(d.Cache));
         d.Row.SetPhase(null);
@@ -1481,8 +1560,34 @@ public sealed class MainForm : Form
 
     /// <summary>Phase 1 — resolve the release/asset and download it into the cache (network-bound). Marks the
     /// row busy for the whole slot; on failure records it and ends busy. Returns null on failure or a silent skip.</summary>
+    /// <summary>Install slots between "download starts" and "install finished" — one of each at a time (UI thread only).
+    /// A second request for the same slot (a row click during Update All, the tray, a refresh re-enabling a button)
+    /// used to download to the same cache file concurrently.</summary>
+    private readonly HashSet<string> _slotsInFlight = new();
+
+    /// <summary>Install slots being verified, installed or removed (a subset of the in-flight ones; UI thread only) —
+    /// the only time Launch is off. A slot that is only downloading can still be opened.</summary>
+    private readonly HashSet<string> _slotsInstalling = new();
+
     private async Task<Downloaded?> DownloadSlotAsync(AppRowControl row, string? tag, string? variantOverride, bool interactive,
-                                                      bool unattended = false, CancellationToken batchToken = default)
+                                                      bool unattended = false, CancellationToken batchToken = default,
+                                                      bool lenient = false)
+    {
+        var key = row.App.InstallKey(variantOverride ?? SelectedVariant(row.App));
+        if (!_slotsInFlight.Add(key))
+        {
+            // A skip, not a failure: a batch reads _lastFailure after a null, so an older failure mustn't linger.
+            _lastFailure.Remove(key);
+            Log.Write($"install {key}: already in progress — skipped");
+            return null;
+        }
+        Downloaded? d = null;
+        try { return d = await DownloadSlotCoreAsync(row, tag, variantOverride, interactive, unattended, batchToken, lenient); }
+        finally { if (d == null) _slotsInFlight.Remove(key); }   // handed on: InstallDownloadedAsync releases it
+    }
+
+    private async Task<Downloaded?> DownloadSlotCoreAsync(AppRowControl row, string? tag, string? variantOverride, bool interactive,
+                                                          bool unattended, CancellationToken batchToken, bool lenient)
     {
         var variantId = variantOverride ?? SelectedVariant(row.App);
         _lastFailure.Remove(row.App.InstallKey(variantId));
@@ -1508,11 +1613,19 @@ public sealed class MainForm : Form
                 ? row.Releases
                 : await client.ReleasesAsync(row.App.Owner, row.App.Repo);
             var rel = tag != null
-                ? releases.FirstOrDefault(r => r.TagName == tag)
+                // A development build installs only with Development builds on (a setup file can name one). "1.2.0"
+                // and "v1.2.0" are the same version (the Android launcher exports tags without the "v").
+                ? releases.FirstOrDefault(r => VersionCompare.Equal(r.TagName, tag) && (Versions.DevChannel || !VersionCompare.IsDev(r.TagName)))
                 : Versions.LatestFor(releases, assetName);   // per edition
             if (rel == null) throw new Exception($"Version {tag ?? "latest"} not found.");
+            if (tag != null) tag = rel.TagName;   // the release's real tag from here on
             var asset = rel.Assets.FirstOrDefault(a => a.Name == assetName)
                 ?? throw new Exception($"No Windows asset in {rel.TagName}.");
+            // A strict install (everything but the hand-picked version list) needs signed checksums: say so now
+            // rather than after downloading 300–450 MB that could never pass.
+            if (!lenient && !Versions.HasSignedManifest(rel))
+                throw new Exception($"{rel.TagName} can't be verified: " + InstallManager.StrictFailureReason(
+                    rel.Assets.Any(a => a.Name == "SHA256SUMS") ? VerifyResult.Unsigned : VerifyResult.NoManifest, assetName) + ".");
 
             // Refuse up front rather than failing half-way through an extract on a full disk.
             var shortfall = DiskSpace.Shortfall(DiskSpace.Required(asset.Size, assetName), InstallManager.Shared.FreeSpace());
@@ -1552,6 +1665,17 @@ public sealed class MainForm : Form
     /// the row. Always ends the row's busy state and disposes the client.</summary>
     private async Task<Exception?> InstallDownloadedAsync(Downloaded d, bool interactive)
     {
+        var key = d.Row.App.InstallKey(d.VariantId);
+        try { return await InstallDownloadedCoreAsync(d, interactive); }
+        finally
+        {
+            _slotsInFlight.Remove(key);
+            if (_slotsInstalling.Remove(key)) d.Row.RefreshLaunch();
+        }
+    }
+
+    private async Task<Exception?> InstallDownloadedCoreAsync(Downloaded d, bool interactive)
+    {
         var (row, rel, asset, cache, assetName, variantId, tag) = (d.Row, d.Rel, d.Asset, d.Cache, d.AssetName, d.VariantId, d.Tag);
         var slotKey = row.App.InstallKey(variantId);
         var fromVersion = InstallManager.Shared.InstalledVersion(slotKey);   // for the history line
@@ -1565,18 +1689,29 @@ public sealed class MainForm : Form
         try
         {
             using var client = d.Client;
+            // From here to the end the slot's files are about to change: Launch goes off (it stayed on while this
+            // was only downloading).
+            _slotsInstalling.Add(slotKey);
+            row.RefreshLaunch();
             row.SetPhase("Verifying…", indeterminate: true);
             var verification = await InstallManager.VerifyDownloadAsync(cache, asset, rel, row.App.Owner, row.App.Repo, client);
-            // Strict for current releases: a latest install (tag == null) MUST checksum-verify — every
-            // current release ships a correct SHA256SUMS, so a missing/incomplete manifest here is
-            // anomalous → abort. Explicit older-tag installs (version picker) stay verify-if-present. A
-            // hash MISMATCH always aborts (it throws from VerifyDownloadAsync) regardless of tag.
-            if (tag == null && verification != VerifyResult.Verified)
+            // Strict unless the user hand-picked an older version from the ⋯ list (which may predate the signed
+            // manifest): latest, roll back, back to release and setup-file installs MUST verify against the signed
+            // SHA256SUMS. A hash MISMATCH always aborts (it throws from VerifyDownloadAsync).
+            if (!d.Lenient && verification != VerifyResult.Verified)
             {
                 _ = Task.Run(() => InstallManager.TryDelete(cache));   // 300-450 MB unlink: never on the UI thread
                 var reason = InstallManager.StrictFailureReason(verification, assetName);
                 Log.Write($"install {row.App.Id} {rel.TagName}: BLOCKED (strict) — {reason}");
                 throw new Exception($"Couldn't verify the download — {reason}. Install aborted for safety.");
+            }
+            // Show lock turned on while this downloaded or verified: install nothing, and never raise the "close it
+            // first?" question below (it brings the launcher to the front, over the show).
+            if (BlockedByLock($"install {row.App.Id} {rel.TagName}"))
+            {
+                row.SetPhase(null);
+                _ = Task.Run(() => InstallManager.TryDelete(cache));
+                return null;
             }
             // The app is open: ASK instead of failing with "file in use". Yes → close it (it may prompt to
             // save) and wait for it to exit; No → skip quietly, the row keeps its Update button.
@@ -1596,6 +1731,15 @@ public sealed class MainForm : Form
                 var answer = MessageBox.Show(this,
                     $"{name} is open. Close it to install the update?\n\nIf it has unsaved work it will ask you first.",
                     $"{name} is open", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                // Show lock came on while the question was up: close nothing and install nothing, whatever the answer.
+                if (Locked)
+                {
+                    foreach (var p in running) p.Dispose();
+                    row.SetPhase(null);
+                    _ = Task.Run(() => InstallManager.TryDelete(cache));
+                    Log.Write($"install {row.App.Id} {rel.TagName}: not installed — show lock is on");
+                    return null;
+                }
                 if (answer != DialogResult.Yes)
                 {
                     row.SetPhase(null);
@@ -1613,6 +1757,13 @@ public sealed class MainForm : Form
                     _ = Task.Run(() => InstallManager.TryDelete(cache));
                     throw new Exception($"{name} didn't close — close it, then try again.");
                 }
+            }
+            // …and again after the "close it first?" wait, immediately before anything on disk changes.
+            if (BlockedByLock($"install {row.App.Id} {rel.TagName}"))
+            {
+                row.SetPhase(null);
+                _ = Task.Run(() => InstallManager.TryDelete(cache));
+                return null;
             }
             row.SetPhase("Installing…", indeterminate: true);
             // Everything disk-heavy OFF the UI thread in one Task.Run: the extract/copy (seconds for a Full
@@ -1695,6 +1846,20 @@ public sealed class MainForm : Form
         var token = _batchCts.Token;
         RefreshDownloadAllButton();   // the header button becomes "Stop"
         var failures = new List<(string name, string msg)>();
+        // The list is fixed when the batch starts, but the person can keep working: each slot is re-checked just before
+        // its turn (and before its look-ahead download starts) so the batch never undoes or repeats what they did.
+        var installedAtStart = work.Select(w => InstallManager.Shared.InstalledVersion(w.row.App.InstallKey(w.vid))).ToList();
+        string? SkipReason(int i)
+        {
+            var (row, vid, tag) = work[i];
+            var now = InstallManager.Shared.InstalledVersion(row.App.InstallKey(vid));
+            // Held after the batch started: an update (latest, already installed) leaves it where it is.
+            if (HeldNow(row, tag, now)) return "is held";
+            if (installedAtStart[i] != null && now == null) return "was removed meanwhile";
+            var target = tag ?? Versions.LatestFor(row.Releases, row.App.WindowsAsset(vid))?.TagName;
+            if (now != null && target != null && VersionCompare.Equal(now, target)) return $"is already at {VersionCompare.Display(target)}";
+            return null;
+        }
         Task<Downloaded?>? next = null;
         try
         {
@@ -1703,30 +1868,36 @@ public sealed class MainForm : Form
                 if (token.IsCancellationRequested) break;
                 var (row, vid, tag) = work[i];
                 var key = row.App.InstallKey(vid);
-                var before = InstallManager.Shared.InstalledVersion(key);
-                // Held after the batch started: an update (latest, already installed) leaves it where it is.
-                if (HeldNow(row, tag, before))
+                if (SkipReason(i) is { } reason)
                 {
-                    if (_rowCts.TryGetValue(row, out var lookAhead)) lookAhead.Cancel();   // no point finishing it
-                    if (next != null) { var skipped = await next; if (skipped != null) DiscardDownloaded(skipped); }
+                    if (next != null)
+                    {
+                        if (_rowCts.TryGetValue(row, out var lookAhead)) lookAhead.Cancel();   // its look-ahead: no point finishing it
+                        var skipped = await next;
+                        if (skipped != null) DiscardDownloaded(skipped);
+                    }
                     next = null;
-                    Log.Write($"{title}: {row.App.Id} is held — skipped");
+                    Log.Write($"{title}: {row.App.Id} {reason} — skipped");
                     continue;
                 }
+                var before = InstallManager.Shared.InstalledVersion(key);
                 var current = next ?? DownloadSlotAsync(row, tag, vid, interactive: false, unattended, token);
                 var d = await current;                                   // download N done (or failed + recorded)
                 next = null;
-                if (i + 1 < work.Count && !token.IsCancellationRequested) // start download N+1 now…
+                if (i + 1 < work.Count && !token.IsCancellationRequested && SkipReason(i + 1) == null)   // start download N+1 now…
                 {
                     var (nrow, nvid, ntag) = work[i + 1];
-                    if (!HeldNow(nrow, ntag, InstallManager.Shared.InstalledVersion(nrow.App.InstallKey(nvid))))
-                        next = DownloadSlotAsync(nrow, ntag, nvid, interactive: false, unattended, token);
+                    next = DownloadSlotAsync(nrow, ntag, nvid, interactive: false, unattended, token);
                 }
-                Exception? err;
-                if (d != null && HeldNow(row, tag, before)) { DiscardDownloaded(d); err = null; }
+                Exception? err = null;
+                if (d != null && SkipReason(i) is { } late)
+                {
+                    DiscardDownloaded(d);
+                    Log.Write($"{title}: {row.App.Id} {late} — skipped");
+                }
                 else if (d != null) err = await InstallDownloadedAsync(d, interactive: false);   // …verify + extract N meanwhile
                 else err = _lastFailure.TryGetValue(key, out var fe) ? fe : null;                  // a skip or cancel isn't a failure
-                if (err != null && IsTransient(err) && !token.IsCancellationRequested && !Locked)
+                if (err != null && IsTransient(err) && !token.IsCancellationRequested && !Locked && SkipReason(i) == null)
                 {
                     Log.Write($"install {row.App.Id}: retrying once after a transient error: {err.Message}");
                     await Task.Delay(2000);
@@ -1778,10 +1949,16 @@ public sealed class MainForm : Form
         if (BlockedByLock($"uninstall {row.App.Id}")) return;
         if (MessageBox.Show(this, $"Uninstall {row.DisplayName}?", "Uninstall",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        // Re-check after the dialog: an install (or show lock) may have started while it was open.
+        if (row.IsBusy || BlockedByLock($"uninstall {row.App.Id}")) return;
         // Uninstalls the SELECTED variant's slot only (a sibling variant, if installed, stays). The delete runs
         // off the UI thread: a one-dir Full edition is thousands of files (300–450 MB), and Directory.Delete
         // of that froze the whole window for seconds. The row shows the same marquee it uses for Verifying.
         var key = InstallKey(row.App);
+        // The slot is in flight while it's removed, like an install: Update All / Ctrl+U / a setup import can't start
+        // downloading it meanwhile, and it can't be launched (tray included).
+        if (!_slotsInFlight.Add(key)) { Log.Write($"uninstall {key}: an install of it is in progress — not started"); return; }
+        _slotsInstalling.Add(key);
         var from = InstallManager.Shared.InstalledVersion(key);
         var name = row.DisplayName;
         row.SetBusy(true);
@@ -1806,6 +1983,8 @@ public sealed class MainForm : Form
         }
         finally
         {
+            _slotsInFlight.Remove(key);
+            _slotsInstalling.Remove(key);
             row.SetBusy(false);
             RefreshDownloadAllButton();
         }
@@ -1813,6 +1992,8 @@ public sealed class MainForm : Form
 
     private void Launch(AppRowControl row)
     {
+        // The button is off while the slot is verified / installed / removed; a double-click must not get past that.
+        if (_slotsInstalling.Contains(InstallKey(row.App))) return;
         try
         {
             InstallManager.Shared.Launch(InstallKey(row.App));
@@ -1933,13 +2114,14 @@ public sealed class MainForm : Form
         var (toNotify, pendingKeys) = UpdatePolicy.Notify(pending, _settings.NotifiedUpdates);
         // An app whose check failed this time keeps what it was announced at.
         var uncheckedIds = _rows.Where(r => r.Status == RowStatus.Error).Select(r => r.App.Id).ToHashSet();
+        uncheckedIds.UnionWith(_uncheckedIds);
         var notified = UpdatePolicy.Remembered(pendingKeys, _settings.NotifiedUpdates, uncheckedIds);
         if (!notified.SequenceEqual(_settings.NotifiedUpdates)) { _settings.NotifiedUpdates = notified; _settings.Save(); }
         bool foreground = IsForeground();
         if (announce && !foreground)
             ShowBalloon(pending.Count == 0 ? "JB Theatre Tools" : UpdatePolicy.NotificationTitle(pending.Count),
                         pending.Count == 0 ? "Everything is up to date." : UpdatePolicy.NotificationBody(pending));
-        else if (toNotify.Count > 0 && _settings.NotifyUpdates && !foreground)
+        else if (toNotify.Count > 0 && _settings.NotifyUpdates && !foreground && !Locked)
             ShowBalloon(UpdatePolicy.NotificationTitle(toNotify.Count), UpdatePolicy.NotificationBody(toNotify));
         _ = AutoUpdateAsync();
     }
@@ -1952,16 +2134,24 @@ public sealed class MainForm : Form
         {
             if (!_settings.AutoInstallUpdates || Locked || _batchRunning || _rows.Any(r => r.IsBusy)) return;
             if (!AuthClient.HasCredentials(_settings, _catalog.DownloadServer)) return;
-            var work = new List<(AppRowControl row, string? vid, string? tag)>();
-            foreach (var w in UpdateWork())
+            var candidates = UpdateWork();
+            if (candidates.Count == 0) return;
+            // Which apps are open: a walk of the process list per slot — off the UI thread.
+            var keys = candidates.Select(w => w.row.App.InstallKey(w.vid)).ToList();
+            var open = await Task.Run(() => keys.Select(k =>
             {
-                var procs = InstallManager.Shared.RunningInstances(w.row.App.InstallKey(w.vid));
-                bool open = procs.Length > 0;
+                var procs = InstallManager.Shared.RunningInstances(k);
                 foreach (var p in procs) p.Dispose();
-                if (open) { Log.Write($"automatic update: {w.row.App.Id} is open — left for later"); continue; }
-                work.Add(w);
+                return procs.Length > 0;
+            }).ToList());
+            var work = new List<(AppRowControl row, string? vid, string? tag)>();
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                if (open[i]) { Log.Write($"automatic update: {candidates[i].row.App.Id} is open — left for later"); continue; }
+                work.Add(candidates[i]);
             }
-            if (work.Count == 0) return;
+            // Anything may have started (or show lock come on) during that await.
+            if (work.Count == 0 || Locked || _batchRunning || _rows.Any(r => r.IsBusy)) return;
             Log.Write($"automatic update: {work.Count} slot(s)");
             var done = await RunSlotsAsync(work, "Automatic update", unattended: true);
             if (done.Count > 0 && _settings.NotifyUpdates && !IsForeground())
@@ -1970,16 +2160,24 @@ public sealed class MainForm : Form
         catch (Exception ex) { Log.Write($"automatic update failed: {ex.Message}"); }
     }
 
-    /// <summary>Once a minute: run a check when "While open, check every…" says one is due (only in Every-launch
+    /// <summary>Once a minute: run a check when "While open, check again" says one is due (only in Every-launch
     /// mode, and never on top of other work).</summary>
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool IsWindowEnabled(IntPtr hWnd);
+
     private async Task ScheduledTickAsync()
     {
         try
         {
             if (_settings.UpdateMode != "everyLaunch" || _refreshing || _batchRunning || _rows.Any(r => r.IsBusy)) return;
+            // Show lock: nothing happens by itself during a show. No credentials: nothing to check.
+            if (Locked || !AuthClient.HasCredentials(_settings, _catalog.DownloadServer)) return;
+            // A dialog is open (Uninstall? / Roll back? / Settings / a message box): WinForms timers still tick under
+            // it, and a check + automatic update could start underneath the user's decision.
+            if (IsHandleCreated && !IsWindowEnabled(Handle)) return;
             if (!UpdatePolicy.IsDue(_lastCheck, DateTimeOffset.UtcNow, _settings.AutoCheckInterval)) return;
             Log.Write("scheduled update check");
-            await RefreshAllAsync();
+            await RefreshAllAsync(quiet: true);
             await CheckLauncherUpdateAsync();
         }
         catch (Exception ex) { Log.Write($"scheduled check failed: {ex.Message}"); }
@@ -1991,7 +2189,8 @@ public sealed class MainForm : Form
 
     private void ShowReleaseNotes(AppRowControl row, IWin32Window owner)
     {
-        using var dlg = new ReleaseNotesDialog($"{row.App.Name} — release notes", row.Releases, row.Installed,
+        // Development builds only with the Development builds switch on (as in the ⋯ version list).
+        using var dlg = new ReleaseNotesDialog($"{row.App.Name} — release notes", Versions.Offered(row.Releases), row.Installed,
                                                Theme.IsDark(_settings.Appearance));
         dlg.ShowDialog(owner);
     }
@@ -2020,7 +2219,7 @@ public sealed class MainForm : Form
         AppDetailsDialog? dlg = null;
         dlg = new AppDetailsDialog(details, Theme.IsDark(_settings.Appearance),
             installed == null ? null : () => Task.Run(() => InstallManager.Shared.SizeOnDisk(key)),
-            row.Releases.Count > 0 ? () => ShowReleaseNotes(row, (IWin32Window?)dlg ?? this) : null);
+            Versions.Offered(row.Releases).Count > 0 ? () => ShowReleaseNotes(row, (IWin32Window?)dlg ?? this) : null);
         using (dlg) dlg.ShowDialog(this);
     }
 
@@ -2036,7 +2235,10 @@ public sealed class MainForm : Form
         // Only ever BACK: after a roll back (or an older install from the picker) "previous" is the newer one.
         if (prev == null || !VersionCompare.IsNewer(installed, prev)) return null;
         var asset = row.App.WindowsAsset(vid);
-        return row.Releases.FirstOrDefault(r => VersionCompare.Equal(r.TagName, prev) && r.Assets.Any(a => a.Name == asset))?.TagName;
+        // Roll back installs strictly, so only offer a release that can pass: signed checksums, and never a
+        // development build on a PC without Development builds switched on.
+        return Versions.Offered(row.Releases).FirstOrDefault(r => VersionCompare.Equal(r.TagName, prev)
+            && r.Assets.Any(a => a.Name == asset) && Versions.HasSignedManifest(r))?.TagName;
     }
 
     /// <summary>Roll back to the previous version, then hold the app there so Update All leaves it alone.</summary>
@@ -2050,6 +2252,7 @@ public sealed class MainForm : Form
                 "It's then held at that version, so Update All and automatic updates leave it alone — release the hold " +
                 "from its ⋯ menu when you're ready.",
                 "Roll back", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        if (row.IsBusy || BlockedByLock($"roll back {row.App.Id}")) return;   // started / locked while the dialog was open
         await InstallVersionAsync(row, tag);
         if (VersionCompare.Equal(InstallManager.Shared.InstalledVersion(InstallKey(row.App)) ?? "", tag))
         {
@@ -2070,13 +2273,13 @@ public sealed class MainForm : Form
         var lockItem = new ToolStripMenuItem("Show lock")
         {
             Checked = Locked, ShortcutKeyDisplayString = "Ctrl+L",
-            ToolTipText = "Pause installs, updates and removals — launching still works",
+            ToolTipText = "Pause installs, updates and uninstalls — launching still works",
         };
-        lockItem.Click += (_, _) => SetShowLock(!Locked);
+        lockItem.Click += (_, _) => RequestShowLock(!Locked);
         menu.Items.Add(lockItem);
         menu.Items.Add(new ToolStripSeparator());
         var history = new ToolStripMenuItem("Activity…") { ShortcutKeyDisplayString = "Ctrl+H" };
-        history.Click += (_, _) => ShowHistory();
+        history.Click += async (_, _) => await ShowHistoryAsync();
         menu.Items.Add(history);
         var export = new ToolStripMenuItem("Export setup…") { ToolTipText = "Save which apps are installed, to set up another machine the same way" };
         export.Click += (_, _) => ExportSetup();
@@ -2085,15 +2288,25 @@ public sealed class MainForm : Form
         import.Click += async (_, _) => await ImportSetupAsync();
         menu.Items.Add(import);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Copy diagnostics", null, (_, _) => CopyDiagnostics());
+        menu.Items.Add("Copy diagnostics", null, (_, _) => CopyDiagnostics(this));
         menu.Items.Add("Open log", null, (_, _) => Log.Open());
         menu.Show(_moreBtn, new Point(0, _moreBtn.Height));
     }
 
-    private void ShowHistory()
+    /// <summary>Loading waits for queued history writes (up to 5 s), so it runs off the UI thread; the window opens
+    /// once it's read.</summary>
+    private async Task ShowHistoryAsync()
     {
-        using var dlg = new HistoryDialog(History.Load(), Theme.IsDark(_settings.Appearance));
-        dlg.ShowDialog(this);
+        if (_historyOpening) return;   // Ctrl+H pressed again while it loads
+        _historyOpening = true;
+        try
+        {
+            var events = await Task.Run(History.Load);
+            using var dlg = new HistoryDialog(events, Theme.IsDark(_settings.Appearance));
+            dlg.ShowDialog(this);
+        }
+        catch (Exception ex) { Log.Write($"activity: {ex.Message}"); }
+        finally { _historyOpening = false; }
     }
 
     private void ExportSetup()
@@ -2148,7 +2361,7 @@ public sealed class MainForm : Form
     {
         if (Locked)
         {
-            MessageBox.Show(this, "Show lock is on — unlock it to import a setup.", "Import setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "Show lock is on — turn it off to import a setup.", "Import setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
         using var ofd = new OpenFileDialog
@@ -2170,7 +2383,9 @@ public sealed class MainForm : Form
         var catalog = _catalog.Apps.Select(a => new SetupPlanner.CatalogEntry(a.Id, a.Name,
             (a.Variants ?? new List<AppVariant>()).Select(v => (v.Id, v.Label)).ToList())).ToList();
         var installedKeys = new HashSet<string>(AllSlots().Where(x => InstallManager.Shared.InstalledVersion(x.key) != null).Select(x => x.key));
-        var plan = SetupPlanner.Build(profile, catalog, installedKeys);
+        // A development build named in the file installs only with Development builds on here: otherwise the preview
+        // lists it under Skipped rather than promising it.
+        var plan = SetupPlanner.Build(profile, catalog, installedKeys, allowDevTags: Versions.DevChannel);
         // An edition with no Windows build (a Mac-only Full edition) can't install here.
         foreach (var i in plan.ToInstall.ToList())
         {
@@ -2186,7 +2401,7 @@ public sealed class MainForm : Form
         // Something may have started while the dialogs were open (an automatic update, show lock).
         if (Locked)
         {
-            MessageBox.Show(this, "Show lock is on — unlock it to import a setup.", "Import setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "Show lock is on — turn it off to import a setup.", "Import setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
         if (_batchRunning && plan.ToInstall.Count > 0)
@@ -2309,7 +2524,7 @@ public sealed class MainForm : Form
                 if (!Locked && !_batchRunning && UpdatesAvailable() > 0) _ = UpdateAllAsync();
                 return true;
             case Keys.Control | Keys.L:
-                SetShowLock(!Locked);
+                RequestShowLock(!Locked);
                 return true;
             case Keys.Control | Keys.D1:
                 if (_settings.ViewMode == "grid") ToggleViewMode();
@@ -2318,7 +2533,7 @@ public sealed class MainForm : Form
                 if (_settings.ViewMode != "grid") ToggleViewMode();
                 return true;
             case Keys.Control | Keys.H:
-                ShowHistory();
+                _ = ShowHistoryAsync();
                 return true;
         }
         return base.ProcessCmdKey(ref msg, keyData);
@@ -2353,17 +2568,19 @@ public sealed class MainForm : Form
         _ => "unknown",
     };
 
-    private void CopyDiagnostics()
+    /// <param name="owner">The window the confirmation sits on: the Settings dialog when it was asked for there (the
+    /// main window is disabled under it), else this one.</param>
+    private void CopyDiagnostics(IWin32Window owner)
     {
         try
         {
             Clipboard.SetText(BuildDiagnostics());
-            MessageBox.Show(this, "Diagnostics copied — paste them into a message to James. They contain no passwords or tokens.",
+            MessageBox.Show(owner, "Diagnostics copied — paste them into a message when you ask for help. They contain no passwords or tokens.",
                             "Copy diagnostics", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "Copy diagnostics", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(owner, ex.Message, "Copy diagnostics", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 

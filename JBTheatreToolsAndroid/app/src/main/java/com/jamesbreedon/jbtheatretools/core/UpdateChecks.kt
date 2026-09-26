@@ -26,18 +26,24 @@ object AppVisibility {
 object UpdateAnnouncer {
     private const val LAUNCHER_ID = "jbtheatretools"
 
-    fun announce(settings: Settings, notifier: Notifier, statuses: List<AppStatus>, launcherUpdate: String?) {
-        val pending = statuses.filter { it.updatePending && it.latestVersion != null }
+    /** [busy]: apps being installed (or queued in an Update all / import) right now — never announced. */
+    fun announce(
+        settings: Settings, notifier: Notifier, statuses: List<AppStatus>, launcherUpdate: String?,
+        busy: Set<String> = ActiveInstalls.ids(),
+    ) {
+        val pending = statuses.filter { it.updatePending && it.latestVersion != null && it.app.id !in busy }
             .map { UpdatePolicy.Pending(it.app.id, it.app.name, it.latestVersion!!) } +
-            listOfNotNull(launcherUpdate?.let { UpdatePolicy.Pending(LAUNCHER_ID, "JB Theatre Tools", it) })
+            listOfNotNull(launcherUpdate?.takeIf { LAUNCHER_ID !in busy }?.let { UpdatePolicy.Pending(LAUNCHER_ID, "JB Theatre Tools", it) })
         val already = settings.notifiedUpdates
         val (toNotify, notified) = UpdatePolicy.notify(pending, already)
         // An app whose check failed (no latest version) keeps what it was announced at; so does the launcher, whose
         // check reports "nothing" and "failed" alike (a stale launcher key only ever matches an installed version).
-        val unchecked = statuses.filter { it.latestVersion == null }.map { it.app.id }.toSet() +
+        // An app that's installing keeps its key too (if that install fails, the update isn't announced twice).
+        val unchecked = statuses.filter { it.latestVersion == null }.map { it.app.id }.toSet() + busy +
             (if (launcherUpdate == null) setOf(LAUNCHER_ID) else emptySet())
         settings.notifiedUpdates = UpdatePolicy.remembered(notified, already, unchecked).toSet()
-        if (toNotify.isNotEmpty() && settings.notifyUpdates && !AppVisibility.foreground) {
+        // Show lock: nothing announces itself during a show.
+        if (toNotify.isNotEmpty() && settings.notifyUpdates && !settings.showLock && !AppVisibility.foreground) {
             notifier.post(UpdatePolicy.notificationTitle(toNotify.size), UpdatePolicy.notificationBody(toNotify))
         }
     }
@@ -61,7 +67,8 @@ object UpdateCheckScheduler {
         }
         if (js.getPendingJob(JOB_ID)?.intervalMillis == interval) return   // already scheduled at this interval
         val job = JobInfo.Builder(JOB_ID, ComponentName(context, UpdateCheckJob::class.java))
-            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_UNMETERED)   // a release check never spends mobile data
+            .setRequiresBatteryNotLow(true)
             .setPeriodic(interval)
             .build()
         runCatching { js.schedule(job) }
@@ -78,7 +85,7 @@ class UpdateCheckJob : JobService() {
             try {
                 val repo = LauncherRepository(applicationContext)
                 val notifier = Notifier(applicationContext)
-                if (repo.settings.notifyUpdates && notifier.canPost() && repo.hasCredential()) {
+                if (repo.settings.notifyUpdates && !repo.settings.showLock && notifier.canPost() && repo.hasCredential()) {
                     val statuses = repo.refresh()
                     val launcherUpdate = repo.checkLauncherUpdate()
                     UpdateAnnouncer.announce(repo.settings, notifier, statuses, launcherUpdate)

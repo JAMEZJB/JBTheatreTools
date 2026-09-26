@@ -16,15 +16,19 @@ enum RelativeAge {
         }
     }
 
-    /// Parses GitHub's `published_at` (ISO 8601, UTC); nil when absent or malformed.
+    /// Parses GitHub's `published_at` (ISO 8601, UTC); nil when absent or malformed. Shared formatters: this runs in
+    /// every row's render, and building an ISO8601DateFormatter each time is the expensive part.
     static func parseISO(_ iso: String?) -> Date? {
         guard let iso = iso?.trimmingCharacters(in: .whitespaces), !iso.isEmpty else { return nil }
-        let plain = ISO8601DateFormatter()
-        if let d = plain.date(from: iso) { return d }
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: iso)
+        if let d = isoPlain.date(from: iso) { return d }
+        return isoFractional.date(from: iso)
     }
+    private static let isoPlain = ISO8601DateFormatter()
+    private static let isoFractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 
     /// "12 Sep 2026" in the given calendar's time zone (the details and release-notes lines).
     static func shortDate(_ date: Date, calendar: Calendar = .current) -> String {

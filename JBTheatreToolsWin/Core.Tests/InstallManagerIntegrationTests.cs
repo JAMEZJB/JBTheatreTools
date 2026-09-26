@@ -164,5 +164,34 @@ public sealed class InstallManagerIntegrationTests : IDisposable
         Assert.True(File.Exists(old));
     }
 
+    [Fact]
+    public void RemovesOldVersionsKeptAsideOnTheSlotsNextInstallOrUninstall()
+    {
+        manager.Install(app, "v1", Exe(), "Demo.exe", false);
+        manager.Install(app, "v1", Exe(), "Demo.exe", false, "full");
+        string directory = Path.Combine(manager.AppsDir, app.Id);
+        string Aside(string slot, TimeSpan age)
+        {
+            string d = Path.Combine(directory, slot + "-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(d);
+            File.WriteAllText(Path.Combine(d, "Demo.exe"), "old");
+            Directory.SetCreationTimeUtc(d, DateTime.UtcNow - age);
+            return d;
+        }
+        string stale = Aside("demo", TimeSpan.FromHours(2));
+        string recent = Aside("demo", TimeSpan.FromMinutes(1));        // maybe another process's install in flight
+        string sibling = Aside("demo@full", TimeSpan.FromHours(2));   // another edition's: only its own slot cleans it
+        string current = manager.InstalledPath("demo")!;
+        string next = manager.Install(app, "v2", Exe(), "Demo.exe", false);
+        Assert.False(Directory.Exists(stale));
+        Assert.True(Directory.Exists(recent));
+        Assert.True(Directory.Exists(sibling));
+        Assert.False(File.Exists(current));                           // the replaced version: removed as before
+        Assert.True(File.Exists(next));
+        manager.Uninstall("demo@full");
+        Assert.False(Directory.Exists(sibling));
+        Assert.True(File.Exists(next));
+    }
+
     public void Dispose() => Directory.Delete(root, recursive: true);
 }

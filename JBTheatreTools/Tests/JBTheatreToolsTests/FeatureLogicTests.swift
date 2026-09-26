@@ -85,7 +85,7 @@ final class FeatureLogicTests: XCTestCase {
         XCTAssertEqual(UpdatePolicy.interval("24h"), 86_400)
         XCTAssertEqual(UpdatePolicy.interval("garbage"), 14_400)
         XCTAssertEqual(UpdatePolicy.interval(nil), 14_400)
-        XCTAssertEqual(UpdatePolicy.intervals[0].raw, "4h")
+        XCTAssertTrue(UpdatePolicy.intervals.contains { $0.raw == UpdatePolicy.defaultInterval })
         let now = date("2026-09-25T12:00:00Z")
         XCTAssertFalse(UpdatePolicy.isDue(lastCheck: nil, now: now, raw: "off"))
         XCTAssertTrue(UpdatePolicy.isDue(lastCheck: nil, now: now, raw: "4h"))
@@ -239,6 +239,28 @@ final class FeatureLogicTests: XCTestCase {
         XCTAssertTrue(s.contains("Skipped:\n  • "))
         XCTAssertTrue(SetupPlanner.summary(SetupPlanner.build(SetupProfile(), catalog: catalog, installedKeys: [])).hasPrefix("Nothing to install"))
         XCTAssertEqual(SetupProfile.suggestedFileName(date("2026-09-25T23:00:00Z"), calendar: utc), "JB Theatre Tools setup 2026-09-25.json")
+    }
+
+    func testSetupSkipsDevBuildsWhenDevIsOff() {
+        let file = SetupProfile(apps: [.init(id: "dmx", variant: nil, version: "v1.3.0-dev.2", held: true),
+                                       .init(id: "psn", variant: nil, version: "1.6.1", held: true)])
+        let off = SetupPlanner.build(file, catalog: catalog, installedKeys: [], allowDevTags: false)
+        XCTAssertEqual(off.toInstall.map(\.appId), ["psn"])
+        XCTAssertEqual(off.holdIds, ["psn"])           // the skipped dev entry isn't held either
+        XCTAssertEqual(off.skipped, ["DMX Tools v1.3.0-dev.2 — a development build (not switched on here)"])
+        let on = SetupPlanner.build(file, catalog: catalog, installedKeys: [], allowDevTags: true)
+        XCTAssertEqual(on.toInstall.map(\.appId), ["dmx", "psn"])
+        XCTAssertEqual(on.toInstall[0].tag, "v1.3.0-dev.2")
+    }
+
+    func testSignedManifestNeedsBothFiles() {
+        func rel(_ names: [String]) -> ReleaseInfo {
+            ReleaseInfo(tagName: "v1.0.0", assets: names.enumerated().map { ReleaseAsset(id: $0.offset, name: $0.element, size: 1) },
+                        prerelease: false, draft: false)
+        }
+        XCTAssertTrue(AppState.hasSignedManifest(rel(["A.zip", "SHA256SUMS", "SHA256SUMS.minisig"])))
+        XCTAssertFalse(AppState.hasSignedManifest(rel(["A.zip", "SHA256SUMS"])))
+        XCTAssertFalse(AppState.hasSignedManifest(rel(["A.zip"])))
     }
 
     func testDiskSpace() {

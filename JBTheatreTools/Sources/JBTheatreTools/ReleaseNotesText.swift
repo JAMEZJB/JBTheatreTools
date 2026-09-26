@@ -42,15 +42,30 @@ enum ReleaseNotesText {
         Range(m.range(at: i), in: s).map { String(s[$0]) } ?? ""
     }
 
+    /// Memoised: the notes view renders inside a sheet that re-renders on every model publish (e.g. through a whole
+    /// Download All), and the conversion is ~13 regex passes per line.
+    private static let memo = NSCache<NSString, NSString>()
+
     static func plain(_ markdown: String?) -> String {
-        guard let markdown, !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return empty }
+        guard let markdown else { return empty }
+        if let hit = memo.object(forKey: markdown as NSString) { return hit as String }
+        let out = convert(markdown)
+        memo.setObject(out as NSString, forKey: markdown as NSString)
+        return out
+    }
+
+    private static func convert(_ raw: String) -> String {
+        // Release bodies are untrusted input: cap the whole body AND each line BEFORE any regex runs, so a hostile
+        // 100k-character single line can't make the lookaround patterns crawl on the main thread.
+        let markdown = String(raw.prefix(maxLength * 2))
+        guard !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return empty }
         var text = markdown.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
         text = replace(comment, text, "")
 
         var lines: [String] = []
         var inFence = false
-        for raw in text.components(separatedBy: "\n") {
-            var line = trimEnd(raw)
+        for rawLine in text.components(separatedBy: "\n") {
+            var line = trimEnd(String(rawLine.prefix(maxLength + 1)))   // +1: the final cap still sees the overflow and adds "…"
             if firstMatch(fence, line) != nil { inFence.toggle(); continue }
             if inFence { lines.append(line); continue }
             if firstMatch(rule, line) != nil { lines.append(""); continue }

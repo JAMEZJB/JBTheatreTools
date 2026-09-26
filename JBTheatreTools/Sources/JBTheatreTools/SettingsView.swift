@@ -20,12 +20,13 @@ struct SettingsView: View {
     @State private var devRevealed = false
     @AppStorage(AppState.devChannelKey) private var devChannel = false
     @AppStorage(AppState.autoCheckKey) private var autoCheck = UpdatePolicy.defaultInterval
-    @AppStorage(AppState.notifyKey) private var notifyUpdates = true
+    @AppStorage(AppState.notifyKey) private var notifyUpdates = false
     @AppStorage(AppState.autoInstallKey) private var autoInstall = false
     @AppStorage(AppState.menuBarKey) private var showMenuBar = false
     @State private var storage: (installed: Int64, cache: Int64)?
     @State private var clearingCache = false
     @State private var diagnosticsCopied = false
+    @State private var notificationsRefused = false
 
     /// The kit's panel heading (`.panel > h2`): a 10.5/600 caps micro-label in the tertiary text tone.
     private func panelLabel(_ title: String, _ symbol: String) -> some View {
@@ -38,12 +39,20 @@ struct SettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Settings").font(JBFont.title).foregroundStyle(Color.jbText)
-            HStack(alignment: .top, spacing: 18) {
-                VStack(alignment: .leading, spacing: 18) { primaryColumn }
-                    .frame(width: 430)
-                VStack(alignment: .leading, spacing: 18) { secondaryColumn }
-                    .frame(width: 430)
+                .padding(.horizontal, 22)
+            // The panels scroll only when the screen is too short for them (an older 13" laptop), so Done stays visible.
+            // The scroll view spans the sheet edge to edge, so its scroller sits in the margin, not over the panels.
+            ScrollView(.vertical) {
+                HStack(alignment: .top, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 18) { primaryColumn }
+                        .frame(width: 430)
+                    VStack(alignment: .leading, spacing: 18) { secondaryColumn }
+                        .frame(width: 430)
+                }
+                .padding(.horizontal, 22)
             }
+            .frame(maxHeight: Self.panelsMaxHeight)
+            .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Open Log") { AppLog.shared.open() }
                     .tint(.selectorBlue)
@@ -52,8 +61,9 @@ struct SettingsView: View {
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
+            .padding(.horizontal, 22)
         }
-        .padding(22)
+        .padding(.vertical, 22)
         .frame(width: 922)
         .background(Color.jbGround)
         .tint(.jbAccent)
@@ -101,7 +111,7 @@ struct SettingsView: View {
         }
     }
 
-    /// Access, update checks, appearance, window, install location, hidden apps.
+    /// Access, update checks, appearance, window, the menu bar, hidden apps.
     @ViewBuilder
     private var primaryColumn: some View {
         GroupBox(label: panelLabel("Download access", "key.fill")) {
@@ -147,7 +157,7 @@ struct SettingsView: View {
                 } else {
                     Text(state.hasServerAuth
                          ? "Passphrase saved in your Keychain."
-                         : "Enter the suite passphrase (ask James) — downloads are disabled until you do.")
+                         : "Enter the suite passphrase (ask whoever set up your access) — downloads are disabled until you do.")
                         .font(JBFont.body)
                         .foregroundStyle(state.hasServerAuth ? Color.jbOk : Color.jbText2)
 
@@ -186,6 +196,7 @@ struct SettingsView: View {
                 }
             }
             .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
 
         GroupBox(label: panelLabel("Updates", "arrow.triangle.2.circlepath")) {
@@ -200,6 +211,12 @@ struct SettingsView: View {
                 Text(updateModeHint)
                     .font(JBFont.small).foregroundStyle(Color.jbText2)
                     .fixedSize(horizontal: false, vertical: true)
+                if updateMode == .everyLaunch {
+                    Picker("While open, check again", selection: $autoCheck) {
+                        ForEach(UpdatePolicy.intervals, id: \.raw) { Text($0.label).tag($0.raw) }
+                    }
+                    .tint(.selectorBlue)   // house rule 21: dropdowns are slate-blue, not the purple accent
+                }
 
                 Divider()
 
@@ -232,6 +249,7 @@ struct SettingsView: View {
                 }
             }
             .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
 
         GroupBox(label: panelLabel("Appearance", "circle.lefthalf.filled")) {
@@ -241,6 +259,7 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
 
         GroupBox(label: panelLabel("When I close the window", "xmark.circle")) {
@@ -257,16 +276,20 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
 
-        GroupBox(label: panelLabel("Install location", "folder")) {
+        GroupBox(label: panelLabel("Quick launch", "menubar.rectangle")) {
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Install apps to the Applications folder", isOn: $installToApplications)
-                Text("Off: apps stay inside the launcher. On: each installed app is placed in your Applications folder, so you can also open it from Launchpad or Spotlight without this launcher.")
+                Toggle("Show in the menu bar", isOn: $showMenuBar)
+                Text(closeBehavior == .quit
+                     ? "A menu-bar icon that opens any installed app directly, refreshes, or brings the window back — while JB Theatre Tools is running."
+                     : "A menu-bar icon that opens any installed app directly, refreshes, or brings this window back — it stays after you close the window.")
                     .font(JBFont.small).foregroundStyle(Color.jbText2)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
 
         if state.hasHiddenApps {
@@ -287,55 +310,67 @@ struct SettingsView: View {
                     }
                 }
                 .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
 
-    /// Show lock, automatic checks, the menu bar, storage and support.
+    /// Show lock, what happens when updates are found, install location, storage and support.
     @ViewBuilder
     private var secondaryColumn: some View {
         GroupBox(label: panelLabel("Show lock", "lock.fill")) {
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Show lock", isOn: Binding(get: { state.showLock }, set: { state.setShowLock($0) }))
-                Text("During a show: installs, updates and removals are paused (and automatic updates wait). Launching still works. ⌘L turns it on and off.")
+                Toggle("Show lock", isOn: Binding(get: { state.showLock }, set: { state.requestShowLock($0) }))
+                Text("During a show: installs, updates and uninstalls are paused (and automatic updates wait). Launching still works. ⌘L turns it on and off.")
                     .font(JBFont.small).foregroundStyle(Color.jbText2)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
 
-        GroupBox(label: panelLabel("Automatic checks", "clock.arrow.2.circlepath")) {
+        GroupBox(label: panelLabel("When updates are found", "bell")) {
             VStack(alignment: .leading, spacing: 8) {
-                Picker("While open, check every", selection: $autoCheck) {
-                    ForEach(UpdatePolicy.intervals, id: \.raw) { Text($0.label).tag($0.raw) }
-                }
-                .tint(.selectorBlue)   // house rule 21: dropdowns are slate-blue, not the purple accent
-                .disabled(updateMode != .everyLaunch)
-                if updateMode != .everyLaunch {
-                    Text("Scheduled checks run when “Check for updates” is set to Every launch.")
-                        .font(JBFont.small).foregroundStyle(Color.jbText2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
                 Toggle("Notify me when updates are available", isOn: $notifyUpdates)
+                    // Switching it on is the only thing that asks macOS for permission; if refused, it goes back off.
+                    .onChange(of: notifyUpdates) { on in
+                        guard on else { return }
+                        Notifier.requestPermission { granted in
+                            notificationsRefused = !granted
+                            guard !granted else { return }
+                            notifyUpdates = false
+                        }
+                    }
                 Text("A notification when a check finds a new update while JB Theatre Tools is in the background — once per version.")
                     .font(JBFont.small).foregroundStyle(Color.jbText2)
                     .fixedSize(horizontal: false, vertical: true)
+                if notificationsRefused {
+                    Text("macOS has notifications turned off for JB Theatre Tools. Turn them on in System Settings → Notifications, then switch this on again.")
+                        .font(JBFont.small).foregroundStyle(Color.jbWarn)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Toggle("Install updates automatically", isOn: $autoInstall)
                 Text("After each check, updates install on their own — never for held apps, apps that are open, or while show lock is on.")
                     .font(JBFont.small).foregroundStyle(Color.jbText2)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
 
-        GroupBox(label: panelLabel("Quick launch", "menubar.rectangle")) {
+        GroupBox(label: panelLabel("Install location", "folder")) {
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Show in the menu bar", isOn: $showMenuBar)
-                Text("A menu-bar icon that opens any installed app directly, checks for updates, or brings this window back.")
+                Toggle("Install apps to the Applications folder", isOn: $installToApplications)
+                    .disabled(state.showLock)   // moving installed apps is paused under show lock
+                if state.showLock {
+                    Text("Paused while show lock is on.").font(JBFont.small).foregroundStyle(Color.jbInfo)
+                }
+                Text("Off: apps stay inside the launcher. On: each installed app is placed in your Applications folder, so you can also open it from Launchpad or Spotlight without this launcher.")
                     .font(JBFont.small).foregroundStyle(Color.jbText2)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
 
         GroupBox(label: panelLabel("Storage", "internaldrive")) {
@@ -367,6 +402,7 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
 
         GroupBox(label: panelLabel("Support", "questionmark.circle")) {
@@ -375,18 +411,25 @@ struct SettingsView: View {
                     Button("Copy Diagnostics") {
                         state.copyDiagnostics()
                         diagnosticsCopied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { diagnosticsCopied = false }
                     }
                     .tint(.selectorBlue)
                     if diagnosticsCopied {
                         Text("Copied").font(JBFont.small).foregroundStyle(Color.jbOk)
                     }
                 }
-                Text("A plain-text report — versions, settings, each app's state and recent log lines — to paste into a message to James. It never includes your token or passphrase.")
+                Text("A plain-text report — versions, settings, each app's state and recent log lines — to paste into a message when you ask for help. It never includes your token or passphrase.")
                     .font(JBFont.small).foregroundStyle(Color.jbText2)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// Room for the panels: the screen's usable height less the window title bar, the sheet's title, buttons and padding.
+    private static var panelsMaxHeight: CGFloat {
+        max(360, (NSScreen.main?.visibleFrame.height ?? 900) - 190)
     }
 
     private func loadStorage() async {
@@ -395,7 +438,10 @@ struct SettingsView: View {
 
     private var updateModeHint: String {
         switch updateMode {
-        case .everyLaunch: return "Checks all apps and the launcher each time it opens."
+        case .everyLaunch:
+            return UpdatePolicy.interval(autoCheck) == nil
+                ? "Checks all apps and the launcher each time it opens."
+                : "Checks all apps and the launcher each time it opens, and again while it stays open."
         case .manual: return "Only checks when you press Refresh or Check for Updates."
         case .never: return "Never checks automatically. You can still install or update from the buttons."
         }

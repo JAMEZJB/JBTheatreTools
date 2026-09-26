@@ -142,12 +142,16 @@ public static class SetupPlanner
     /// <paramref name="Tag"/> null = the latest release.</summary>
     public sealed record Install(string AppId, string? VariantId, string? Tag, string Label);
 
-    public sealed record Plan(List<Install> ToInstall, List<string> AlreadyInstalled, List<string> Skipped, List<string> HoldIds);
+    public sealed record Plan(List<Install> ToInstall, List<string> AlreadyInstalled, List<string> Skipped, List<string> HoldIds,
+        List<string>? HoldNames = null);
 
     /// <param name="installedKeys">Install keys present on this machine ("id" or "id@variant").</param>
     /// <param name="supportsVariants">False on Android: editions other than the default are skipped.</param>
+    /// <param name="allowDevTags">False when Development builds are off here: an entry held at a development build
+    /// is skipped — listed under Skipped, not installed and not held — so the preview never promises what the
+    /// import won't do.</param>
     public static Plan Build(SetupProfile profile, IReadOnlyList<CatalogEntry> catalog, ISet<string> installedKeys,
-                             bool supportsVariants = true)
+                             bool supportsVariants = true, bool allowDevTags = true)
     {
         var byId = catalog.ToDictionary(c => c.Id, StringComparer.Ordinal);
         var toInstall = new List<Install>();
@@ -172,11 +176,16 @@ public static class SetupPlanner
             var key = variant == null ? app.Id : $"{app.Id}@{variant}";
             if (!seenKeys.Add(key)) continue;                           // listed twice
             var label = variantLabel == null ? app.Name : $"{app.Name} ({variantLabel})";
+            if (e.Held && e.Version != null && !allowDevTags && VersionCompare.IsDev(e.Version))
+            {
+                skipped.Add($"{label} {VersionCompare.Display(e.Version)} — a development build (not switched on here)");
+                continue;
+            }
             if (e.Held && !hold.Contains(app.Id)) hold.Add(app.Id);
             if (installedKeys.Contains(key)) { already.Add(label); continue; }
             toInstall.Add(new Install(app.Id, variant, e.Held ? e.Version : null, label));
         }
-        return new Plan(toInstall, already, skipped, hold);
+        return new Plan(toInstall, already, skipped, hold, hold.Select(id => byId.TryGetValue(id, out var c) ? c.Name : id).ToList());
     }
 
     /// <summary>The preview text shown before an import runs.</summary>
@@ -193,7 +202,9 @@ public static class SetupPlanner
         if (plan.AlreadyInstalled.Count > 0)
             sb.Append($"\n\nAlready installed (left as they are): {string.Join(", ", plan.AlreadyInstalled)}");
         if (plan.HoldIds.Count > 0)
-            sb.Append($"\n\nHeld at their versions: {plan.HoldIds.Count} app{(plan.HoldIds.Count == 1 ? "" : "s")}");
+            sb.Append($"\n\nHeld at their versions: {plan.HoldIds.Count} app{(plan.HoldIds.Count == 1 ? "" : "s")}"
+                + (plan.HoldNames is { Count: > 0 } n ? $" ({string.Join(", ", n)})" : "")
+                + " — Update All and automatic updates leave them at the version this machine has");
         if (plan.Skipped.Count > 0)
             sb.Append("\n\nSkipped:\n  • ").Append(string.Join("\n  • ", plan.Skipped));
         return sb.ToString();

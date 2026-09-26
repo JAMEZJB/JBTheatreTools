@@ -27,10 +27,15 @@ struct JBTheatreToolsApp: App {
                 .environment(\.appState, state)
         }
         .windowResizability(.contentSize)
-        .commands { LauncherCommands(state: state) }
+        .commands { LauncherCommands(state: state, chrome: state.chrome) }
 
-        MenuBarExtra("JB Theatre Tools", systemImage: "theatermasks", isInserted: $showMenuBar) {
-            QuickLaunchMenu(state: state)
+        // The binding writes ONLY on a real change: MenuBarExtra pushes `isInserted` back on every scene update,
+        // and a UserDefaults write re-fires every @AppStorage in the window → re-render → scene update → write…
+        // (the launcher spun at 100% CPU and never finished starting).
+        MenuBarExtra("JB Theatre Tools", systemImage: "theatermasks", isInserted: Binding(
+            get: { showMenuBar },
+            set: { if $0 != showMenuBar { showMenuBar = $0 } })) {
+            QuickLaunchMenu(state: state, chrome: state.chrome)
         }
     }
 }

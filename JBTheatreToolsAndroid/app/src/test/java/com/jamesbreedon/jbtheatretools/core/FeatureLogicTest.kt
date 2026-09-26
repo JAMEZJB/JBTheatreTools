@@ -94,7 +94,10 @@ class FeatureLogicTest {
         assertEquals(Duration.ofHours(24), UpdatePolicy.interval("24h"))
         assertEquals(Duration.ofHours(4), UpdatePolicy.interval("garbage"))
         assertEquals(Duration.ofHours(4), UpdatePolicy.interval(null))
-        assertEquals("4h", UpdatePolicy.intervals[0].first)
+        assertTrue(UpdatePolicy.intervals.any { it.first == UpdatePolicy.DEFAULT_INTERVAL })
+        // The desktop wording, shortest first; the default is DEFAULT_INTERVAL, not whatever comes first.
+        assertEquals(listOf("Every hour", "Every 4 hours", "Every 12 hours", "Once a day", "Never"), UpdatePolicy.intervals.map { it.second })
+        assertEquals(listOf("1h", "4h", "12h", "24h", "off"), UpdatePolicy.intervals.map { it.first })
 
         assertFalse(UpdatePolicy.isDue(null, now, "off"))
         assertTrue(UpdatePolicy.isDue(null, now, "4h"))
@@ -153,6 +156,13 @@ class FeatureLogicTest {
         assertNull(ActivityHistory.append(emptyList(), ActivityEvent(t, "a", "A", "failed", note = "  "))[0].note)
 
         assertTrue(ActivityHistory.parse("{not json").isEmpty())
+        // A damaged file (content, but not a JSON list) is kept aside before a new one is written; empty / missing isn't.
+        assertTrue(ActivityHistory.isDamaged("{not json"))
+        assertTrue(ActivityHistory.isDamaged("{}"))
+        assertFalse(ActivityHistory.isDamaged("[]"))
+        assertFalse(ActivityHistory.isDamaged(ActivityHistory.serialize(list)))
+        assertFalse(ActivityHistory.isDamaged(""))
+        assertFalse(ActivityHistory.isDamaged(null))
         assertTrue(ActivityHistory.parse("{}").isEmpty())
         assertTrue(ActivityHistory.parse(null).isEmpty())
         val one = ActivityHistory.parse("[{\"at\":\"2026-09-25T13:02:00Z\",\"app\":\"a\",\"action\":\"install\",\"to\":\"1.0\"},{\"app\":\"b\"},7]")
@@ -168,6 +178,8 @@ class FeatureLogicTest {
         assertEquals("Removed DMX Tools v1.0.0", ActivityHistory.describe(ActivityEvent(t, "d", "DMX Tools", "uninstall", "1.0.0")))
         assertEquals("Removed DMX Tools", ActivityHistory.describe(ActivityEvent(t, "d", "DMX Tools", "uninstall")))
         assertEquals("Couldn't install DMX Tools v1.1.0: offline", ActivityHistory.describe(ActivityEvent(t, "d", "DMX Tools", "failed", null, "1.1.0", "offline")))
+        // A cancelled install dialog is recorded as cancelled — not as a failure.
+        assertEquals("Cancelled installing DMX Tools v1.1.0", ActivityHistory.describe(ActivityEvent(t, "d", "DMX Tools", "cancelled", null, "1.1.0")))
         val nowLocal = LocalDateTime.of(2026, 9, 25, 18, 0)
         assertEquals("Today 14:02", ActivityHistory.`when`(LocalDateTime.of(2026, 9, 25, 14, 2), nowLocal))
         assertEquals("Yesterday 09:10", ActivityHistory.`when`(LocalDateTime.of(2026, 9, 24, 9, 10), nowLocal))
@@ -239,6 +251,56 @@ class FeatureLogicTest {
         assertTrue(s.contains("Skipped:\n  • "))
         assertTrue(SetupPlanner.summary(SetupPlanner.build(SetupProfile(), catalog, emptySet())).startsWith("Nothing to install"))
         assertEquals("JB Theatre Tools setup 2026-09-25.json", SetupProfile.suggestedFileName(LocalDate.of(2026, 9, 25)))
+    }
+
+    @Test fun setupDevBuildsNeedTheSwitch() {
+        val profile = SetupProfile(apps = listOf(
+            SetupProfile.Entry("dmx", null, "v1.3.0-dev.2", true),
+            SetupProfile.Entry("psn", null, "0.4.1", true),
+            SetupProfile.Entry("ndi", null, "v2.1.0-dev.1", false),   // not held: installs the latest, the tag is ignored
+        ))
+        // Development builds off here: the held dev build is skipped — not installed and NOT held.
+        val off = SetupPlanner.build(profile, catalog, emptySet(), supportsVariants = false, allowDevTags = false)
+        assertEquals(listOf("PSN Tools", "NDI Tools"), off.toInstall.map { it.label })
+        assertEquals(listOf("psn"), off.holdIds)
+        assertEquals(listOf("DMX Tools v1.3.0-dev.2 — a development build (not switched on here)"), off.skipped)
+        assertTrue(off.toInstall.none { it.tag != null && VersionCompare.isDev(it.tag!!) })
+        // Switched on: it installs at that build and is held.
+        val on = SetupPlanner.build(profile, catalog, emptySet(), supportsVariants = false, allowDevTags = true)
+        assertEquals("v1.3.0-dev.2", on.toInstall.first { it.appId == "dmx" }.tag)
+        assertEquals(listOf("dmx", "psn"), on.holdIds)
+        // Already installed + held at a dev build, switch off: still skipped (no hold is set).
+        assertTrue(SetupPlanner.build(profile, catalog, setOf("dmx"), allowDevTags = false).holdIds == listOf("psn"))
+    }
+
+    @Test fun setupPreviewWordingPerPlatform() {
+        val plan = SetupPlanner.build(sample(), catalog, setOf("psn"), supportsVariants = false)
+        val android = SetupPlanner.summary(plan, SetupPlanner.Wording.ANDROID)
+        assertTrue(android.contains("— Update all leaves them at the version this device has"))
+        assertFalse(android.contains("automatic"))
+        assertFalse(android.contains("machine"))
+        assertTrue(SetupPlanner.summary(SetupPlanner.build(SetupProfile(), catalog, emptySet()), SetupPlanner.Wording.ANDROID)
+            .startsWith("Nothing to install — this device already has every app in the file."))
+        // The desktop wording is unchanged (and the default).
+        assertTrue(SetupPlanner.summary(plan).contains("— Update All and automatic updates leave them at the version this machine has"))
+    }
+
+    @Test fun userMessagesCarryNoHostNames() {
+        val host = "jbtheatretools.jamesbreedon.com"
+        for (e in listOf(
+            java.net.UnknownHostException("Unable to resolve host \"$host\": No address associated with hostname"),
+            java.net.ConnectException("Failed to connect to $host/1.2.3.4:443"),
+            java.net.SocketTimeoutException("timeout reading from $host"),
+            javax.net.ssl.SSLHandshakeException("Chain validation failed for $host"),
+            java.io.IOException("unexpected end of stream on $host"),
+            RuntimeException("boom at $host"),
+        )) {
+            val m = UserMessage.of(e)
+            assertFalse(m, m.contains(host))
+            assertFalse(m, m.contains("1.2.3.4"))
+        }
+        // The launcher's own refusals pass through as they are.
+        assertEquals("this release publishes no SHA256SUMS checksums", UserMessage.of(IllegalStateException("this release publishes no SHA256SUMS checksums")))
     }
 
     @Test fun diskSpace() {

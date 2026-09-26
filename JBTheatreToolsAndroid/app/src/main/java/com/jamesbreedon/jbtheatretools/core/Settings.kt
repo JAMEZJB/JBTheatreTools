@@ -88,14 +88,14 @@ class Settings(context: Context) {
         get() = prefs.getStringSet(KEY_HELD, null)?.toSet() ?: emptySet()
         set(value) = prefs.edit().putStringSet(KEY_HELD, HashSet(value)).apply()
 
-    /** "While open, check every": off / 1h / 4h / 12h / 24h. */
+    /** "While open, check again": 1h / 4h / 12h / 24h / off (see [UpdatePolicy.intervals]). */
     var autoCheckInterval: String
         get() = prefs.getString(KEY_AUTO_CHECK, null) ?: UpdatePolicy.DEFAULT_INTERVAL
         set(value) = prefs.edit().putString(KEY_AUTO_CHECK, value).apply()
 
     /** Notify about new updates (also needs the POST_NOTIFICATIONS permission on Android 13+). */
     var notifyUpdates: Boolean
-        get() = prefs.getBoolean(KEY_NOTIFY, true)
+        get() = prefs.getBoolean(KEY_NOTIFY, false)   // opt-in: no background checks or notifications unless asked
         set(value) = prefs.edit().putBoolean(KEY_NOTIFY, value).apply()
 
     /** "id version" keys already announced. */

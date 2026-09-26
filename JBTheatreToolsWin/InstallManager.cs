@@ -282,7 +282,11 @@ public sealed class InstallManager
             // The install is already committed. A shortcut/cleanup failure must not turn it into
             // an apparent failed install or remove a payload still referenced by metadata.
             Log.Write($"install {app.Id}: post-install cleanup deferred: {ex.Message}");
+            shortcutsUpdated = false;
         }
+        // Only when the shortcuts now point at this version: a folder kept because a shortcut couldn't be
+        // recreated is still what the old shortcut opens.
+        if (shortcutsUpdated) CleanOrphanedVersions(dir, key);
         return payload.Executable;
     }
 
@@ -296,12 +300,90 @@ public sealed class InstallManager
         // A legacy slot can share a directory with another variant. Never remove a sibling's payload.
         if (records.Any(r => Path.GetFullPath(r.Path).Equals(old, StringComparison.OrdinalIgnoreCase) ||
             Path.GetFullPath(r.Path).StartsWith(old + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))) return;
+        // A copy of the OLD version is running (started from a shortcut while this updated): deleting now would pull
+        // unlocked files (web UI, data) out from under it. Leave it: the next install or uninstall of this slot removes
+        // it once nothing runs from it (CleanOrphanedVersions).
+        if (AnyProcessRunsFrom(old))
+        {
+            Log.Write($"previous install retained: {Path.GetFileName(old)} is still running");
+            return;
+        }
         try
         {
             if (previous.InstallDir != null) Directory.Delete(old, recursive: true);
             else File.Delete(old);
         }
         catch (Exception ex) { Log.Write($"previous install retained: {ex.Message}"); }
+    }
+
+    /// <summary>Removes version folders of one slot that no manifest record points at and no process runs from — an
+    /// old version kept aside by <see cref="RemovePreviousPayload"/> because it was running at the time. Runs at the
+    /// end of every install and uninstall of that slot (both are called off the UI thread: it walks the process
+    /// list). Only this slot's generation folders ("&lt;slot&gt;-&lt;32 hex&gt;") are candidates, never a sibling
+    /// edition's or a legacy single-file exe; and one created in the last ten minutes is left alone, so a generation
+    /// another launcher process has just published but not yet recorded is never touched. Best effort.</summary>
+    private void CleanOrphanedVersions(string appDirectory, string slot)
+    {
+        try
+        {
+            // No manifest, or one that can't be read (strict throws): nothing can be proven unused.
+            if (!Directory.Exists(appDirectory) || !File.Exists(ManifestPath)) return;
+            var prefix = slot + "-";
+            List<string> orphans;
+            lock (_mutationLock)
+            {
+                var referenced = Manifest(strict: true).Values
+                    .SelectMany(r => new[] { r.InstallDir, r.Path })
+                    .Where(p => !string.IsNullOrEmpty(p))
+                    .Select(p => Path.GetFullPath(p!))
+                    .ToList();
+                orphans = Directory.EnumerateDirectories(appDirectory)
+                    .Select(Path.GetFullPath)
+                    .Where(d =>
+                    {
+                        var name = Path.GetFileName(d);
+                        if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
+                        var suffix = name[prefix.Length..];
+                        if (suffix.Length != 32 || !suffix.All(Uri.IsHexDigit)) return false;
+                        var inside = d + Path.DirectorySeparatorChar;
+                        if (referenced.Any(p => p.Equals(d, StringComparison.OrdinalIgnoreCase) ||
+                                                p.StartsWith(inside, StringComparison.OrdinalIgnoreCase))) return false;
+                        return DateTime.UtcNow - Directory.GetCreationTimeUtc(d) > TimeSpan.FromMinutes(10);
+                    })
+                    .ToList();
+            }
+            foreach (var d in orphans)
+            {
+                if (AnyProcessRunsFrom(d)) { Log.Write($"old install still running — kept for now: {Path.GetFileName(d)}"); continue; }
+                try
+                {
+                    Directory.Delete(d, recursive: true);
+                    Log.Write($"removed old install {Path.GetFileName(d)}");
+                }
+                catch (Exception ex) { Log.Write($"could not remove old install {Path.GetFileName(d)}: {ex.Message}"); }
+            }
+        }
+        catch (Exception ex) { Log.Write($"old-install cleanup for {slot} skipped: {ex.Message}"); }
+    }
+
+    /// <summary>True when a running process's image IS <paramref name="path"/> (a single-file install) or lives under
+    /// it (a one-dir install).</summary>
+    private static bool AnyProcessRunsFrom(string path)
+    {
+        var full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+        var prefix = full + Path.DirectorySeparatorChar;
+        foreach (var p in System.Diagnostics.Process.GetProcesses())
+        {
+            try
+            {
+                var file = p.MainModule?.FileName;
+                if (file != null && (file.Equals(full, StringComparison.OrdinalIgnoreCase) ||
+                                     file.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))) return true;
+            }
+            catch { /* another user's / protected process: not ours */ }
+            finally { p.Dispose(); }
+        }
+        return false;
     }
 
     /// <summary>Launches the app's default-variant slot (CLI / single-variant apps).</summary>
@@ -336,17 +418,18 @@ public sealed class InstallManager
                         File.Delete(rec.Path);
                 }
                 catch (Exception ex) { Log.Write($"uninstall {installKey}: could not delete payload: {ex.Message}"); }
-                // Clean the app's base dir once no sibling slot's files remain (Light/Full share apps/<id>/).
-                try
-                {
-                    var appDir = Path.Combine(AppsDir, installKey.Split('@')[0]);
-                    if (Directory.Exists(appDir) && !Directory.EnumerateFileSystemEntries(appDir).Any())
-                        Directory.Delete(appDir);
-                }
-                catch (Exception ex) { Log.Write($"uninstall {installKey}: could not remove empty app dir: {ex.Message}"); }
             }
             if (m.Remove(installKey)) WriteManifest(m);
         }
+        // Any older version of this slot kept aside while it was running (see RemovePreviousPayload), then the app's
+        // base dir once no sibling slot's files remain (Light/Full share apps/<id>/).
+        var dir = Path.Combine(AppsDir, installKey.Split('@')[0]);
+        CleanOrphanedVersions(dir, installKey);
+        try
+        {
+            if (Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir);
+        }
+        catch (Exception ex) { Log.Write($"uninstall {installKey}: could not remove empty app dir: {ex.Message}"); }
     }
 
     // --- Reconcile install location (Windows: the exe never moves, only its shortcuts) ---

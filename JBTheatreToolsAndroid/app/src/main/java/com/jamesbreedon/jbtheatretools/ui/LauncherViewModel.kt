@@ -5,7 +5,9 @@ import android.net.Uri
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.jamesbreedon.jbtheatretools.core.ActiveInstalls
 import com.jamesbreedon.jbtheatretools.core.ActivityEvent
+import com.jamesbreedon.jbtheatretools.core.AppLog
 import com.jamesbreedon.jbtheatretools.core.AppFilter
 import com.jamesbreedon.jbtheatretools.core.AppVisibility
 import com.jamesbreedon.jbtheatretools.core.Appearance
@@ -14,6 +16,7 @@ import com.jamesbreedon.jbtheatretools.core.AuthMode
 import com.jamesbreedon.jbtheatretools.core.CatalogApp
 import com.jamesbreedon.jbtheatretools.core.Diagnostics
 import com.jamesbreedon.jbtheatretools.core.InstallProgress
+import com.jamesbreedon.jbtheatretools.core.InstallResult
 import com.jamesbreedon.jbtheatretools.core.LauncherRepository
 import com.jamesbreedon.jbtheatretools.core.LauncherWhatsNew
 import com.jamesbreedon.jbtheatretools.core.Notifier
@@ -23,6 +26,7 @@ import com.jamesbreedon.jbtheatretools.core.StatusFilter
 import com.jamesbreedon.jbtheatretools.core.UpdateAnnouncer
 import com.jamesbreedon.jbtheatretools.core.UpdateCheckScheduler
 import com.jamesbreedon.jbtheatretools.core.UpdatePolicy
+import com.jamesbreedon.jbtheatretools.core.UserMessage
 import com.jamesbreedon.jbtheatretools.core.VersionCompare
 import com.jamesbreedon.jbtheatretools.net.ReleaseInfo
 import kotlinx.coroutines.Dispatchers
@@ -73,6 +77,8 @@ data class LauncherUiState(
     val devChannel: Boolean = false,
     /** Show lock: installs, updates and removals are paused; opening apps still works. */
     val showLock: Boolean = false,
+    /** "Turn off show lock?" is showing (turning it off always asks first). */
+    val confirmShowLockOff: Boolean = false,
     val autoCheckInterval: String = UpdatePolicy.DEFAULT_INTERVAL,
     val notifyUpdates: Boolean = true,
     /** Set to this build's version on the first launch after the launcher was updated (the banner). */
@@ -82,6 +88,8 @@ data class LauncherUiState(
     val history: List<ActivityEvent> = emptyList(),
     /** Installed apps' size and the download cache's size (About → Storage), or null until measured. */
     val storage: Pair<Long, Long>? = null,
+    /** The log's last lines (About → Log), read off the main thread. */
+    val logTail: String = "",
 ) {
     val installedCount: Int get() = statuses.count { it.isInstalled }
     /** Apps with an update that isn't held. */
@@ -116,7 +124,6 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             showLock = repo.settings.showLock,
             autoCheckInterval = repo.settings.autoCheckInterval,
             notifyUpdates = repo.settings.notifyUpdates && Notifier(app).canPost(),
-            history = repo.history(),
         )
     )
     val state: StateFlow<LauncherUiState> = _state.asStateFlow()
@@ -131,14 +138,16 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     private val batchIds: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
     /** The release-notes load in flight — replaced (cancelled) by the next one, and by closing the sheet. */
     private var notesJob: Job? = null
-    /** Apps handed to the system uninstaller, with the version they had — recorded once they're gone. */
+    /** Apps handed to the system uninstaller, with the version they had — recorded once they're gone (guarded by itself). */
     private val pendingRemovals = HashMap<String, String?>()
 
     init {
         AppVisibility.foreground = true   // the view model is created with the activity, i.e. on screen
         prepareLauncherWhatsNew()
+        reloadHistory()
         if (repo.hasCredential()) refresh()
         updateShortcuts()
+        if (_state.value.notifyUpdates) notifier.ensureChannel()
         syncBackgroundChecks()
         // "While open, check every…": one tick a minute; a check runs when it's due, the launcher is on screen and
         // nothing else is happening. (Closed, the background job takes over when notifications are on.)
@@ -148,7 +157,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                 val s = _state.value
                 if (AppVisibility.foreground && s.signedIn && !s.loading && !s.anyInstallRunning &&
                     UpdatePolicy.isDue(lastCheck, Instant.now(), repo.settings.autoCheckInterval)
-                ) refresh()
+                ) runRefresh(scheduled = true)
             }
         }
     }
@@ -166,15 +175,31 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     private fun syncBackgroundChecks() =
         UpdateCheckScheduler.sync(getApplication(), repo.settings, repo.hasCredential() && notifier.canPost())
 
-    fun refresh() {
+    fun refresh() = runRefresh(scheduled = false)
+
+    /**
+     * A check. [scheduled] (the "While open, check again" timer): an app whose check fails keeps its row as it was —
+     * a passing network blip mustn't blank every row; a check the user asked for shows the failure.
+     */
+    private fun runRefresh(scheduled: Boolean) {
         if (_state.value.loading) return
         _state.update { it.copy(loading = true) }
         viewModelScope.launch {
-            val statuses = repo.refresh()
+            val fresh = repo.refresh()
             val launcherUpdate = repo.checkLauncherUpdate()
             lastCheck = Instant.now()
-            _state.update {
-                it.copy(loading = false, statuses = statuses, signedIn = repo.hasCredential(), launcherUpdate = launcherUpdate)
+            _state.update { s ->
+                val statuses = if (!scheduled) fresh else fresh.map { n ->
+                    val old = s.statuses.firstOrNull { it.app.id == n.app.id }
+                    if (n.checkFailed && old != null && old.latestVersion != null) {
+                        old.copy(installedVersion = n.installedVersion, held = n.held)
+                    } else n
+                }
+                s.copy(
+                    loading = false, statuses = statuses, signedIn = repo.hasCredential(),
+                    // The launcher's check reports "no update" and "failed" alike; only a restart clears a found one.
+                    launcherUpdate = if (scheduled) launcherUpdate ?: s.launcherUpdate else launcherUpdate,
+                )
             }
             announceNewUpdates()
         }
@@ -198,9 +223,15 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun runLauncherUpdate() {
-        val ok = repo.installLauncher { p -> onProgress(p) }
+        val result = repo.installLauncher { p -> onProgress(p) }
         // Only reached when Android did NOT replace us (refused, cancelled or failed verification).
-        if (!ok) _state.update { it.copy(snackbar = "JB Theatre Tools was not updated") }
+        val message = when (result) {
+            InstallResult.CANCELLED ->
+                if (repo.settings.showLock) "Show lock is on — JB Theatre Tools was not updated" else "Update of JB Theatre Tools cancelled"
+            InstallResult.NOT_INSTALLED -> "JB Theatre Tools was not updated"
+            else -> null   // updated (this process ends), or that update was already running
+        }
+        if (message != null) _state.update { it.copy(snackbar = message) }
     }
 
     /** Progress from the repository. A cancelled download simply goes back to how the row was. */
@@ -263,16 +294,32 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
 
     // ── Show lock ───────────────────────────────────────────────────────────
 
-    fun setShowLock(on: Boolean) {
+    /** Show lock on: at once. Off: only after "Turn off show lock?" is confirmed — never with one tap mid-show. */
+    fun requestShowLock(on: Boolean) {
+        if (on) setShowLock(true)
+        else if (_state.value.showLock) _state.update { it.copy(confirmShowLockOff = true, sheetFor = null) }
+    }
+
+    /** "Keep on" (or the sheet dismissed): the lock stays on. */
+    fun keepShowLock() = _state.update { it.copy(confirmShowLockOff = false) }
+
+    fun confirmShowLockOff() {
+        _state.update { it.copy(confirmShowLockOff = false) }
+        setShowLock(false)
+    }
+
+    private fun setShowLock(on: Boolean) {
         repo.settings.showLock = on
         _state.update { it.copy(showLock = on, sheetFor = null) }
-        if (on && _state.value.busyAll) stopAll()   // nothing more installs once the lock is on
+        // Nothing more installs once the lock is on: a batch stops, and EVERY download in flight — a row's own
+        // install and the launcher's update too — is cancelled by the repository's cancel check, which reads the lock.
+        if (on && _state.value.busyAll) stopAll()
     }
 
     /** The model-level guard behind every install / update / removal (the UI hides them too). */
     private fun blockedByLock(): Boolean {
         if (!_state.value.showLock) return false
-        _state.update { it.copy(snackbar = "Show lock is on — unlock it in About to install, update or remove apps.") }
+        _state.update { it.copy(snackbar = "Show lock is on — turn it off in About to install, update or remove apps.") }
         return true
     }
 
@@ -288,21 +335,31 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             repo.openInstallPermissionSettings()
             return
         }
+        // A second tap while this app is already downloading or installing: nothing new starts and nothing is said.
+        if (_state.value.progress[app.id]?.isActive == true || repo.isInstalling(app.id)) return
+        repo.clearCancel(app.id)
+        // The row shows Downloading (its buttons disable, Cancel appears) at once — before the release lookup's
+        // network call, so a quick second tap can't start a second install.
+        val placeholder = InstallProgress(app.id, InstallProgress.Phase.DOWNLOADING, 0.0)
+        onProgress(placeholder)
         viewModelScope.launch {
-            var cancelled = false
-            val ok = repo.install(app, { p ->
-                if (p.phase == InstallProgress.Phase.CANCELLED) cancelled = true
-                onProgress(p)
-            }, tag)
+            val result = repo.install(app, { p -> onProgress(p) }, tag)
+            if (result == InstallResult.ALREADY_RUNNING) {
+                // Lost a race with another install of this app: leave its progress alone, drop only our placeholder.
+                _state.update { s -> if (s.progress[app.id] === placeholder) s.copy(progress = s.progress - app.id) else s }
+                return@launch
+            }
             refreshInstalledOnly()
+            reloadHistory()
             _state.update {
                 it.copy(
-                    snackbar = when {
-                        cancelled -> "Download of ${app.name} cancelled"
-                        ok -> "${app.name} installed"
+                    snackbar = when (result) {
+                        InstallResult.CANCELLED ->
+                            if (repo.settings.showLock) "Show lock is on — ${app.name} was not installed"
+                            else "Install of ${app.name} cancelled"
+                        InstallResult.INSTALLED -> "${app.name} installed"
                         else -> "${app.name} was not installed"
                     },
-                    history = repo.history(),
                 )
             }
         }
@@ -322,15 +379,23 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         val pending = _state.value.statuses.filter { it.updatePending && it.canInstall }
         batchIds.clear()
         batchIds.addAll(pending.map { it.app.id })
+        ActiveInstalls.queue(batchIds)   // the background check never announces what's being installed
         _state.update { it.copy(busyAll = true) }
         viewModelScope.launch {
-            val done = repo.updateAll(pending, { stopRequested }) { p -> onProgress(p) }
-            batchIds.clear()
+            val count = try {
+                repo.updateAll(pending, { stopRequested }) { p -> onProgress(p) }
+            } finally {
+                // Also when the batch is cancelled (the screen closed): the process-wide queue must not keep these ids.
+                batchIds.clear()
+                ActiveInstalls.clearQueue()
+            }
             refreshInstalledOnly()
+            reloadHistory()
             _state.update {
                 it.copy(
-                    busyAll = false, history = repo.history(),
-                    snackbar = if (pending.isEmpty()) it.snackbar else "Updated $done of ${pending.size}",
+                    busyAll = false,
+                    // An app that was already installing from its own row isn't counted either way.
+                    snackbar = if (count.attempted == 0) it.snackbar else "Updated ${count.done} of ${count.attempted}",
                 )
             }
             // The launcher goes LAST: replacing it ends this process, so every app update must be done first.
@@ -366,7 +431,8 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     fun confirmRemove(app: CatalogApp) {
         _state.update { it.copy(confirmRemove = null) }
         if (blockedByLock()) return
-        pendingRemovals[app.id] = repo.installedVersionFor(app.id)
+        val version = _state.value.statuses.firstOrNull { it.app.id == app.id }?.installedVersion
+        synchronized(pendingRemovals) { pendingRemovals[app.id] = version }
         repo.remove(app.id)
     }
 
@@ -379,26 +445,45 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Cheap re-read of what's installed (no network) — after an install or a removal. */
+    /**
+     * Re-read of what's installed (no network) — after an install or a removal, and on every resume. The package
+     * lookups and any history write run off the main thread.
+     */
     fun refreshInstalledOnly() {
-        // A removal finishes in the system's own flow: record it once the package is really gone.
-        val gone = pendingRemovals.keys.filter { !repo.isInstalled(it) }
-        for (id in gone) {
-            val from = pendingRemovals.remove(id)
-            val name = repo.catalog.apps.firstOrNull { it.id == id }?.name ?: id
-            repo.addHistory(id, name, "uninstall", from)
+        viewModelScope.launch {
+            val ids = repo.catalog.apps.map { it.id }
+            val (installedNow, recorded) = withContext(Dispatchers.IO) {
+                // A removal finishes in the system's own flow: record it once the package is really gone.
+                val gone = synchronized(pendingRemovals) {
+                    pendingRemovals.keys.filter { !repo.isInstalled(it) }.map { id -> id to pendingRemovals.remove(id) }
+                }
+                for ((id, from) in gone) {
+                    val name = repo.catalog.apps.firstOrNull { it.id == id }?.name ?: id
+                    repo.addHistory(id, name, "uninstall", from)
+                }
+                ids.associateWith { repo.installedVersionFor(it) } to gone.isNotEmpty()
+            }
+            val held = repo.settings.heldApps
+            _state.update { s ->
+                s.copy(
+                    statuses = s.statuses.map {
+                        if (it.app.id !in installedNow) return@map it
+                        val installed = installedNow[it.app.id]
+                        it.copy(installedVersion = installed, held = installed != null && it.app.id in held)
+                    },
+                )
+            }
+            if (recorded) reloadHistory()
+            updateShortcuts()
         }
-        val held = repo.settings.heldApps
-        _state.update { s ->
-            s.copy(
-                statuses = s.statuses.map {
-                    val installed = repo.installedVersionFor(it.app.id)
-                    it.copy(installedVersion = installed, held = installed != null && it.app.id in held)
-                },
-                history = if (gone.isEmpty()) s.history else repo.history(),
-            )
+    }
+
+    /** Re-reads the activity history off the main thread. */
+    private fun reloadHistory() {
+        viewModelScope.launch {
+            val history = withContext(Dispatchers.IO) { repo.history() }
+            _state.update { it.copy(history = history) }
         }
-        updateShortcuts()
     }
 
     /** The launcher-icon shortcuts decode app icons — off the main thread. */
@@ -420,7 +505,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                 val sheet = s.notes ?: return@update s
                 result.fold(
                     { list -> s.copy(notes = sheet.copy(loading = false, releases = sortNewestFirst(list), message = if (list.isEmpty()) "No releases yet." else null)) },
-                    { e -> s.copy(notes = sheet.copy(loading = false, message = e.message ?: "Couldn't load the release notes.")) },
+                    { e -> s.copy(notes = sheet.copy(loading = false, message = UserMessage.of(e))) },
                 )
             }
         }
@@ -481,10 +566,14 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     /** Notifications on/off. The screen asks for the Android 13+ permission first and passes the answer here. */
     fun setNotifyUpdates(on: Boolean) {
         repo.settings.notifyUpdates = on && notifier.canPost()
+        // The channel exists from the moment notifications are on, so it can be set up before the first one.
+        if (repo.settings.notifyUpdates) notifier.ensureChannel()
         _state.update {
             it.copy(
                 notifyUpdates = repo.settings.notifyUpdates,
-                snackbar = if (on && !notifier.canPost()) "Notifications are off for JB Theatre Tools in Android settings" else it.snackbar,
+                snackbar = if (on && !notifier.canPost())
+                    "Notifications are off for JB Theatre Tools — allow them in Android Settings → Apps → JB Theatre Tools"
+                else it.snackbar,
             )
         }
         syncBackgroundChecks()
@@ -492,10 +581,13 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
 
     // ── Storage ─────────────────────────────────────────────────────────────
 
+    /** About's measured bits — storage sizes and the log's last lines — read off the main thread. */
     fun refreshStorage() {
         viewModelScope.launch {
-            val sizes = withContext(Dispatchers.IO) { repo.installedBytes() to repo.cacheBytes() }
-            _state.update { it.copy(storage = sizes) }
+            val (sizes, tail) = withContext(Dispatchers.IO) {
+                (repo.installedBytes() to repo.cacheBytes()) to repo.logText().lines().filter { it.isNotBlank() }.takeLast(6).joinToString("\n")
+            }
+            _state.update { it.copy(storage = sizes, logTail = tail) }
         }
     }
 
@@ -535,9 +627,10 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                     } ?: error("couldn't open the file")
                 }
             }
+            result.exceptionOrNull()?.let { e -> AppLog.get(getApplication()).log("export setup: ${e.javaClass.simpleName}: ${e.message}") }
             _state.update {
                 it.copy(snackbar = result.fold({ "Saved ${statuses.size} installed app${if (statuses.size == 1) "" else "s"}" },
-                                               { e -> "Couldn't save the setup: ${e.message}" }))
+                                               { "Couldn't save the setup file." }))
             }
         }
     }
@@ -546,22 +639,28 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     fun previewImport(uri: Uri) {
         if (blockedByLock()) return
         viewModelScope.launch {
+            // Reading, parsing and planning all run off the main thread (a setup file can be up to 1 MB).
             val result = runCatching {
-                val text = withContext(Dispatchers.IO) {
-                    getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+                withContext(Dispatchers.IO) {
+                    val text = getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
                         val bytes = readCapped(input, SetupProfile.MAX_BYTES)
                         if (bytes.size > SetupProfile.MAX_BYTES) throw SetupProfile.FormatError("This file is too large to be a setup file.")
                         String(bytes, Charsets.UTF_8)
-                    } ?: error("couldn't open the file")
+                    } ?: throw SetupProfile.FormatError("That file couldn't be opened.")
+                    val profile = SetupProfile.parse(text)
+                    val catalog = repo.catalog.apps.map { a -> SetupPlanner.CatalogEntry(a.id, a.name, a.variants.map { it.id to it.label }) }
+                    val installedKeys = _state.value.statuses.filter { it.isInstalled }.map { it.app.id }.toSet()
+                    // A development build named in the file installs only with Development builds on here.
+                    val plan = SetupPlanner.build(
+                        profile, catalog, installedKeys, supportsVariants = false, allowDevTags = repo.settings.devChannel,
+                    )
+                    ImportPreview(SetupPlanner.summary(plan, SetupPlanner.Wording.ANDROID), plan)
                 }
-                val profile = SetupProfile.parse(text)
-                val catalog = repo.catalog.apps.map { a -> SetupPlanner.CatalogEntry(a.id, a.name, a.variants.map { it.id to it.label }) }
-                val installedKeys = _state.value.statuses.filter { it.isInstalled }.map { it.app.id }.toSet()
-                val plan = SetupPlanner.build(profile, catalog, installedKeys, supportsVariants = false)
-                ImportPreview(SetupPlanner.summary(plan), plan)
             }
             _state.update {
-                result.fold({ p -> it.copy(importPreview = p) }, { e -> it.copy(snackbar = e.message ?: "That file couldn't be read.") })
+                result.fold({ p -> it.copy(importPreview = p) }, { e ->
+                    it.copy(snackbar = if (e is SetupProfile.FormatError) e.message else "That file couldn't be read.")
+                })
             }
         }
     }
@@ -603,26 +702,52 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         stopRequested = false
         batchIds.clear()
         batchIds.addAll(preview.plan.toInstall.map { it.appId })
+        ActiveInstalls.queue(batchIds)
         _state.update { it.copy(busyAll = true) }
         viewModelScope.launch {
             var done = 0
-            for (item in preview.plan.toInstall) {
-                if (stopRequested) break
-                val app = repo.catalog.apps.firstOrNull { it.id == item.appId } ?: continue
-                if (repo.install(app, { p -> onProgress(p) }, item.tag, stop = { stopRequested })) done++
+            var attempted = 0
+            try {
+                for (item in preview.plan.toInstall) {
+                    if (stopRequested) break
+                    val app = repo.catalog.apps.firstOrNull { it.id == item.appId } ?: continue
+                    // Installed from its own row since the preview: the import leaves installed apps as they are.
+                    if (repo.isInstalled(app.id)) continue
+                    if (!repo.isInstalling(app.id)) repo.clearCancel(app.id)
+                    // The repository refuses a development build here unless Development builds are on (the preview
+                    // already skipped them; this covers the switch being turned off in between).
+                    when (repo.install(app, { p -> onProgress(p) }, item.tag, stop = { stopRequested })) {
+                        InstallResult.INSTALLED -> { done++; attempted++ }
+                        InstallResult.ALREADY_RUNNING -> Unit   // installing from its own row: not a failure
+                        else -> attempted++
+                    }
+                }
+            } finally {
+                batchIds.clear()
+                ActiveInstalls.clearQueue()
             }
-            batchIds.clear()
             refreshInstalledOnly()
+            reloadHistory()
             _state.update {
-                it.copy(busyAll = false, history = repo.history(), snackbar = "Installed $done of ${preview.plan.toInstall.size} from the setup file")
+                it.copy(busyAll = false, snackbar = if (attempted == 0) it.snackbar else "Installed $done of $attempted from the setup file")
             }
         }
     }
 
     // ── Diagnostics ─────────────────────────────────────────────────────────
 
-    /** The support report (no secrets) for the share sheet. */
-    fun diagnostics(): String {
+    /** Builds the support report off the main thread (it reads the log), then hands it to [onReady] on the main thread. */
+    fun shareDiagnostics(onReady: (String) -> Unit) {
+        viewModelScope.launch { onReady(withContext(Dispatchers.IO) { diagnostics() }) }
+    }
+
+    /** Reads the log off the main thread, then hands it to [onReady]. */
+    fun shareLog(onReady: (String) -> Unit) {
+        viewModelScope.launch { onReady(withContext(Dispatchers.IO) { repo.logText() }) }
+    }
+
+    /** The support report (no secrets). Reads the log file: call it off the main thread. */
+    private fun diagnostics(): String {
         val s = _state.value
         val relayHost = if (repo.settings.authMode == AuthMode.SERVER) {
             runCatching { java.net.URL(repo.relayBase() ?: "").host }.getOrNull()
@@ -671,7 +796,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         versionTaps.addLast(now)
         while (versionTaps.isNotEmpty() && now - versionTaps.first() >= 3_000) versionTaps.removeFirst()
         if (versionTaps.size >= 7) {
-            _state.update { it.copy(devRevealed = true, snackbar = "Development builds can be switched on below") }
+            _state.update { it.copy(devRevealed = true, snackbar = "Development builds can now be switched on — scroll down, after Recent activity") }
         }
     }
 
@@ -693,15 +818,16 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             repo.openInstallPermissionSettings()
             return
         }
-        pendingRemovals[app.id] = repo.installedVersionFor(app.id)
+        val version = _state.value.statuses.firstOrNull { it.app.id == app.id }?.installedVersion
+        synchronized(pendingRemovals) { pendingRemovals[app.id] = version }
         repo.remove(app.id)
         viewModelScope.launch {
             for (i in 0 until 240) {                     // up to 2 minutes for the system uninstall dialog
                 kotlinx.coroutines.delay(500)
-                if (!repo.isInstalled(app.id)) break
+                if (!withContext(Dispatchers.IO) { repo.isInstalled(app.id) }) break
             }
             refreshInstalledOnly()
-            if (repo.isInstalled(app.id)) {
+            if (withContext(Dispatchers.IO) { repo.isInstalled(app.id) }) {
                 _state.update { it.copy(snackbar = "${app.name} was not removed, so it's still on the dev build") }
                 return@launch
             }

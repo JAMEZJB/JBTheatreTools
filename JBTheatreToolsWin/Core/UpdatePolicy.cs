@@ -4,10 +4,10 @@ namespace JBTheatreTools;
 /// automatic updates — kept pure so they're unit-tested and identical on every launcher.</summary>
 public static class UpdatePolicy
 {
-    /// <summary>The "While open, check every" choices (settings value → label). The first is the default.</summary>
+    /// <summary>The "While open, check again" choices (settings value → label), shortest first. Default: <see cref="DefaultInterval"/>.</summary>
     public static readonly (string Raw, string Label)[] Intervals =
     {
-        ("4h", "4 hours"), ("1h", "Hour"), ("12h", "12 hours"), ("24h", "Day"), ("off", "Off"),
+        ("1h", "Every hour"), ("4h", "Every 4 hours"), ("12h", "Every 12 hours"), ("24h", "Once a day"), ("off", "Never"),
     };
     public const string DefaultInterval = "4h";
 

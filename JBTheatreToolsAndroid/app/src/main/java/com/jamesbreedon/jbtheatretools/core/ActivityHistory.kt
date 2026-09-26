@@ -19,7 +19,7 @@ data class ActivityEvent(
     val at: Instant,
     val app: String,
     val name: String,
-    /** install · update · downgrade · reinstall · uninstall · failed */
+    /** install · update · downgrade · reinstall · uninstall · failed · cancelled */
     val action: String,
     val from: String? = null,
     val to: String? = null,
@@ -58,6 +58,13 @@ object ActivityHistory {
         }
     }
 
+    /**
+     * A history file that exists and has content but isn't a JSON list: damaged. The repository keeps it aside as
+     * history.json.bad before writing a new one, rather than silently overwriting the old history.
+     */
+    fun isDamaged(json: String?): Boolean =
+        !json.isNullOrBlank() && runCatching { Json.parseToJsonElement(json) }.getOrNull() !is JsonArray
+
     private fun str(o: JsonObject, name: String): String? =
         (o[name] as? JsonPrimitive)?.takeIf { it.isString }?.content
 
@@ -91,6 +98,8 @@ object ActivityHistory {
             "reinstall" -> "Reinstalled ${e.name}${v(e.to)}"
             "uninstall" -> "Removed ${e.name}${v(e.from)}"
             "failed" -> "Couldn't install ${e.name}${v(e.to)}" + (e.note?.let { ": $it" } ?: "")
+            // The system's install dialog was cancelled: nothing went wrong.
+            "cancelled" -> "Cancelled installing ${e.name}${v(e.to)}"
             else -> "${e.action} ${e.name}${v(e.to)}"
         }
     }

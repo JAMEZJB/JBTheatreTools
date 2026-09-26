@@ -21,7 +21,7 @@ public sealed class AppSettings
     public bool ShowLock { get; set; }                    // show lock: installs / updates / removals paused, Launch still works
     public List<string> HeldApps { get; set; } = new();   // app ids held at their installed version (Update All leaves them)
     public string AutoCheckInterval { get; set; } = UpdatePolicy.DefaultInterval; // "off" | "1h" | "4h" | "12h" | "24h" (while open)
-    public bool NotifyUpdates { get; set; } = true;       // notify (tray balloon) when a check finds new updates
+    public bool NotifyUpdates { get; set; }               // opt-in: notify (tray balloon) when a check finds new updates
     public bool AutoInstallUpdates { get; set; }          // install updates automatically after a check (never for open apps)
     public List<string> NotifiedUpdates { get; set; } = new(); // "id version" keys already announced
     public string LastSeenLauncherVersion { get; set; } = ""; // drives the one-time "Updated to vX" banner

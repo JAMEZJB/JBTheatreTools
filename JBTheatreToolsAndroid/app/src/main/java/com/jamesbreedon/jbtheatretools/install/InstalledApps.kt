@@ -24,31 +24,37 @@ class InstalledApps(private val context: Context) {
         val apkBytes: Long = 0,
     )
 
-    /** The installed record for a catalog id, or null when that app isn't installed. */
-    fun forCatalogId(catalogId: String): Installed? {
+    /**
+     * The installed record for a catalog id, or null when that app isn't installed. [withSize] also measures the
+     * APK(s) on disk — file IO, so only the details sheet and Storage ask for it (off the main thread); the version
+     * checks on every resume don't.
+     */
+    fun forCatalogId(catalogId: String, withSize: Boolean = false): Installed? {
         val pkg = PackageIds.packageId(catalogId) ?: return null
-        return forPackage(pkg)
+        return forPackage(pkg, withSize)
     }
 
-    fun forPackage(packageName: String): Installed? = try {
+    fun forPackage(packageName: String, withSize: Boolean = false): Installed? = try {
         val info = context.packageManager.getPackageInfo(packageName, 0)
         val appInfo = info.applicationInfo
-        val apks = listOfNotNull(appInfo?.sourceDir) + (appInfo?.splitSourceDirs?.toList() ?: emptyList())
         Installed(
             packageName = packageName,
             versionName = info.versionName.orEmpty(),
             versionCode = androidx.core.content.pm.PackageInfoCompat.getLongVersionCode(info),
             lastUpdateTime = info.lastUpdateTime,
-            apkBytes = apks.sumOf { runCatching { java.io.File(it).length() }.getOrDefault(0L) },
+            apkBytes = if (!withSize) 0L else {
+                val apks = listOfNotNull(appInfo?.sourceDir) + (appInfo?.splitSourceDirs?.toList() ?: emptyList())
+                apks.sumOf { runCatching { java.io.File(it).length() }.getOrDefault(0L) }
+            },
         )
     } catch (e: PackageManager.NameNotFoundException) {
         null
     }
 
     /** Every suite app currently installed, keyed by applicationId. */
-    fun scan(): Map<String, Installed> {
+    fun scan(withSize: Boolean = false): Map<String, Installed> {
         val out = LinkedHashMap<String, Installed>()
-        for (pkg in PackageIds.all()) forPackage(pkg)?.let { out[pkg] = it }
+        for (pkg in PackageIds.all()) forPackage(pkg, withSize)?.let { out[pkg] = it }
         return out
     }
 }

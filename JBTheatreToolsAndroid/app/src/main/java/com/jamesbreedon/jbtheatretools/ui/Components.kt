@@ -33,7 +33,12 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -306,34 +311,92 @@ fun HouseTextField(
     }
 }
 
-/** A segmented control — the kit's `.seg` (used for Appearance). */
+/**
+ * A segmented control — the kit's `.seg`. Segments share the width equally when every label fits that way; when they
+ * don't (a long label, a large font scale, a narrow phone) each segment takes its label's width plus an even share of
+ * what's left, and segments that still don't fit wrap onto another row — a label is never squeezed or cut off.
+ * TalkBack hears each segment's role and whether it's selected ([role]: Tab for a filter, RadioButton for a setting).
+ */
 @Composable
-fun Segmented(options: List<String>, selectedIndex: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
+fun Segmented(
+    options: List<String>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    role: Role = Role.RadioButton,
+) {
     val c = House.colors
-    Row(
-        modifier
-            .height(Metrics.touchTarget)
+    val segmentShape = RoundedCornerShape(Radii.control - 2.dp)
+    Layout(
+        modifier = modifier
             .clip(RoundedCornerShape(Radii.control))
             .background(c.sunken)
-            .padding(3.dp),
-        horizontalArrangement = Arrangement.spacedBy(3.dp),
-    ) {
-        options.forEachIndexed { i, label ->
-            val active = i == selectedIndex
-            Box(
-                Modifier
-                    .weight(1f)
-                    .fillMaxSize()
-                    .clip(RoundedCornerShape(Radii.control - 2.dp))
-                    .background(if (active) c.surface else Color.Transparent)
-                    .clickable { onSelect(i) },
-                contentAlignment = Alignment.Center,
-            ) {
-                SmallText(
-                    label,
-                    color = if (active) c.text else c.text2,
-                    weight = if (active) FontWeight.SemiBold else FontWeight.Medium,
-                )
+            .padding(3.dp)
+            .selectableGroup(),
+        content = {
+            options.forEachIndexed { i, label ->
+                val active = i == selectedIndex
+                Box(
+                    Modifier
+                        .clip(segmentShape)
+                        .background(if (active) c.surface else Color.Transparent)
+                        .selectable(selected = active, role = role, onClick = { onSelect(i) })
+                        .padding(horizontal = 10.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    SmallText(
+                        label,
+                        color = if (active) c.text else c.text2,
+                        weight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+                        align = TextAlign.Center,
+                    )
+                }
+            }
+        },
+    ) { measurables, constraints ->
+        val gap = 3.dp.roundToPx()
+        val minRow = (Metrics.touchTarget - 6.dp).roundToPx()          // 38dp inside the 3dp inset: a 44dp control
+        val natural = measurables.map { it.maxIntrinsicWidth(minRow) }
+        val avail = if (constraints.hasBoundedWidth) constraints.maxWidth
+            else natural.sum() + gap * (natural.size - 1).coerceAtLeast(0)
+        val n = measurables.size
+        // Rows of indices: one row of equal widths when the widest label allows it, else packed greedily.
+        val rows = ArrayList<List<Int>>()
+        val equal = n > 0 && (natural.maxOrNull() ?: 0) * n + gap * (n - 1) <= avail
+        if (equal) rows.add((0 until n).toList())
+        else {
+            var row = ArrayList<Int>()
+            var used = 0
+            for (i in 0 until n) {
+                val w = natural[i]
+                if (row.isNotEmpty() && used + gap + w > avail) { rows.add(row); row = ArrayList(); used = 0 }
+                used += (if (row.isEmpty()) 0 else gap) + w
+                row.add(i)
+            }
+            if (row.isNotEmpty()) rows.add(row)
+        }
+        val widths = IntArray(n)
+        for (row in rows) {
+            val space = avail - gap * (row.size - 1)
+            if (equal) row.forEach { widths[it] = space / row.size }
+            else {
+                // Each segment: its label's width plus an even share of the leftover (never less than it needs).
+                val extra = (space - row.sumOf { natural[it] }).coerceAtLeast(0)
+                row.forEachIndexed { k, i -> widths[i] = minOf(space, natural[i] + extra / row.size + if (k < extra % row.size) 1 else 0) }
+            }
+        }
+        val rowHeights = rows.map { row -> maxOf(minRow, row.maxOf { measurables[it].minIntrinsicHeight(widths[it]) }) }
+        val placeables = arrayOfNulls<androidx.compose.ui.layout.Placeable>(n)
+        rows.forEachIndexed { r, row ->
+            row.forEach { i -> placeables[i] = measurables[i].measure(Constraints.fixed(widths[i], rowHeights[r])) }
+        }
+        val height = rowHeights.sum() + gap * (rows.size - 1).coerceAtLeast(0)
+        layout(avail, height) {
+            var y = 0
+            rows.forEachIndexed { r, row ->
+                var x = 0
+                row.forEach { i -> placeables[i]!!.placeRelative(x, y); x += widths[i] + gap }
+                y += rowHeights[r] + gap
             }
         }
     }

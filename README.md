@@ -28,18 +28,22 @@ The same features on every launcher (the few that don't apply to Android are mar
   download is, and Update All / Download All show the total download.
 - **Hold an app at its version** — Update All, automatic updates and update notifications leave a held app
   alone (it shows "Held" instead of "Update") until the hold is released.
-- **Show lock** — for show time: installs, updates, roll backs, removals and imports are paused, while
-  launching still works (⌘L / Ctrl+L). The command line honours it too.
+- **Show lock** — for show time: installs, updates, roll backs, uninstalls and imports are paused, and so are
+  scheduled checks and automatic updates, while launching still works (⌘L / Ctrl+L). Turning it off asks
+  first. The command line honours it too.
 - **One-click roll back** *(desktop)* — go back to the version you had before the last update; the app is
   then held there.
-- **Activity history** — installs, updates, downgrades, removals and failures, newest first, with times
+- **Activity history** — installs, updates, downgrades, uninstalls and failures, newest first, with times
   (⌘Y on macOS, Ctrl+H on Windows).
 - **Export / import a setup** — save which apps (and editions) are installed, their versions, holds and
   the list layout to a small JSON file; importing it on another machine previews exactly what will be
   installed or skipped before anything happens. Any launcher reads any other's file.
-- **Scheduled checks** — while the launcher is open it checks again every 1, 4 (default), 12 or 24 hours.
-- **Update notifications** — a system notification when a check finds new updates while the launcher is in
-  the background, once per version.
+- **Scheduled checks** — while the launcher is open it checks again every hour, 4 hours (default), 12 hours
+  or once a day (with "Check for updates" set to Every launch). A check that fails in the background leaves
+  the list as it was. On Android, background checks run on Wi-Fi.
+- **Update notifications** *(opt-in)* — a system notification when a check finds new updates while the
+  launcher is in the background, once per version. The system asks for permission only when you switch
+  them on.
 - **Automatic updates** *(desktop, opt-in)* — after each check, updates install on their own: never for
   held apps, apps that are open, or under show lock.
 - **Cancel and Stop** — cancel a single download; Stop ends an Update All / Download All after the app that's
@@ -52,11 +56,12 @@ The same features on every launcher (the few that don't apply to Android are mar
 - **Quick launch** — a menu-bar icon on macOS and a Launch submenu in the Windows tray (optionally always
   shown) open any installed app directly; on Android up to four installed apps, most recently opened
   first, become shortcuts on the launcher's icon.
-- **Keyboard shortcuts** *(desktop)* — check for updates (⌘R / F5), find, update all (⌘U / Ctrl+U),
+- **Keyboard shortcuts** *(desktop)* — refresh (⌘R / F5), find, update all (⌘U / Ctrl+U),
   show lock, activity, settings (⌘, / Ctrl+,) and list / grid view (⌘1 ⌘2 / Ctrl+1 Ctrl+2).
 - **Diagnostics** — one click copies (or on Android shares) a plain-text support report: versions,
-  settings, every app's state and recent log lines. Tokens, passphrases and credentials in URLs are
-  always redacted.
+  settings, every app's state and recent log lines. The token and passphrase are never included, and
+  token-shaped strings in log lines are masked — read the report before sending it, as log lines can
+  contain file paths.
 - **What's new in the launcher** — after the launcher updates itself it offers, once, the notes of every
   release since the version you had.
 

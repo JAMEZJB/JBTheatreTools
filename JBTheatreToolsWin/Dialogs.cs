@@ -30,6 +30,24 @@ internal static class DialogKit
         f.FormClosed += (_, _) => font.Dispose();
     }
 
+    /// <summary>The one confirmation behind every way of turning show lock OFF (the banner, the More menu, Ctrl+L, the
+    /// Settings checkbox). Keep On is the default (Enter) and what Esc or the close box answer: turning the lock off
+    /// mid-show takes a deliberate click. True = turn it off.</summary>
+    public static bool ConfirmTurnOffShowLock(IWin32Window owner)
+    {
+        var keep = new TaskDialogButton("Keep On");
+        var off = new TaskDialogButton("Turn Off");
+        var page = new TaskDialogPage
+        {
+            Caption = "Turn Off Show Lock?",
+            Text = "Installs, updates and uninstalls can run again, including automatic updates if they're switched on.",
+            Buttons = { keep, off },
+            DefaultButton = keep,
+            AllowCancel = true,   // Esc / the close box → TaskDialogButton.Cancel, i.e. not "Turn Off"
+        };
+        return TaskDialog.ShowDialog(owner, page) == off;
+    }
+
     /// <summary>A pop-up menu built for one showing is disposed once it has closed (after its click has run).</summary>
     public static void DisposeWhenClosed(ContextMenuStrip menu, Control owner)
         => menu.Closed += (_, _) => { if (owner.IsHandleCreated) owner.BeginInvoke(new Action(menu.Dispose)); else menu.Dispose(); };
@@ -72,6 +90,17 @@ internal static class DialogKit
         return p;
     }
 
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    /// <summary>Pauses (false) or resumes (true) painting of a control; resuming repaints it once.</summary>
+    public static void SetRedraw(Control c, bool on)
+    {
+        if (!c.IsHandleCreated) return;
+        SendMessage(c.Handle, 0x000B /* WM_SETREDRAW */, on ? (IntPtr)1 : IntPtr.Zero, IntPtr.Zero);
+        if (on) c.Invalidate(true);
+    }
+
     public static void Append(RichTextBox box, string text, Font font, Color color)
     {
         box.SelectionStart = box.TextLength;
@@ -109,29 +138,36 @@ internal sealed class ReleaseNotesDialog : Form
         {
             Font F(float pt, bool semi = false) { var f = Theme.Ui(pt, semi, DeviceDpi); _fonts.Add(f); return f; }
             Font head = F(Theme.PtTitle, true), meta = F(Theme.PtSmall), body = F(Theme.PtBody);
-            if (list.Count == 0)
+            // One repaint for the whole fill: each Append is a selection change, and a long release list
+            // otherwise redraws the box dozens of times on the UI thread.
+            DialogKit.SetRedraw(reader, false);
+            try
             {
-                DialogKit.Append(reader, fallback ?? ReleaseNotesText.Empty, body, Theme.Fg(dark));
+                if (list.Count == 0)
+                {
+                    DialogKit.Append(reader, fallback ?? ReleaseNotesText.Empty, body, Theme.Fg(dark));
+                }
+                var now = DateTimeOffset.UtcNow;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var r = list[i];
+                    if (i > 0) DialogKit.Append(reader, "\n\n", body, Theme.Fg(dark));
+                    DialogKit.Append(reader, VersionCompare.Display(r.TagName), head, Theme.Fg(dark));
+                    var bits = new List<string>();
+                    if (r.Published is { } p)
+                        bits.Add($"{p.ToLocalTime().ToString("d MMM yyyy", CultureInfo.InvariantCulture)} ({RelativeAge.Describe(p, now)})");
+                    if (r.Prerelease) bits.Add(VersionCompare.IsDev(r.TagName) ? "development build" : "pre-release");
+                    if (bits.Count > 0) DialogKit.Append(reader, "   " + string.Join(" · ", bits), meta, Theme.Sub(dark));
+                    if (installed != null && VersionCompare.Equal(r.TagName, installed))
+                        DialogKit.Append(reader, "   ✓ installed", meta, Theme.Ok);
+                    else if (installed != null && VersionCompare.IsNewer(r.TagName, installed))
+                        DialogKit.Append(reader, "   New since your version", meta, Theme.Accent);
+                    DialogKit.Append(reader, "\n" + ReleaseNotesText.Plain(r.Body), body, Theme.Fg(dark));
+                }
+                reader.SelectionStart = 0;
+                reader.ScrollToCaret();
             }
-            var now = DateTimeOffset.UtcNow;
-            for (int i = 0; i < list.Count; i++)
-            {
-                var r = list[i];
-                if (i > 0) DialogKit.Append(reader, "\n\n", body, Theme.Fg(dark));
-                DialogKit.Append(reader, VersionCompare.Display(r.TagName), head, Theme.Fg(dark));
-                var bits = new List<string>();
-                if (r.Published is { } p)
-                    bits.Add($"{p.ToLocalTime().ToString("d MMM yyyy", CultureInfo.InvariantCulture)} ({RelativeAge.Describe(p, now)})");
-                if (r.Prerelease) bits.Add(VersionCompare.IsDev(r.TagName) ? "development build" : "pre-release");
-                if (bits.Count > 0) DialogKit.Append(reader, "   " + string.Join(" · ", bits), meta, Theme.Sub(dark));
-                if (installed != null && VersionCompare.Equal(r.TagName, installed))
-                    DialogKit.Append(reader, "   ✓ installed", meta, Theme.Ok);
-                else if (installed != null && VersionCompare.IsNewer(r.TagName, installed))
-                    DialogKit.Append(reader, "   New since your version", meta, Theme.Accent);
-                DialogKit.Append(reader, "\n" + ReleaseNotesText.Plain(r.Body), body, Theme.Fg(dark));
-            }
-            reader.SelectionStart = 0;
-            reader.ScrollToCaret();
+            finally { DialogKit.SetRedraw(reader, true); }
         };
         FormClosed += (_, _) => { foreach (var f in _fonts) f.Dispose(); };
     }
@@ -160,7 +196,7 @@ internal sealed class HistoryDialog : Form
             Font when = F(Theme.PtSmall), what = F(Theme.PtBody);
             if (events.Count == 0)
             {
-                DialogKit.Append(reader, "Nothing yet — installs, updates and removals will be listed here.", what, Theme.Sub(dark));
+                DialogKit.Append(reader, "Nothing yet — installs, updates and uninstalls will be listed here.", what, Theme.Sub(dark));
                 return;
             }
             reader.SelectionTabs = new[] { Theme.Px(150, DeviceDpi) };

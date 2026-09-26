@@ -123,13 +123,20 @@ object SetupPlanner {
     data class Plan(
         val toInstall: List<Install>, val alreadyInstalled: List<String>,
         val skipped: List<String>, val holdIds: List<String>,
+        /** The held apps' names, for the preview. */
+        val holdNames: List<String> = emptyList(),
     )
 
+    /**
+     * [allowDevTags] false (Development builds off on this device): an entry held at a development build is skipped —
+     * listed under Skipped, not installed and not held — so the preview never promises what the import won't do.
+     */
     fun build(
         profile: SetupProfile,
         catalog: List<CatalogEntry>,
         installedKeys: Set<String>,
         supportsVariants: Boolean = true,
+        allowDevTags: Boolean = true,
     ): Plan {
         val byId = catalog.associateBy { it.id }
         val toInstall = ArrayList<Install>()
@@ -152,17 +159,32 @@ object SetupPlanner {
             val key = if (variant == null) app.id else "${app.id}@$variant"
             if (!seenKeys.add(key)) continue
             val label = if (variantLabel == null) app.name else "${app.name} ($variantLabel)"
+            if (e.held && e.version != null && !allowDevTags && VersionCompare.isDev(e.version)) {
+                skipped.add("$label ${VersionCompare.display(e.version)} — a development build (not switched on here)")
+                continue
+            }
             if (e.held && app.id !in hold) hold.add(app.id)
             if (key in installedKeys) { already.add(label); continue }
             toInstall.add(Install(app.id, variant, if (e.held) e.version else null, label))
         }
-        return Plan(toInstall, already, skipped, hold)
+        return Plan(toInstall, already, skipped, hold, hold.map { id -> byId[id]?.name ?: id })
+    }
+
+    /**
+     * How the preview names this platform: the desktop launchers say "machine", "Update All" and mention automatic
+     * updates; Android says "device" and "Update all", and has no automatic updates to mention.
+     */
+    data class Wording(val device: String, val updateAll: String, val automaticUpdates: Boolean) {
+        companion object {
+            val DESKTOP = Wording("machine", "Update All", automaticUpdates = true)
+            val ANDROID = Wording("device", "Update all", automaticUpdates = false)
+        }
     }
 
     /** The preview text shown before an import runs. */
-    fun summary(plan: Plan): String {
+    fun summary(plan: Plan, wording: Wording = Wording.DESKTOP): String {
         val sb = StringBuilder()
-        if (plan.toInstall.isEmpty()) sb.append("Nothing to install — this machine already has every app in the file.")
+        if (plan.toInstall.isEmpty()) sb.append("Nothing to install — this ${wording.device} already has every app in the file.")
         else {
             sb.append("Install ${plan.toInstall.size} app${if (plan.toInstall.size == 1) "" else "s"}:")
             for (i in plan.toInstall)
@@ -171,7 +193,10 @@ object SetupPlanner {
         if (plan.alreadyInstalled.isNotEmpty())
             sb.append("\n\nAlready installed (left as they are): ${plan.alreadyInstalled.joinToString(", ")}")
         if (plan.holdIds.isNotEmpty())
-            sb.append("\n\nHeld at their versions: ${plan.holdIds.size} app${if (plan.holdIds.size == 1) "" else "s"}")
+            sb.append("\n\nHeld at their versions: ${plan.holdIds.size} app${if (plan.holdIds.size == 1) "" else "s"}" +
+                (if (plan.holdNames.isEmpty()) "" else " (${plan.holdNames.joinToString(", ")})") +
+                " — " + (if (wording.automaticUpdates) "${wording.updateAll} and automatic updates leave" else "${wording.updateAll} leaves") +
+                " them at the version this ${wording.device} has")
         if (plan.skipped.isNotEmpty())
             sb.append("\n\nSkipped:\n  • ").append(plan.skipped.joinToString("\n  • "))
         return sb.toString()

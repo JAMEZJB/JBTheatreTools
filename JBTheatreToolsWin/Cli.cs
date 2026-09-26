@@ -43,6 +43,14 @@ public static class Cli
 
     public static async Task<int> Run(string[] args)
     {
+        // History.Add queues its write on the thread pool; the process exits as soon as this returns, so wait for
+        // every queued line (bounded) before any command hands back its exit code.
+        try { return await RunCommandAsync(args); }
+        finally { History.Flush(); }
+    }
+
+    private static async Task<int> RunCommandAsync(string[] args)
+    {
         // The verb may appear anywhere (e.g. `--token X --install helo`); find the first recognised one
         // rather than assuming args[0]. Args present but no verb → usage error (don't open the GUI).
         var cmd = args.FirstOrDefault(a => Commands.Contains(a));
@@ -105,7 +113,7 @@ public static class Cli
         // Show lock (set in the app) pauses installs, updates and removals — the command line honours it too.
         if (settings.ShowLock && cmd is "--install" or "--uninstall")
         {
-            Console.Error.WriteLine("error: show lock is on — installs, updates and removals are paused. Turn it off in JB Theatre Tools (More ▾ → Show lock) first.");
+            Console.Error.WriteLine("error: show lock is on — installs, updates and uninstalls are paused. Turn it off in JB Theatre Tools (More ▾ → Show lock) first.");
             return 1;
         }
 
@@ -216,7 +224,7 @@ public static class Cli
         {
             var all = await client.ReleasesAsync(app.Owner, app.Repo);
             var rel = tag != null
-                ? all.FirstOrDefault(r => r.TagName == tag)
+                ? all.FirstOrDefault(r => VersionCompare.Equal(r.TagName, tag))   // "1.2.0" finds "v1.2.0"
                 : Versions.Latest(all);
             if (rel == null) { Console.Error.WriteLine($"error: version {tag ?? "latest"} not found."); return 1; }
             var asset = rel.Assets.FirstOrDefault(a => a.Name == app.WindowsAssetName);
