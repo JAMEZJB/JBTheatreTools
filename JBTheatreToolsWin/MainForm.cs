@@ -10,7 +10,7 @@ public sealed class MainForm : Form
     private Catalog _catalog = new();
     private readonly List<AppRowControl> _rows = new();
 
-    private readonly FlowLayoutPanel _list = new();
+    private readonly RowList _list = new();
     private readonly Panel _tokenBanner = new();
     private readonly Label _tokenBannerText = new();
     private readonly Panel _updateBanner = new();
@@ -50,7 +50,10 @@ public sealed class MainForm : Form
     private readonly HouseSegmented _statusFilter =
         new(Enum.GetValues<StatusFilter>().Select(AppFilter.Label)) { AccessibleName = "Show" };
     private readonly Label _filterCount = new();
-    private readonly Label _noMatches = new();
+    // The find bar matched nothing (the macOS noMatches band): a magnifier, what was searched for, and Clear Filter.
+    private readonly Panel _noMatches = new();
+    private readonly Label _noMatchesText = new();
+    private readonly HouseButton _clearFilter = new(HouseRole.Secondary) { Text = "Clear Filter", AutoSize = true };
 
     // Scheduled checks, batch control and per-row download cancellation.
     private readonly System.Windows.Forms.Timer _scheduler = new() { Interval = 60_000 };
@@ -63,7 +66,7 @@ public sealed class MainForm : Form
     private bool _hiddenToTray;
     private bool _balloonShowing;
     private bool _historyOpening;
-    private readonly ToolTip _headerTip = new();
+    private readonly ToolTip _headerTip = HouseTip.Create();
 
     // DPI: every pixel number in this form is a 96-DPI design value scaled through S() at the form's
     // DeviceDpi (Theme.Px); the house-font labels are built in device pixels for the same DPI. The
@@ -72,9 +75,43 @@ public sealed class MainForm : Form
     private int _chromeDpi;
     private readonly List<Font> _chromeFonts = new();
     private int S(int v) => Theme.Px(v, DeviceDpi);
-    /// <summary>Width the list's rows / section headers stretch to (the list's client width less its
-    /// padding and a little air for the scrollbar).</summary>
-    private int ListInnerWidth => _list.ClientSize.Width - S(30);
+    /// <summary>Width the list's rows / section headers stretch to: the list's client width less its padding, and less
+    /// the vertical scrollbar when the content is about to need one (see RowList).</summary>
+    private int ListInnerWidth
+    {
+        get
+        {
+            int w = _list.ClientSize.Width - _list.Padding.Horizontal;
+            if (!_list.VerticalScroll.Visible && _list.IsHandleCreated
+                && _list.GetPreferredSize(new Size(_list.ClientSize.Width, 0)).Height > _list.ClientSize.Height)
+                w -= SystemInformation.GetVerticalScrollBarWidthForDpi(DeviceDpi);
+            return Math.Max(S(200), w);
+        }
+    }
+
+    /// <summary>The app list. Its rows and section headers are sized to the list's width at the START of each of its
+    /// layout passes (<see cref="BeforeLayout"/>), before WinForms works out the scrollbars. They used to be sized in a
+    /// Resize handler, which runs after the pass the resize itself triggers: shrinking the window laid out the old,
+    /// wider rows first, the horizontal scrollbar came on, and once on, ScrollableControl keeps its display rectangle at
+    /// the old width — so the scrollbar stayed (the minimum-width bug) although every row fitted. Sizing them first,
+    /// and leaving room for a vertical scrollbar the pass is about to add, means they never overflow.</summary>
+    private sealed class RowList : FlowLayoutPanel
+    {
+        public Action? BeforeLayout;
+
+        public RowList() { DoubleBuffered = true; }   // the live drag-reorder reflow doesn't flicker
+
+        protected override void OnLayout(LayoutEventArgs levent)
+        {
+            SuspendLayout();   // the width changes below mustn't each start a layout of their own
+            try { BeforeLayout?.Invoke(); }
+            finally { ResumeLayout(false); }
+            base.OnLayout(levent);
+        }
+
+        // A scrollbar appearing or going changes only the client size, which doesn't lay the panel out by itself.
+        protected override void OnClientSizeChanged(EventArgs e) { base.OnClientSizeChanged(e); PerformLayout(); }
+    }
 
     // Tray support for the "keep running" close behaviour.
     private readonly NotifyIcon _tray = new();
@@ -108,7 +145,7 @@ public sealed class MainForm : Form
     {
         Text = "JB Theatre Tools";
         AutoScaleMode = AutoScaleMode.None;   // see the DPI note on the fields above
-        ClientSize = new Size(S(760), S(560));
+        ClientSize = new Size(S(800), S(560));   // the header's subtitle fits beside the buttons at this width (Inter)
         StartPosition = FormStartPosition.CenterScreen;
         TryLoadIcon();
 
@@ -138,9 +175,7 @@ public sealed class MainForm : Form
         _list.FlowDirection = FlowDirection.TopDown;
         _list.WrapContents = false;
         _list.AutoScroll = true;
-        // Double-buffer the panel so the live drag-reorder reflow doesn't flicker.
-        typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
-            ?.SetValue(_list, true);
+        _list.BeforeLayout = FitListWidths;
         _list.HandleCreated += (_, _) => HouseDraw.NativeTheme(_list, Theme.CurrentDark);
         root.Controls.Add(_list, 0, 6);
 
@@ -226,6 +261,12 @@ public sealed class MainForm : Form
         _settingsBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _settingsBtn.Click += (_, _) => OpenSettings();
 
+        // The macOS header's help tags (house tooltips).
+        _headerTip.SetToolTip(_refresh, "Check every app for updates (F5)");
+        _headerTip.SetToolTip(_viewToggle, "Switch between list and grid view (Ctrl+1 / Ctrl+2)");
+        _headerTip.SetToolTip(_moreBtn, "Show lock, activity, setup files and diagnostics");
+        _headerTip.SetToolTip(_settingsBtn, "Settings (Ctrl+,)");
+
         header.Controls.AddRange(new Control[] { _identity, _title, _subtitle, _statusLine, _downloadAll, _viewToggle, _moreBtn, _refresh, _settingsBtn });
         header.Resize += (_, _) => LayoutHeaderButtons();
         return header;
@@ -264,6 +305,13 @@ public sealed class MainForm : Form
         _title.Left = _subtitle.Left = _statusLine.Left = tx;
         _subtitle.Visible = tx + _subtitle.Width + S(16) <= leftmost;
         _statusLine.Visible = tx + _statusLine.Width + S(16) <= leftmost;
+        // The text column is centred on the header whichever lines show, so a subtitle that steps aside leaves no gap
+        // between the title and the status line (2 px between lines, as designed).
+        var lines = new List<Control> { _title };
+        if (_subtitle.Visible) lines.Add(_subtitle);
+        if (_statusLine.Visible) lines.Add(_statusLine);
+        int y = (_header.Height - (lines.Sum(l => l.Height) + S(2) * (lines.Count - 1))) / 2;
+        foreach (var l in lines) { l.Top = y; y = l.Bottom + S(2); }
     }
 
     private Control BuildUpdateBanner()
@@ -374,15 +422,43 @@ public sealed class MainForm : Form
         _filterBar.Controls.AddRange(new Control[] { _searchBox, _statusFilter, _filterCount });
         _filterBar.Resize += (_, _) => LayoutFilterBar();
 
-        _noMatches.AutoSize = true;
-        _noMatches.UseMnemonic = false;
-        _noMatches.Text = "No apps match — clear the search or pick another filter.";
+        _noMatchesText.AutoSize = true;
+        _noMatchesText.UseMnemonic = false;
+        _noMatchesText.AutoEllipsis = false;
+        _clearFilter.Click += (_, _) => { _search.Clear(); _statusFilter.SelectedIndex = 0; };
+        _noMatches.Controls.Add(_noMatchesText);
+        _noMatches.Controls.Add(_clearFilter);
         _noMatches.Visible = false;
+        _noMatches.Resize += (_, _) => LayoutNoMatches();
+        _noMatches.Paint += (_, e) =>
+        {
+            // Magnifier in the tertiary tone (the search field's glyph), and the band's 40% hairline (the kit's .banner).
+            var g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            float k = DeviceDpi / 96f, cx = S(14) + 4.5f * k, cy = _noMatches.Height / 2f - 1f * k;
+            var muted = Theme.Muted(Theme.CurrentDark);
+            using var lens = new Pen(muted, 1.5f * k) { StartCap = System.Drawing.Drawing2D.LineCap.Round, EndCap = System.Drawing.Drawing2D.LineCap.Round };
+            g.DrawEllipse(lens, cx - 4.5f * k, cy - 4.5f * k, 9f * k, 9f * k);
+            g.DrawLine(lens, cx + 3.3f * k, cy + 3.3f * k, cx + 6.6f * k, cy + 6.6f * k);
+            using var edge = new Pen(Theme.Blend(muted, _noMatches.BackColor, 0.40));
+            g.DrawLine(edge, 0, _noMatches.Height - 1, _noMatches.Width, _noMatches.Height - 1);
+        };
         return _filterBar;
     }
 
     /// <summary>The search field takes up to 260 px (less at narrow widths, never under 140), the segmented filter
     /// sits after it, and the count after that; the field matches the filter's height so the bar reads as one row.</summary>
+    /// <summary>The no-match band: the text after the magnifier, Clear Filter right-aligned, 12 px padding.</summary>
+    private void LayoutNoMatches()
+    {
+        int pad = S(12);
+        _clearFilter.Rescale();
+        _noMatches.Height = Math.Max(_clearFilter.Height, _noMatchesText.Height) + 2 * pad;
+        _clearFilter.Location = new Point(_noMatches.Width - pad - _clearFilter.Width, (_noMatches.Height - _clearFilter.Height) / 2);
+        _noMatchesText.MaximumSize = new Size(Math.Max(S(80), _clearFilter.Left - S(12) - S(36)), 0);
+        _noMatchesText.Location = new Point(S(36), (_noMatches.Height - _noMatchesText.Height) / 2);
+    }
+
     private void LayoutFilterBar()
     {
         int h = Math.Max(_statusFilter.Height, _search.Height + S(8));
@@ -472,7 +548,7 @@ public sealed class MainForm : Form
             _lockBannerText.Font = F(Theme.PtTitle, semibold: true);     // t-status 15px/600
             _whatsNewText.Font = F(Theme.PtTitle, semibold: true);       // t-status 15px/600
             _filterCount.Font = F(Theme.PtSmall);                        // t-small 12px
-            _noMatches.Font = F(Theme.PtBody);                           // body 13px
+            _noMatchesText.Font = F(Theme.PtBody);                       // body 13px
             _credit.Font = F(Theme.PtSmall);                             // t-small 12px
             foreach (var f in old) f.Dispose();
         }
@@ -484,12 +560,11 @@ public sealed class MainForm : Form
         _statusFilter.Rescale();
 
         _header.Padding = new Padding(S(14), S(10), S(14), S(10));
-        // Identity tile, then the title / subtitle / status column beside it.
+        // Identity tile, then the title / subtitle / status column beside it (LayoutHeaderButtons centres the column on
+        // the lines that fit). The header is the 76 px design, floored at the three lines + 10 px above and below.
         int tx = S(14) + S(36) + S(12);
         _title.Location = new Point(tx, S(10));
-        _subtitle.Location = new Point(tx, Math.Max(S(33), _title.Bottom + S(2)));   // floors: never overlap / clip
-        _statusLine.Location = new Point(tx, Math.Max(S(51), _subtitle.Bottom + S(2)));
-        _header.Height = Math.Max(S(76), _statusLine.Bottom + S(10));
+        _header.Height = Math.Max(S(76), _title.Height + _subtitle.Height + _statusLine.Height + S(2) * 2 + S(10) * 2);
         _identity.Size = new Size(S(36), S(36));
         _identity.Location = new Point(S(14), (_header.Height - _identity.Height) / 2);
         LayoutHeaderButtons();
@@ -499,7 +574,8 @@ public sealed class MainForm : Form
         LayoutBanner(_lockBanner, _lockBannerText, _unlockBtn);
         LayoutBanner(_whatsNewBanner, _whatsNewText, _whatsNewDismiss, _whatsNewBtn);
         LayoutFilterBar();
-        _noMatches.Margin = new Padding(S(6), S(16), 0, 0);
+        _noMatches.Margin = new Padding(0, S(6), 0, 0);
+        LayoutNoMatches();
 
         _footer.Height = S(28);
         LayoutFooter();
@@ -556,7 +632,7 @@ public sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Could not load app catalog:\n{ex.Message}", "JB Theatre Tools",
+            HouseMessage.Show(this, $"Could not load app catalog:\n{ex.Message}", "JB Theatre Tools",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
@@ -612,23 +688,19 @@ public sealed class MainForm : Form
             _list.Controls.Add(row);
         }
         _list.Controls.Add(_noMatches);   // the empty-result line; ReindexList places or parks it
-        _list.Resize += (_, _) =>
-        {
-            // Section headers are full-width in BOTH modes (in grid a full-width header forces a wrap, so it
-            // reads as a section break); grid tiles themselves are fixed-size and don't stretch.
-            // Suspended: without it each of the ~27 Width sets ran the FlowLayoutPanel's whole flow engine (and a
-            // scrollbar recompute) — 27 panel layouts per resize tick instead of one (same idiom as RescaleAll).
-            int w = ListInnerWidth;
-            _list.SuspendLayout();
-            try
-            {
-                foreach (var h in _headers.Values) h.Width = w;
-                if (_settings.ViewMode != "grid") foreach (var r in _rows) r.Width = w;
-            }
-            finally { _list.ResumeLayout(true); }
-        };
         ApplyRowOrder();
         ApplyViewMode();
+    }
+
+    /// <summary>Stretches the section headers (full-width in BOTH modes: in grid a full-width header forces a wrap, so it
+    /// reads as a section break), the no-match band and, in list mode, the rows to the list's width. Grid tiles are
+    /// fixed-size. Runs at the start of every list layout (RowList.BeforeLayout); only changed widths are set.</summary>
+    private void FitListWidths()
+    {
+        int w = ListInnerWidth;
+        foreach (var h in _headers.Values) if (h.Width != w) h.Width = w;
+        if (_noMatches.Width != w) _noMatches.Width = w;
+        if (_settings.ViewMode != "grid") foreach (var r in _rows) if (r.Width != w) r.Width = w;
     }
 
     // --- Row ordering (per-machine, persisted in settings.json) ---
@@ -747,7 +819,7 @@ public sealed class MainForm : Form
                 var asset = Platform.Pick(row.App.AssetsFor(vid), Platform.OsIsArm64, on)?.Name;
                 if (row.Releases.Count == 0)
                 {
-                    MessageBox.Show(this, $"The list of {name} releases hasn't loaded yet. Press Refresh, then try again.",
+                    HouseMessage.Show(this, $"The list of {name} releases hasn't loaded yet. Press Refresh, then try again.",
                                     $"Use the {kind} build", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
@@ -756,7 +828,7 @@ public sealed class MainForm : Form
                 if (asset == null || rel == null || !rel.Assets.Any(a => a.Name == asset) || !Versions.HasSignedManifest(rel)
                     || (!Versions.DevChannel && VersionCompare.IsDev(rel.TagName)))
                 {
-                    MessageBox.Show(this, $"{VersionCompare.Display(installed)} of {name} has no verifiable {kind} build, so it can't be switched. It can switch with a later version.",
+                    HouseMessage.Show(this, $"{VersionCompare.Display(installed)} of {name} has no verifiable {kind} build, so it can't be switched. It can switch with a later version.",
                                     $"Use the {kind} build", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
@@ -829,10 +901,11 @@ public sealed class MainForm : Form
         _list.SuspendLayout();
         _list.WrapContents = grid;
         _list.FlowDirection = grid ? FlowDirection.LeftToRight : FlowDirection.TopDown;
+        int width = ListInnerWidth;
         foreach (var r in _rows)
         {
             r.SetCompact(grid);
-            if (!grid) r.Width = ListInnerWidth;
+            if (!grid) r.Width = width;
         }
         _list.ResumeLayout();
         ReindexList();
@@ -1018,10 +1091,17 @@ public sealed class MainForm : Form
         int lastCat = groups.Count - 1;
         var used = new HashSet<string>();
         var placed = new HashSet<AppRowControl>();
-        int idx = 0;
+        int idx = 0, width = ListInnerWidth;
 
         // A filter that matches nothing says so, rather than leaving an empty list.
         bool noMatches = filtering && groups.Count == 0 && _rows.Any(WouldShow) && _noMatches.Parent == _list;
+        if (noMatches)
+        {
+            var q = _search.Text.Trim();
+            _noMatchesText.Text = q.Length == 0 ? "No apps match this filter." : $"No apps match \u201c{q}\u201d.";
+            _noMatches.Width = width;
+            LayoutNoMatches();
+        }
         _noMatches.Visible = noMatches;
         if (noMatches) _list.Controls.SetChildIndex(_noMatches, idx++);
 
@@ -1034,7 +1114,7 @@ public sealed class MainForm : Form
             var header = HeaderFor(key);
             header.Configure(key, title, rows.Count, collapsed, pinnedGroup, Theme.IsDark(_settings.Appearance));
             header.SetMoveEnabled(!filtering && !pinnedGroup && gi > firstCat, !filtering && !pinnedGroup && gi < lastCat);
-            header.Width = ListInnerWidth;
+            header.Width = width;
             header.Visible = true;
             _list.Controls.SetChildIndex(header, idx++);
             used.Add(key);
@@ -1399,7 +1479,8 @@ public sealed class MainForm : Form
             full.Click += async (_, _) => await DownloadAllAsync(true);
             menu.Items.Add(full);
         }
-        menu.Show(_downloadAll, new Point(0, _downloadAll.Height));
+        HouseMenu.Apply(menu, DeviceDpi);
+        menu.Show(_downloadAll, new Point(0, _downloadAll.Height + S(4)));
     }
 
     private bool HasFullVariants => _rows.Any(r => (r.App.Variants?.Count ?? 0) > 1);
@@ -1520,8 +1601,10 @@ public sealed class MainForm : Form
         _tray.Text = "JB Theatre Tools";
         _tray.Icon = Icon ?? SystemIcons.Application;
         var menu = new ContextMenuStrip();
-        menu.Opening += (_, _) => BuildTrayMenu(menu);   // rebuilt on every open: the Launch list is always current
+        // Rebuilt (and re-styled in the theme in force) on every open: the Launch list is always current.
+        menu.Opening += (_, _) => { BuildTrayMenu(menu); HouseMenu.Apply(menu, DeviceDpi); };
         BuildTrayMenu(menu);
+        HouseMenu.Apply(menu, DeviceDpi);
         _tray.ContextMenuStrip = menu;
         _tray.DoubleClick += (_, _) => RestoreFromTray();
         _tray.BalloonTipClicked += (_, _) => { _balloonShowing = false; RestoreFromTray(); };
@@ -1595,14 +1678,14 @@ public sealed class MainForm : Form
         // leaves it for later).
         if (_slotsInstalling.Contains(key))
         {
-            MessageBox.Show(this, $"{name} is being installed. Open it when that has finished.", "JB Theatre Tools",
+            HouseMessage.Show(this, $"{name} is being installed. Open it when that has finished.", "JB Theatre Tools",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
         try { InstallManager.Shared.Launch(key); Log.Write($"launched {key} (tray)"); }
         catch (Exception ex)
         {
-            if (IsForeground()) MessageBox.Show(this, ex.Message, "Launch failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (IsForeground()) HouseMessage.Show(this, ex.Message, "Launch failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
             else ShowBalloon($"Couldn't open {name}", ex.Message);
         }
     }
@@ -1881,7 +1964,7 @@ public sealed class MainForm : Form
             {
                 var name = row.App.Name + row.App.VariantSuffix(variantId);
                 row.SetPhase("Waiting…", indeterminate: true);
-                var answer = MessageBox.Show(this,
+                var answer = HouseMessage.Show(this,
                     $"{name} is open. Close it to install the update?\n\nIf it has unsaved work it will ask you first.",
                     $"{name} is open", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 // Show lock came on while the question was up: close nothing and install nothing, whatever the answer.
@@ -1974,7 +2057,7 @@ public sealed class MainForm : Form
         row.SetPhase(null);   // never leave a stale "Installing…" over the Error badge
         row.SetState(row.Installed, row.Latest, row.LatestAssetId, RowStatus.Error);
         Log.Write($"install {row.App.Id} FAILED: {ex.Message}");
-        if (interactive) MessageBox.Show(this, ex.Message, "Install failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        if (interactive) HouseMessage.Show(this, ex.Message, "Install failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 
     /// <summary>Errors worth ONE automatic retry in a batch: network/transport and I/O hiccups. Verification
@@ -2082,7 +2165,7 @@ public sealed class MainForm : Form
             Log.Write($"{title} {(stopped ? "stopped" : "complete")} ({done.Count} installed, {failures.Count} failed)");
         }
         if (failures.Count > 0 && !unattended)
-            MessageBox.Show(this,
+            HouseMessage.Show(this,
                 $"{failures.Count} app{(failures.Count == 1 ? "" : "s")} could not be installed:\n\n" +
                 string.Join("\n", failures.Select(f => $"• {f.name} — {f.msg}")),
                 title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -2100,7 +2183,7 @@ public sealed class MainForm : Form
     private async void Uninstall(AppRowControl row)
     {
         if (BlockedByLock($"uninstall {row.App.Id}")) return;
-        if (MessageBox.Show(this, $"Uninstall {row.DisplayName}?", "Uninstall",
+        if (HouseMessage.Show(this, $"Uninstall {row.DisplayName}?", "Uninstall",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         // Re-check after the dialog: an install (or show lock) may have started while it was open.
         if (row.IsBusy || BlockedByLock($"uninstall {row.App.Id}")) return;
@@ -2131,7 +2214,7 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             row.SetPhase(null);
-            MessageBox.Show(this, ex.Message, "Uninstall failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            HouseMessage.Show(this, ex.Message, "Uninstall failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
             Log.Write($"uninstall {row.App.Id} FAILED: {ex.Message}");
         }
         finally
@@ -2153,7 +2236,7 @@ public sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "Launch failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            HouseMessage.Show(this, ex.Message, "Launch failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -2168,13 +2251,13 @@ public sealed class MainForm : Form
         if (_catalog.Self == null || _launcherUpdating) return;
         if (Locked)
         {
-            MessageBox.Show(this, "Show lock is on — turn it off to update JB Theatre Tools.", "Update JB Theatre Tools",
+            HouseMessage.Show(this, "Show lock is on — turn it off to update JB Theatre Tools.", "Update JB Theatre Tools",
                             MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
         if (LauncherBusy())
         {
-            MessageBox.Show(this, "Installs are in progress. Updating restarts JB Theatre Tools, so let them finish (or stop them) first.",
+            HouseMessage.Show(this, "Installs are in progress. Updating restarts JB Theatre Tools, so let them finish (or stop them) first.",
                             "Update JB Theatre Tools", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -2223,7 +2306,7 @@ public sealed class MainForm : Form
                 // The new build quit before its window came up: put this version back so the launcher still opens.
                 bool back = await Task.Run(() => SelfReplace.RollBack(exe, old));
                 Log.Write($"self-update: {staged.Tag} quit at start-up — {(back ? "rolled back" : "roll back FAILED")}");
-                MessageBox.Show(this, back
+                HouseMessage.Show(this, back
                         ? $"JB Theatre Tools {staged.Tag} didn't start on this PC, so this version (v{CurrentVersion()}) has been kept. Nothing else changed."
                         : $"JB Theatre Tools {staged.Tag} didn't start on this PC, and the previous version couldn't be put back automatically. It's saved beside the launcher as {Path.GetFileName(old)}.",
                     "Update JB Theatre Tools", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -2235,7 +2318,7 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             Log.Write($"self-update failed: {ex.Message}");
-            MessageBox.Show(this, ex.Message, "Update failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            HouseMessage.Show(this, ex.Message, "Update failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
@@ -2323,7 +2406,7 @@ public sealed class MainForm : Form
         var verb = toApplications
             ? "add Start menu & Desktop shortcuts for"
             : "remove the Start menu & Desktop shortcuts for";
-        if (MessageBox.Show(this,
+        if (HouseMessage.Show(this,
                 $"Do you want to {verb} your {affected.Count} installed app(s)?",
                 "Install location changed", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
             return;
@@ -2498,7 +2581,7 @@ public sealed class MainForm : Form
         if (BlockedByLock($"roll back {row.App.Id}")) return;
         var current = row.Installed;
         if (current == null) return;
-        if (MessageBox.Show(this,
+        if (HouseMessage.Show(this,
                 $"Roll {row.DisplayName} back from {VersionCompare.Display(current)} to {VersionCompare.Display(tag)}?\n\n" +
                 "It's then held at that version, so Update All and automatic updates leave it alone — release the hold " +
                 "from its ⋯ menu when you're ready.",
@@ -2541,7 +2624,8 @@ public sealed class MainForm : Form
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Copy diagnostics", null, (_, _) => CopyDiagnostics(this));
         menu.Items.Add("Open log", null, (_, _) => Log.Open());
-        menu.Show(_moreBtn, new Point(0, _moreBtn.Height));
+        HouseMenu.Apply(menu, DeviceDpi);
+        menu.Show(_moreBtn, new Point(0, _moreBtn.Height + S(4)));
     }
 
     /// <summary>Loading waits for queued history writes (up to 5 s), so it runs off the UI thread; the window opens
@@ -2576,7 +2660,7 @@ public sealed class MainForm : Form
         }
         if (entries.Count == 0)
         {
-            MessageBox.Show(this, "No apps are installed yet, so there's nothing to export.", "Export setup",
+            HouseMessage.Show(this, "No apps are installed yet, so there's nothing to export.", "Export setup",
                             MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -2598,13 +2682,13 @@ public sealed class MainForm : Form
         {
             File.WriteAllText(dlg.FileName, profile.Serialize());
             Log.Write($"exported setup: {entries.Count} slot(s)");
-            MessageBox.Show(this, $"Saved {entries.Count} installed app{(entries.Count == 1 ? "" : "s")} to {Path.GetFileName(dlg.FileName)}.\n\n" +
+            HouseMessage.Show(this, $"Saved {entries.Count} installed app{(entries.Count == 1 ? "" : "s")} to {Path.GetFileName(dlg.FileName)}.\n\n" +
                                   "On another machine: More ▾ → Import setup… installs the same apps.",
                             "Export setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "Export setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            HouseMessage.Show(this, ex.Message, "Export setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -2612,7 +2696,7 @@ public sealed class MainForm : Form
     {
         if (Locked)
         {
-            MessageBox.Show(this, "Show lock is on — turn it off to import a setup.", "Import setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            HouseMessage.Show(this, "Show lock is on — turn it off to import a setup.", "Import setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
         using var ofd = new OpenFileDialog
@@ -2628,7 +2712,7 @@ public sealed class MainForm : Form
         }
         catch (Exception ex) when (ex is FormatException or IOException or UnauthorizedAccessException)
         {
-            MessageBox.Show(this, ex.Message, "Import setup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            HouseMessage.Show(this, ex.Message, "Import setup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
         var catalog = _catalog.Apps.Select(a => new SetupPlanner.CatalogEntry(a.Id, a.Name,
@@ -2652,12 +2736,12 @@ public sealed class MainForm : Form
         // Something may have started while the dialogs were open (an automatic update, show lock).
         if (Locked)
         {
-            MessageBox.Show(this, "Show lock is on — turn it off to import a setup.", "Import setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            HouseMessage.Show(this, "Show lock is on — turn it off to import a setup.", "Import setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
         if (_batchRunning && plan.ToInstall.Count > 0)
         {
-            MessageBox.Show(this, "Other installs are running. Wait for them to finish, then import the setup again.", "Import setup",
+            HouseMessage.Show(this, "Other installs are running. Wait for them to finish, then import the setup again.", "Import setup",
                             MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -2680,7 +2764,7 @@ public sealed class MainForm : Form
         if (plan.ToInstall.Count == 0) return;
         if (!AuthClient.HasCredentials(_settings, _catalog.DownloadServer))
         {
-            MessageBox.Show(this, NoCredsMsg, "Import setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            HouseMessage.Show(this, NoCredsMsg, "Import setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
         // The default edition is passed by its real id: a null variant would mean "the row's selected edition".
@@ -2827,12 +2911,12 @@ public sealed class MainForm : Form
         try
         {
             Clipboard.SetText(BuildDiagnostics());
-            MessageBox.Show(owner, "Diagnostics copied — paste them into a message when you ask for help. They contain no passwords or tokens.",
+            HouseMessage.Show(owner, "Diagnostics copied — paste them into a message when you ask for help. They contain no passwords or tokens.",
                             "Copy diagnostics", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(owner, ex.Message, "Copy diagnostics", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            HouseMessage.Show(owner, ex.Message, "Copy diagnostics", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -2882,7 +2966,8 @@ public sealed class MainForm : Form
         _filterBar.BackColor = Theme.Bg(dark);
         _searchBox.ApplyTheme(dark);
         _filterCount.ForeColor = Theme.Muted(dark);
-        _noMatches.ForeColor = Theme.Sub(dark);
+        _noMatches.BackColor = Theme.BannerBack(Theme.Muted(dark), dark);
+        _noMatchesText.ForeColor = Theme.Fg(dark);
         foreach (var row in _rows) row.ApplyTheme(dark);
         foreach (var header in _headers.Values) header.ApplyTheme(dark);
         HouseDraw.NativeTheme(_list, dark);   // the list's scrollbar: dark in dark mode (it was the light system one)

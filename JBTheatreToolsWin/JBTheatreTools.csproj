@@ -38,6 +38,12 @@
   <ItemGroup>
     <!-- The shared catalog lives at the repo root; embed it so the single-file exe is self-contained. -->
     <EmbeddedResource Include="../catalog.json" LogicalName="catalog.json" />
+    <!-- The house typeface: the same Inter TTFs the Android launcher bundles (SIL Open Font License 1.1 — the licence
+         travels in each font's name table; the full text is in JBTheatreToolsAndroid/docs/licences/OFL-Inter.txt).
+         Theme.cs (HouseFonts) loads them from memory at start-up. -->
+    <EmbeddedResource Include="..\JBTheatreToolsAndroid\app\src\main\res\font\inter_regular.ttf" LogicalName="font-inter-regular.ttf" />
+    <EmbeddedResource Include="..\JBTheatreToolsAndroid\app\src\main\res\font\inter_medium.ttf" LogicalName="font-inter-medium.ttf" />
+    <EmbeddedResource Include="..\JBTheatreToolsAndroid\app\src\main\res\font\inter_semibold.ttf" LogicalName="font-inter-semibold.ttf" />
     <!-- Embedded so the window/taskbar icon shows at runtime too. -->
     <EmbeddedResource Include="app.ico" LogicalName="app.ico" />
     <!-- Per-app row icons (shown in the list BEFORE an app is installed). Named rowicon-<catalog-id>.png;

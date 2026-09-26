@@ -91,6 +91,63 @@ internal static class HouseDraw
         catch { /* uxtheme missing / older Windows: the light system scrollbar stays */ }
     }
 
+    // ── letter-spaced caps (the kit's micro-label: 10.5px/600 uppercase, 0.8 tracking) ─────────────────────────
+    // GDI (TextRenderer) has no letter-spacing, so the caps labels are laid out glyph by glyph in GDI+ with typographic
+    // (unpadded) advances, then the tracking added between them.
+
+    // Typographic advances, counting a space's width (GenericTypographic measures a lone space as 0 px).
+    private static readonly StringFormat Typographic = new(StringFormat.GenericTypographic)
+    {
+        FormatFlags = StringFormat.GenericTypographic.FormatFlags | StringFormatFlags.MeasureTrailingSpaces,
+    };
+
+    /// <summary>The width of <paramref name="text"/> in <paramref name="font"/> with <paramref name="tracking"/> px
+    /// between glyphs.</summary>
+    public static float TrackedWidth(Graphics g, string text, Font font, float tracking)
+    {
+        float w = 0;
+        foreach (var ch in text) w += g.MeasureString(ch.ToString(), font, PointF.Empty, Typographic).Width;
+        return w + tracking * Math.Max(0, text.Length - 1);
+    }
+
+    /// <summary>Draws <paramref name="text"/> with <paramref name="tracking"/> px between glyphs, its top-left at
+    /// <paramref name="origin"/>. Returns the x after the last glyph.</summary>
+    public static float DrawTracked(Graphics g, string text, Font font, PointF origin, Color color, float tracking)
+    {
+        var hint = g.TextRenderingHint;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        using var brush = new SolidBrush(color);
+        float x = origin.X;
+        foreach (var ch in text)
+        {
+            var glyph = ch.ToString();
+            g.DrawString(glyph, font, brush, x, origin.Y, Typographic);
+            x += g.MeasureString(glyph, font, PointF.Empty, Typographic).Width + tracking;
+        }
+        g.TextRenderingHint = hint;
+        return x - tracking;
+    }
+
+    // ── Windows 11 window corners (pop-up menus, tooltips) ─────────────────────────────────────────────────────
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    /// <summary>Small rounded corners (DWMWA_WINDOW_CORNER_PREFERENCE = ROUNDSMALL) and a 1 px DWM border in
+    /// <paramref name="border"/> (DWMWA_BORDER_COLOR) on a pop-up window. Windows 10 ignores both: the window keeps
+    /// square corners and the border its renderer draws.</summary>
+    public static void RoundPopup(IntPtr hwnd, Color border)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        try
+        {
+            int pref = 3;   // DWMWCP_ROUNDSMALL
+            DwmSetWindowAttribute(hwnd, 33, ref pref, sizeof(int));
+            int colorRef = border.R | border.G << 8 | border.B << 16;
+            DwmSetWindowAttribute(hwnd, 34, ref colorRef, sizeof(int));
+        }
+        catch { /* dwmapi missing: square corners */ }
+    }
+
     // ── the suite glyph (Tabler "masks-theater", the same 24-unit paths as the Android identity tile) ─────────────
     /// <summary>The launcher's identity tile: an accent-filled rounded square with the theatre-masks glyph in
     /// OnAccent at 62% of the tile (parity with Android's IdentityTile and the macOS header's masks in the accent).</summary>
@@ -142,7 +199,7 @@ internal static class HouseDraw
     }
 }
 
-/// <summary>The house button (macOS JBButtonStyle): owner-drawn, anti-aliased, radius 6 (JBRadius.ctl), 13 px medium
+/// <summary>The house button (macOS JBButtonStyle): owner-drawn, anti-aliased, radius 6 (JBRadius.ctl), 13 px Inter Medium
 /// text with 12×5 padding (compact 11 px, 9×3, for list rows). Hover = 6% of the text colour over the fill, pressed =
 /// the sunken step, disabled = 45%. Keyboard focus shows a 2 px accent ring only when Windows is showing focus cues,
 /// so the window never opens with a highlighted "default" button. Still a <see cref="Button"/>: Click, DialogResult,
@@ -215,7 +272,7 @@ public sealed class HouseButton : Button
         if (_font == null || Math.Abs(_font.Size - px) > 0.01f)
         {
             var old = _font;
-            _font = Theme.Ui(_textPt > 0 ? _textPt : (_compact ? 8.25f : Theme.PtBody), semibold: true, _dpi);
+            _font = Theme.Ui(_textPt > 0 ? _textPt : (_compact ? 8.25f : Theme.PtBody), HouseWeight.Medium, _dpi);   // mac .medium
             Font = _font;
             if (old != null && !ReferenceEquals(Font, old)) old.Dispose();
         }
@@ -420,17 +477,20 @@ public sealed class HouseSegmented : Control
     private readonly List<string> _items = new();
     private readonly List<Rectangle> _segments = new();
     private int _selected = -1, _hot = -1;
-    private bool _compact;
+    private bool _compact, _large;
     private int _dpi;
     private Font? _font;
     private int S(int v) => Theme.Px(v, DeviceDpi);
 
     public event EventHandler? SelectedIndexChanged;
 
-    public HouseSegmented(IEnumerable<string> items, bool compact = false)
+    /// <param name="compact">The list rows' Light/Full size (10 px text).</param>
+    /// <param name="large">The settings size (13 px text, the macOS Settings sheet's segmented Appearance switch).</param>
+    public HouseSegmented(IEnumerable<string> items, bool compact = false, bool large = false)
     {
         _items.AddRange(items);
         _compact = compact;
+        _large = large && !compact;
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
                  | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
         TabStop = true;
@@ -463,13 +523,13 @@ public sealed class HouseSegmented : Control
         {
             _dpi = DeviceDpi;
             var old = _font;
-            _font = Theme.Ui(_compact ? 7.5f : 8.25f, semibold: true, _dpi);   // 10 / 11 px, as the mac control
+            _font = Theme.Ui(_compact ? 7.5f : _large ? Theme.PtBody : 8.25f, HouseWeight.Medium, _dpi);   // 10 / 11 / 13 px medium
             Font = _font;
             // Control.Font keeps the old instance when the new one Equals it: never dispose the font still in use.
             if (old != null && !ReferenceEquals(Font, old)) old.Dispose();
         }
         // Mac metrics: 2 px trough padding, 2 px between segments, segment padding 7×2 (compact) / 9×3.
-        int pad = S(2), gap = S(2), padX = S(_compact ? 7 : 9), padY = S(_compact ? 2 : 3);
+        int pad = S(2), gap = S(2), padX = S(_compact ? 7 : _large ? 14 : 9), padY = S(_compact ? 2 : 3);
         int textH = TextRenderer.MeasureText("Ag", _font, Size.Empty, HouseDraw.TextFlags).Height;
         int segH = textH + 2 * padY;
         _segments.Clear();
@@ -752,17 +812,101 @@ public sealed class HouseComboBox : ComboBox
     protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
     protected override void OnSelectedIndexChanged(EventArgs e) { base.OnSelectedIndexChanged(e); Invalidate(); }
 
-    /// <summary>The open list's rows (the closed box is painted in WndProc below).</summary>
+    /// <summary>The open list's rows (the closed box is painted in WndProc below): the house menus' look — the Surface
+    /// fill and, under the pointer / keyboard selection, the same rounded 6 px wash of the text colour (not the
+    /// accent: a dropdown is a selector, rule 21).</summary>
     protected override void OnDrawItem(DrawItemEventArgs e)
     {
         if (e.Index < 0 || e.Index >= Items.Count) return;
         bool dark = Theme.CurrentDark;
-        bool selected = (e.State & DrawItemState.Selected) != 0;
-        var back = selected ? Theme.Blend(Theme.Accent, Theme.Surface(dark), 0.18) : Theme.Surface(dark);
-        using (var brush = new SolidBrush(back)) e.Graphics.FillRectangle(brush, e.Bounds);
-        var r = new Rectangle(e.Bounds.X + Theme.Px(8, DeviceDpi), e.Bounds.Y, Math.Max(0, e.Bounds.Width - Theme.Px(10, DeviceDpi)), e.Bounds.Height);
-        TextRenderer.DrawText(e.Graphics, GetItemText(Items[e.Index]), Font, r, Theme.Fg(dark), back,
+        bool selected = (e.State & DrawItemState.Selected) != 0 && (e.State & DrawItemState.ComboBoxEdit) == 0;
+        var g = e.Graphics;
+        var surface = Theme.Surface(dark);
+        using (var brush = new SolidBrush(surface)) g.FillRectangle(brush, e.Bounds);
+        if (selected)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float inset = Theme.Pxf(3f, DeviceDpi);
+            var wash = new RectangleF(e.Bounds.X + inset, e.Bounds.Y + Theme.Pxf(1f, DeviceDpi),
+                                      e.Bounds.Width - 2 * inset, e.Bounds.Height - Theme.Pxf(2f, DeviceDpi));
+            using var path = HouseDraw.Rounded(wash, Theme.Pxf(Theme.RCtl, DeviceDpi));
+            using var brush = new SolidBrush(Theme.Blend(Theme.Fg(dark), surface, 0.08));
+            g.FillPath(brush, path);
+        }
+        var r = new Rectangle(e.Bounds.X + Theme.Px(9, DeviceDpi), e.Bounds.Y, Math.Max(0, e.Bounds.Width - Theme.Px(12, DeviceDpi)), e.Bounds.Height);
+        TextRenderer.DrawText(g, GetItemText(Items[e.Index]), Font, r, Theme.Fg(dark),
                               HouseDraw.TextFlags | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    // ── the open list's frame ──────────────────────────────────────────────────────────────────────────────────
+    // Windows draws the drop-down list's 1 px border itself, in the system accent under the dark theme (and a stock
+    // grey in light). The list window is subclassed once, on the first drop-down, to paint that border in the house
+    // LineStrong hairline instead — the same edge as the closed box.
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct COMBOBOXINFO
+    {
+        public int cbSize;
+        public RECT rcItem, rcButton;
+        public int stateButton;
+        public IntPtr hwndCombo, hwndItem, hwndList;
+    }
+
+    [DllImport("user32.dll")] private static extern bool GetComboBoxInfo(IntPtr hwnd, ref COMBOBOXINFO info);
+    [DllImport("user32.dll")] private static extern IntPtr GetWindowDC(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+
+    private ListFrame? _listFrame;
+
+    protected override void OnDropDown(EventArgs e)
+    {
+        base.OnDropDown(e);
+        if (_listFrame != null) return;
+        try
+        {
+            var info = new COMBOBOXINFO { cbSize = Marshal.SizeOf<COMBOBOXINFO>() };
+            if (GetComboBoxInfo(Handle, ref info) && info.hwndList != IntPtr.Zero)
+            {
+                _listFrame = new ListFrame();
+                _listFrame.AssignHandle(info.hwndList);
+            }
+        }
+        catch { _listFrame = null; /* the system border stays */ }
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        _listFrame?.ReleaseHandle();
+        _listFrame = null;
+        base.OnHandleDestroyed(e);
+    }
+
+    private sealed class ListFrame : NativeWindow
+    {
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            if (m.Msg is 0x0085 /* WM_NCPAINT */ or 0x0086 /* WM_NCACTIVATE */) PaintFrame();
+        }
+
+        private void PaintFrame()
+        {
+            IntPtr dc = GetWindowDC(Handle);
+            if (dc == IntPtr.Zero) return;
+            try
+            {
+                if (!GetWindowRect(Handle, out var r)) return;
+                using var g = Graphics.FromHdc(dc);
+                using var pen = new Pen(Theme.LineStrong(Theme.CurrentDark));
+                g.DrawRectangle(pen, 0, 0, r.Right - r.Left - 1, r.Bottom - r.Top - 1);
+            }
+            catch { /* a failed frame paint leaves the system border */ }
+            finally { ReleaseDC(Handle, dc); }
+        }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -846,5 +990,502 @@ public sealed class IdentityTileControl : Control
     {
         e.Graphics.Clear(HouseDraw.EffectiveBack(this));
         HouseDraw.IdentityTile(e.Graphics, new RectangleF(0, 0, Width, Height), DeviceDpi);
+    }
+}
+
+/// <summary>A settings panel (the macOS GroupBox): a rounded, radius-8 surface in <see cref="Panel.BackColor"/> (the
+/// Raised token in Settings, the Surface token behind a reader) closed by a 1 px Line hairline. Children inherit the
+/// fill as their BackColor, so labels and the house controls paint onto it; the corners outside the curve are painted
+/// in whatever the panel sits on.</summary>
+public sealed class HousePanel : Panel
+{
+    public HousePanel()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                 | ControlStyles.ResizeRedraw, true);
+    }
+
+    /// <summary>Corner radius in 96-DPI pixels.</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public int Radius { get; set; } = 8;
+
+    protected override void OnPaintBackground(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(HouseDraw.EffectiveBack(this));
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        float radius = Theme.Pxf(Radius, DeviceDpi);
+        using (var path = HouseDraw.Rounded(new RectangleF(0, 0, Width, Height), radius))
+        using (var brush = new SolidBrush(BackColor))
+            g.FillPath(brush, path);
+        using (var path = HouseDraw.Rounded(new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), radius))
+        using (var pen = new Pen(Theme.Line(Theme.CurrentDark)))
+            g.DrawPath(pen, path);
+    }
+
+    protected override void OnParentBackColorChanged(EventArgs e) { base.OnParentBackColorChanged(e); Invalidate(); }
+}
+
+/// <summary>The kit's panel heading (macOS SettingsView.panelLabel): a 10.5px/600 caps micro-label, letter-spaced
+/// 0.8 px, in the tertiary tone. Sizes its own height from the DPI; the owner sets the width.</summary>
+public sealed class HouseHeading : Control
+{
+    private Font? _font;
+    private int _dpi;
+
+    public HouseHeading(string text)
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                 | ControlStyles.ResizeRedraw, true);
+        Text = text.ToUpperInvariant();
+        TabStop = false;
+        AccessibleRole = AccessibleRole.StaticText;
+        AccessibleName = text;
+        Rescale();
+    }
+
+    /// <summary>Re-derives the font and the height from the current DPI.</summary>
+    public void Rescale()
+    {
+        if (_font != null && DeviceDpi == _dpi) return;
+        _dpi = DeviceDpi;
+        var old = _font;
+        _font = Theme.Ui(Theme.PtLabel, HouseWeight.SemiBold, _dpi);   // private: never handed to Control.Font
+        old?.Dispose();
+        Height = _font.Height + Theme.Px(1, _dpi);
+        Invalidate();
+    }
+
+    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); if (DeviceDpi != _dpi) Rescale(); }
+    protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); Rescale(); }
+    protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); Invalidate(); }
+    protected override void OnParentBackColorChanged(EventArgs e) { base.OnParentBackColorChanged(e); Invalidate(); }
+    protected override void OnPaintBackground(PaintEventArgs pevent) { /* OnPaint covers every pixel */ }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        e.Graphics.Clear(HouseDraw.EffectiveBack(this));
+        if (_font == null) return;
+        HouseDraw.DrawTracked(e.Graphics, Text, _font, PointF.Empty, Theme.Muted(Theme.CurrentDark),
+                              Theme.Pxf(Theme.LabelTracking, DeviceDpi));
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing) { _font?.Dispose(); _font = null; }
+    }
+}
+
+/// <summary>The house check box (the macOS Toggle in a settings form): a 16 px, radius-4 box — a sunken well with a
+/// strong hairline when off, the accent with an OnAccent tick when on — and the label beside it, wrapping onto more
+/// lines when the owner gives it less width than the text needs (<see cref="GetPreferredSize"/> honours a proposed
+/// width). Still a <see cref="CheckBox"/>: Checked / CheckedChanged, Space, tab order and accessibility are unchanged.
+/// A literal "&amp;" renders (no mnemonics).</summary>
+public sealed class HouseCheckBox : CheckBox
+{
+    private bool _hover, _pressed;
+    private int S(int v) => Theme.Px(v, DeviceDpi);
+    private const TextFormatFlags Flags = TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.NoPadding;
+
+    public HouseCheckBox()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                 | ControlStyles.ResizeRedraw, true);
+        UseMnemonic = false;
+        FlatStyle = FlatStyle.Flat;   // never System: that hands painting back to Windows
+        AutoSize = false;             // the owner sizes it (GetPreferredSize wraps to a proposed width)
+    }
+
+    private int BoxSize => S(16);
+    private int TextLeft => Padding.Left + BoxSize + S(8);
+
+    /// <summary>Box + gap + text. A proposed width wraps the text to fit it (the Settings layout asks this way).</summary>
+    public override Size GetPreferredSize(Size proposedSize)
+    {
+        int maxText = proposedSize.Width > 0 ? Math.Max(S(40), proposedSize.Width - TextLeft - Padding.Right) : int.MaxValue;
+        var text = TextRenderer.MeasureText(Text, Font, new Size(maxText, int.MaxValue), Flags);
+        return new Size(TextLeft + text.Width + Padding.Right,
+                        Padding.Vertical + Math.Max(BoxSize + S(2), text.Height));
+    }
+
+    protected override void OnMouseEnter(EventArgs eventargs) { base.OnMouseEnter(eventargs); _hover = true; Invalidate(); }
+    protected override void OnMouseLeave(EventArgs eventargs) { base.OnMouseLeave(eventargs); _hover = _pressed = false; Invalidate(); }
+    protected override void OnMouseDown(MouseEventArgs mevent) { base.OnMouseDown(mevent); if (mevent.Button == MouseButtons.Left) { _pressed = true; Invalidate(); } }
+    protected override void OnMouseUp(MouseEventArgs mevent) { base.OnMouseUp(mevent); if (_pressed) { _pressed = false; Invalidate(); } }
+    protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+    protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); _hover = _pressed = false; Invalidate(); }
+    protected override void OnParentBackColorChanged(EventArgs e) { base.OnParentBackColorChanged(e); Invalidate(); }
+    protected override void OnPaintBackground(PaintEventArgs pevent) { /* OnPaint covers every pixel */ }
+
+    protected override void OnPaint(PaintEventArgs pevent)
+    {
+        var g = pevent.Graphics;
+        var back = HouseDraw.EffectiveBack(this);
+        if (BackColor.A == 255) back = BackColor;
+        g.Clear(back);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        bool dark = Theme.CurrentDark, on = Enabled;
+
+        // The box sits on the first text line's centre.
+        int lineH = TextRenderer.MeasureText("Ag", Font, Size.Empty, Flags).Height;
+        int box = BoxSize;
+        var r = new RectangleF(Padding.Left + 0.5f, Padding.Top + Math.Max(0, (lineH - box) / 2) + 0.5f, box - 1f, box - 1f);
+        float radius = Theme.Pxf(4f, DeviceDpi);
+        Color fill, edge;
+        if (Checked)
+        {
+            fill = _pressed ? Theme.Blend(Theme.Accent, back, 0.8) : _hover ? Theme.Blend(Theme.Fg(dark), Theme.Accent, 0.08) : Theme.Accent;
+            edge = fill;
+        }
+        else
+        {
+            fill = _pressed ? Theme.Line(dark) : Theme.Sunken(dark);
+            edge = _hover ? Theme.Blend(Theme.Fg(dark), Theme.LineStrong(dark), 0.25) : Theme.LineStrong(dark);
+        }
+        using (var path = HouseDraw.Rounded(r, radius))
+        {
+            using (var brush = new SolidBrush(HouseDraw.Fade(fill, back, on))) g.FillPath(brush, path);
+            using (var pen = new Pen(HouseDraw.Fade(edge, back, on))) g.DrawPath(pen, path);
+        }
+        if (Checked)
+        {
+            using var tick = new Pen(HouseDraw.Fade(Theme.OnAccent, fill, on), Theme.Pxf(1.8f, DeviceDpi))
+                { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+            g.DrawLines(tick, new[]
+            {
+                new PointF(r.X + r.Width * 0.24f, r.Y + r.Height * 0.52f),
+                new PointF(r.X + r.Width * 0.42f, r.Y + r.Height * 0.70f),
+                new PointF(r.X + r.Width * 0.76f, r.Y + r.Height * 0.32f),
+            });
+        }
+        if (Focused && ShowFocusCues)
+        {
+            float w = Theme.Pxf(2f, DeviceDpi);
+            var ring = RectangleF.Inflate(r, w * 1.5f, w * 1.5f);
+            using var pen = new Pen(Theme.Accent, w);
+            using var path = HouseDraw.Rounded(ring, radius + w * 1.5f);
+            g.DrawPath(pen, path);
+        }
+
+        var textRect = new Rectangle(TextLeft, Padding.Top, Math.Max(0, Width - TextLeft - Padding.Right), Math.Max(0, Height - Padding.Vertical));
+        TextRenderer.DrawText(g, Text, Font, textRect, HouseDraw.Fade(Theme.Fg(dark), back, on), back, Flags);
+    }
+}
+
+/// <summary>The row / tile progress bar (macOS RowProgressBar): a 3 px capsule — the accent filling a Line-coloured
+/// track from the leading edge — drawn here instead of the system ProgressBar (square, green, a different height per
+/// Windows version). <see cref="Indeterminate"/> slides an accent segment along the track (verify / install phases);
+/// its timer only runs while the bar is visible.</summary>
+public sealed class HouseProgressBar : Control
+{
+    private double _value;
+    private bool _indeterminate;
+    private readonly System.Windows.Forms.Timer _timer = new() { Interval = 33 };
+
+    public HouseProgressBar()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                 | ControlStyles.ResizeRedraw, true);
+        TabStop = false;
+        AccessibleRole = AccessibleRole.ProgressBar;
+        _timer.Tick += (_, _) => Invalidate();
+    }
+
+    /// <summary>0–1 (clamped).</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public double Value
+    {
+        get => _value;
+        set
+        {
+            value = Math.Clamp(value, 0, 1);
+            if (Math.Abs(value - _value) < 0.0005) return;
+            _value = value;
+            AccessibleDescription = $"{Math.Round(_value * 100)}%";
+            if (!_indeterminate) Invalidate();
+        }
+    }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool Indeterminate
+    {
+        get => _indeterminate;
+        set { if (_indeterminate == value) return; _indeterminate = value; UpdateTimer(); Invalidate(); }
+    }
+
+    private void UpdateTimer() => _timer.Enabled = _indeterminate && Visible && IsHandleCreated;
+
+    protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); UpdateTimer(); }
+    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); UpdateTimer(); }
+    protected override void OnHandleDestroyed(EventArgs e) { _timer.Enabled = false; base.OnHandleDestroyed(e); }
+    protected override void OnParentBackColorChanged(EventArgs e) { base.OnParentBackColorChanged(e); Invalidate(); }
+    protected override void OnPaintBackground(PaintEventArgs pevent) { /* OnPaint covers every pixel */ }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(HouseDraw.EffectiveBack(this));
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        bool dark = Theme.CurrentDark;
+        float h = Height, r = h / 2f;
+        var track = new RectangleF(0, 0, Width, h);
+        using var trackPath = HouseDraw.Rounded(track, r);
+        using (var brush = new SolidBrush(Theme.Line(dark))) g.FillPath(brush, trackPath);
+
+        RectangleF fill;
+        if (_indeterminate)
+        {
+            // A segment a third of the track wide, crossing it every 1.4 s (clock-based, so a late tick doesn't stutter).
+            float seg = Math.Max(h * 4, Width / 3f);
+            float t = (Environment.TickCount64 % 1400) / 1400f;
+            fill = new RectangleF(-seg + t * (Width + seg), 0, seg, h);
+        }
+        else
+        {
+            if (_value <= 0) return;
+            fill = new RectangleF(0, 0, Math.Max(h, (float)(Width * _value)), h);
+        }
+        var saved = g.Save();   // (reading g.Clip would allocate a Region per paint — ~30/s while indeterminate)
+        g.SetClip(trackPath, CombineMode.Intersect);
+        using (var path = HouseDraw.Rounded(fill, r))
+        using (var brush = new SolidBrush(Theme.Accent))
+            g.FillPath(brush, path);
+        g.Restore(saved);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _timer.Dispose();
+        base.Dispose(disposing);
+    }
+}
+
+/// <summary>House pop-up menus: every ContextMenuStrip the launcher shows (the header's More and Download All menus,
+/// a row's ⋯ / right-click menu, the notification-area menu) and their submenus are painted by
+/// <see cref="HouseMenuRenderer"/> in the current theme, in Inter, with the macOS menus' calm spacing, small rounded
+/// corners on Windows 11, and house tooltips for items that carry one. Menus are built fresh for each showing (the tray
+/// menu on each Opening), so styling at build time always matches the theme in force.</summary>
+internal static class HouseMenu
+{
+    private static readonly HouseMenuRenderer Renderer = new();
+    // One menu font per DPI, shared by every menu for the life of the process (never disposed: menus built from it
+    // may still be closing when another opens).
+    private static readonly Dictionary<int, Font> Fonts = new();
+    private static readonly ToolTip Tip = HouseTip.Create();
+
+    public static Font FontFor(int dpi)
+    {
+        lock (Fonts)
+        {
+            if (!Fonts.TryGetValue(dpi, out var f)) Fonts[dpi] = f = Theme.Ui(Theme.PtBody, HouseWeight.Regular, dpi);
+            return f;
+        }
+    }
+
+    /// <summary>Styles <paramref name="menu"/> and every submenu in it for <paramref name="dpi"/> (the DPI of the
+    /// control it opens from). Call after the items are added, before Show.</summary>
+    public static void Apply(ToolStripDropDown menu, int dpi)
+    {
+        menu.Renderer = Renderer;
+        menu.Font = FontFor(dpi);
+        menu.BackColor = Theme.Surface(Theme.CurrentDark);
+        menu.ForeColor = Theme.Fg(Theme.CurrentDark);
+        menu.Padding = new Padding(0, Theme.Px(4, dpi), 0, Theme.Px(4, dpi));
+        menu.ShowItemToolTips = false;   // the house tooltip instead (see ApplyItem)
+        if (menu is ToolStripDropDownMenu m) { m.ShowImageMargin = true; m.ShowCheckMargin = false; }
+        if (menu.Tag as string != "house-menu")
+        {
+            menu.Tag = "house-menu";
+            menu.HandleCreated += (_, _) => HouseDraw.RoundPopup(menu.Handle, Theme.Line(Theme.CurrentDark));
+            menu.Opened += (_, _) => HouseDraw.RoundPopup(menu.Handle, Theme.Line(Theme.CurrentDark));
+            menu.Closed += (_, _) => Tip.Hide(menu);
+        }
+        foreach (ToolStripItem item in menu.Items) ApplyItem(item, dpi);
+    }
+
+    private static void ApplyItem(ToolStripItem item, int dpi)
+    {
+        if (item is ToolStripSeparator sep)
+        {
+            sep.AutoSize = false;
+            sep.Height = Theme.Px(9, dpi);
+            return;
+        }
+        item.Padding = new Padding(Theme.Px(2, dpi), Theme.Px(3, dpi), Theme.Px(10, dpi), Theme.Px(3, dpi));
+        if (!string.IsNullOrEmpty(item.ToolTipText) && item.Tag as string != "house-tip")
+        {
+            item.Tag = "house-tip";
+            item.MouseHover += (_, _) =>
+            {
+                if (item.Owner is not { } owner || string.IsNullOrEmpty(item.ToolTipText)) return;
+                var at = owner.PointToClient(Cursor.Position);
+                HouseTip.Show(Tip, item.ToolTipText, owner, new Point(at.X, at.Y + Theme.Px(20, dpi)));
+            };
+            item.MouseLeave += (_, _) => { if (item.Owner is { } owner) Tip.Hide(owner); };
+        }
+        if (item is ToolStripMenuItem mi && mi.HasDropDownItems) Apply(mi.DropDown, dpi);
+    }
+}
+
+/// <summary>Paints a house pop-up menu: the Surface fill, a 1 px Line border, a rounded 6 px hover wash (a blend of the
+/// text colour, like the house buttons), text in Fg (shortcuts in Sub, disabled items in Muted), an accent tick for a
+/// checked item, Line hairline separators and a slate chevron for a submenu (rule 21). Reads the theme as it paints.</summary>
+internal sealed class HouseMenuRenderer : ToolStripProfessionalRenderer
+{
+    private static bool Dark => Theme.CurrentDark;
+    private static int Dpi(ToolStripItemRenderEventArgs e) => e.ToolStrip?.DeviceDpi ?? e.Item.Owner?.DeviceDpi ?? 96;
+
+    public HouseMenuRenderer() { RoundedEdges = false; }
+
+    protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) => e.Graphics.Clear(Theme.Surface(Dark));
+
+    protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+    {
+        using var pen = new Pen(Theme.Line(Dark));
+        e.Graphics.DrawRectangle(pen, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+    }
+
+    protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { /* no gutter stripe */ }
+
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+    {
+        var item = e.Item;
+        if (!item.Enabled || !(item.Selected || item.Pressed)) return;
+        int dpi = Dpi(e);
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        // Inset from the menu's visible content edges (an item can run under the border on the right).
+        float inset = Theme.Pxf(4f, dpi);
+        var shown = e.ToolStrip?.DisplayRectangle ?? new Rectangle(item.Bounds.Left, 0, item.Width, item.Height);
+        float left = shown.Left - item.Bounds.Left + inset, right = Math.Min(item.Width, shown.Right - item.Bounds.Left) - inset;
+        var r = new RectangleF(left, Theme.Pxf(1f, dpi), right - left, item.Height - Theme.Pxf(2f, dpi));
+        using var path = HouseDraw.Rounded(r, Theme.Pxf(Theme.RCtl, dpi));
+        using var brush = new SolidBrush(Theme.Blend(Theme.Fg(Dark), Theme.Surface(Dark), 0.08));
+        g.FillPath(brush, path);
+    }
+
+    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+    {
+        bool dark = Dark;
+        bool shortcut = e.Item is ToolStripMenuItem mi && !string.IsNullOrEmpty(e.Text) && e.Text != mi.Text;
+        var color = !e.Item.Enabled ? Theme.Muted(dark) : shortcut ? Theme.Sub(dark) : Theme.Fg(dark);
+        TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, e.TextRectangle, color, e.TextFormat | TextFormatFlags.NoPrefix);
+    }
+
+    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
+    {
+        int dpi = Dpi(e);
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var r = e.ImageRectangle;
+        float s = Theme.Pxf(12f, dpi), cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f;
+        var color = e.Item.Enabled ? Theme.Accent : Theme.Muted(Dark);
+        using var pen = new Pen(color, Theme.Pxf(1.8f, dpi)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+        g.DrawLines(pen, new[]
+        {
+            new PointF(cx - s * 0.40f, cy + s * 0.02f),
+            new PointF(cx - s * 0.12f, cy + s * 0.30f),
+            new PointF(cx + s * 0.42f, cy - s * 0.30f),
+        });
+    }
+
+    protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
+    {
+        int dpi = e.Item?.Owner?.DeviceDpi ?? 96;
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var r = e.ArrowRectangle;
+        float w = Theme.Pxf(8f, dpi), cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f;
+        var color = e.Item?.Enabled == false ? Theme.Muted(Dark) : Theme.Selector;
+        using var pen = new Pen(color, Theme.Pxf(1.6f, dpi)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+        g.DrawLines(pen, new[] { new PointF(cx - w / 4, cy - w / 2), new PointF(cx + w / 4, cy), new PointF(cx - w / 4, cy + w / 2) });
+    }
+
+    protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+    {
+        int dpi = e.ToolStrip?.DeviceDpi ?? 96;
+        int y = e.Item.Height / 2, inset = Theme.Px(10, dpi);
+        using var pen = new Pen(Theme.Line(Dark));
+        e.Graphics.DrawLine(pen, inset, y, e.Item.Width - inset, y);
+    }
+}
+
+/// <summary>House tooltips: owner-drawn in the Raised token with a 1 px Line border, Fg text in Inter 12 px and a small
+/// padding, small rounded corners on Windows 11 — dark in dark mode (the stock tooltip is always the light system one).
+/// Theme tokens are read as each tooltip paints.</summary>
+internal static class HouseTip
+{
+    private const TextFormatFlags Flags = TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.NoPadding;
+    private static readonly Dictionary<int, Font> Fonts = new();
+    // Text handed to Show(): the Popup event (which sizes the window) can't see it, only GetToolTip's text.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ToolTip, string> Pending = new();
+
+    private static Font FontFor(int dpi)
+    {
+        lock (Fonts)
+        {
+            if (!Fonts.TryGetValue(dpi, out var f)) Fonts[dpi] = f = Theme.Ui(Theme.PtSmall, HouseWeight.Regular, dpi);
+            return f;
+        }
+    }
+
+    private static int DpiOf(Control? c, IWin32Window? w) => c?.DeviceDpi ?? (w as Control)?.DeviceDpi ?? 96;
+
+    public static ToolTip Create()
+    {
+        var tip = new ToolTip();
+        Style(tip);
+        return tip;
+    }
+
+    /// <summary>Shows <paramref name="text"/> at <paramref name="point"/> (client coordinates of
+    /// <paramref name="window"/>), for tooltips the launcher raises itself (menu items).</summary>
+    public static void Show(ToolTip tip, string text, IWin32Window window, Point point)
+    {
+        Pending.AddOrUpdate(tip, text);
+        tip.Show(text, window, point, 8000);
+    }
+
+    public static void Style(ToolTip tip)
+    {
+        tip.OwnerDraw = true;
+        tip.Popup += (_, e) =>
+        {
+            var text = e.AssociatedControl is { } c ? tip.GetToolTip(c) : null;
+            if (string.IsNullOrEmpty(text)) Pending.TryGetValue(tip, out text);
+            if (string.IsNullOrEmpty(text)) return;
+            int dpi = DpiOf(e.AssociatedControl, e.AssociatedWindow);
+            var size = TextRenderer.MeasureText(text, FontFor(dpi), new Size(Theme.Px(360, dpi), int.MaxValue), Flags);
+            e.ToolTipSize = new Size(size.Width + 2 * Theme.Px(8, dpi), size.Height + 2 * Theme.Px(5, dpi));
+        };
+        tip.Draw += (_, e) =>
+        {
+            bool dark = Theme.CurrentDark;
+            int dpi = DpiOf(e.AssociatedControl, e.AssociatedWindow);
+            var g = e.Graphics;
+            using (var fill = new SolidBrush(Theme.Raised(dark))) g.FillRectangle(fill, e.Bounds);
+            using (var pen = new Pen(Theme.Line(dark))) g.DrawRectangle(pen, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
+            var text = Rectangle.Inflate(e.Bounds, -Theme.Px(8, dpi), -Theme.Px(5, dpi));
+            TextRenderer.DrawText(g, e.ToolTipText, FontFor(dpi), text, Theme.Fg(dark), Theme.Raised(dark), Flags);
+            RoundOnce(g, dark);
+        };
+    }
+
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromDC(IntPtr hdc);
+
+    /// <summary>Windows 11's small rounded corners + a Line-coloured DWM border on the tooltip window (found from the
+    /// DC it paints into). Cheap to repeat; the border colour follows the theme.</summary>
+    private static void RoundOnce(Graphics g, bool dark)
+    {
+        IntPtr hwnd = IntPtr.Zero;
+        try
+        {
+            var hdc = g.GetHdc();
+            try { hwnd = WindowFromDC(hdc); } finally { g.ReleaseHdc(hdc); }
+        }
+        catch { return; }
+        HouseDraw.RoundPopup(hwnd, Theme.Line(dark));
     }
 }

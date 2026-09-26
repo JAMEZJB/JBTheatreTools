@@ -139,8 +139,10 @@ public sealed class AppRowControl : UserControl
     private readonly HouseButton _launch = new(HouseRole.Secondary, compact: true);
     private readonly HouseButton _more = new(HouseRole.Icon, compact: true) { Glyph = HouseGlyph.More };
     private readonly HouseButton _cancel = new(HouseRole.Secondary, compact: true);
-    private readonly ToolTip _tip = new();
-    private readonly ProgressBar _progress = new();
+    private readonly ToolTip _tip = HouseTip.Create();
+    // The house bar (macOS RowProgressBar): 3 px, accent on a hairline track, laid over the row's bottom edge so it
+    // never moves anything when it appears.
+    private readonly HouseProgressBar _progress = new();
     /// <summary>A download is in flight and can be cancelled (the Cancel button / menu item show).</summary>
     private bool _cancellable;
     /// <summary>Show lock is on: install / update / remove are hidden or disabled; Launch still works.</summary>
@@ -159,6 +161,9 @@ public sealed class AppRowControl : UserControl
     // fonts are built in device pixels for the same DPI. _dpi = the DPI the fonts were last built for.
     private int _dpi;
     private readonly List<Font> _fonts = new();
+    private Font? _nameFont, _nameTileFont;
+    /// <summary>A grid tile is held down (the pressed step, until the button comes up or a drag starts).</summary>
+    private bool _tilePressed;
     /// <summary>The "New in" line actually shown: the catalog's, overlaid by the relay's editable notes.</summary>
     private string? _whatsNewText, _whatsNewVersion;
     private bool HasWhatsNew => !string.IsNullOrEmpty(_whatsNewText);
@@ -293,8 +298,6 @@ public sealed class AppRowControl : UserControl
         _cancel.Click += (_, _) => CancelRequested?.Invoke(this);
         _tip.SetToolTip(_cancel, "Stop this download");
 
-        _progress.Style = ProgressBarStyle.Continuous;
-        _progress.Maximum = 100;
         _progress.Visible = false;
 
         DoubleBuffered = true;
@@ -357,7 +360,9 @@ public sealed class AppRowControl : UserControl
         var old = _fonts.ToList();
         _fonts.Clear();
         Font F(float pt, bool semibold = false) { var f = Theme.Ui(pt, semibold, _dpi); _fonts.Add(f); return f; }
-        _name.Font = F(Theme.PtBody, semibold: true);      // body 13px/600
+        _nameFont = F(Theme.PtBody, semibold: true);       // body 13px/600 (list row)
+        _nameTileFont = F(Theme.PtSmall, semibold: true);  // t-small 12px/600 (grid tile, as the mac tile)
+        _name.Font = _compact ? _nameTileFont : _nameFont;
         _blurb.Font = F(Theme.PtSmall);                    // t-small 12px
         _version.Font = F(Theme.PtLabel);                  // t-label step, sentence case (a meta line)
         _whatsNew.Font = F(Theme.PtLabel);
@@ -375,13 +380,13 @@ public sealed class AppRowControl : UserControl
         {
             Margin = new Padding(S(6));
             Size = new Size(S(132), S(140));
-            _progress.Height = S(6);
+            _progress.Height = S(3);
         }
         else
         {
             Margin = new Padding(0);
             _icon.Size = new Size(S(40), S(40));   // 40px at 100% — parity with the macOS row icon
-            _progress.Size = new Size(S(220), S(6));
+            _progress.Size = new Size(S(240), S(3));   // the mac row's 240 pt bar
         }
         LayoutControls();
     }
@@ -407,6 +412,7 @@ public sealed class AppRowControl : UserControl
         bool h = ClientRectangle.Contains(PointToClient(Cursor.Position));
         if (h == _hover) return;
         _hover = h;
+        if (!h) _tilePressed = false;
         BackColor = RowBack();
         Invalidate();
     }
@@ -484,6 +490,7 @@ public sealed class AppRowControl : UserControl
         // List mode: only the left-edge grip zone starts a drag (the icon starts at x=14). Grid tiles are
         // draggable anywhere. Don't capture yet — a plain click/double-click must be unaffected; capture is
         // taken only once a real drag begins (below), so clicks that never cross the threshold are normal.
+        if (_compact) SetTilePressed(true);
         if (!_compact && PointToClient(Cursor.Position).X >= S(14)) return;
         _gripDown = true;
         _dragging = false;
@@ -499,6 +506,7 @@ public sealed class AppRowControl : UserControl
             if (Math.Abs(Cursor.Position.X - _downScreen.X) < d.Width &&
                 Math.Abs(Cursor.Position.Y - _downScreen.Y) < d.Height) return;
             _dragging = true;
+            SetTilePressed(false);
             Capture = true;                 // now route moves here even over other rows
             ReorderStart?.Invoke(this);
         }
@@ -507,6 +515,7 @@ public sealed class AppRowControl : UserControl
 
     private void Row_MouseUp(object? sender, MouseEventArgs e)
     {
+        SetTilePressed(false);
         if (e.Button == MouseButtons.Right) { ShowMoreMenu(); return; }
         if (!_gripDown) return;
         bool wasDragging = _dragging;
@@ -545,6 +554,8 @@ public sealed class AppRowControl : UserControl
     {
         var menu = new ContextMenuStrip();
         DialogKit.DisposeWhenClosed(menu, this);
+        // The pointer left for the menu while the menu held it, so the row never heard it go: re-check the hover wash.
+        menu.Closed += (_, _) => RecomputeHover();
         // While busy (reached by right-click; the ⋯ button is off) the only actions are opening the app while it's
         // still just downloading, and stopping the download — the grid tile has no Launch or Cancel button of its own.
         if (IsBusy)
@@ -561,7 +572,7 @@ public sealed class AppRowControl : UserControl
                 stop.Click += (_, _) => CancelRequested?.Invoke(this);
                 menu.Items.Add(stop);
             }
-            if (menu.Items.Count > 0) menu.Show(Cursor.Position);
+            if (menu.Items.Count > 0) { HouseMenu.Apply(menu, DeviceDpi); menu.Show(Cursor.Position); }
             else menu.Dispose();   // never shown, so never closed
             return;
         }
@@ -679,6 +690,7 @@ public sealed class AppRowControl : UserControl
             uninstall.Click += (_, _) => UninstallRequested?.Invoke(this);
             menu.Items.Add(uninstall);
         }
+        HouseMenu.Apply(menu, DeviceDpi);
         menu.Show(Cursor.Position);
     }
 
@@ -741,7 +753,10 @@ public sealed class AppRowControl : UserControl
         _badge.Size = _badge.GetPreferredSize(Size.Empty);
         rx = Place(_badge, S(8));
         _blurb.Width = Math.Max(S(40), Math.Min(blurbSize.Width + S(2), rx - x));
-        _progress.Location = new Point(S(14), Height - S(12));   // pinned to the bottom (row height varies with the what's-new line)
+        // Along the bottom edge under the text column (the row's height varies with the what's-new line), clear of the
+        // last text line and the hairline.
+        _progress.Width = Math.Max(S(40), Math.Min(S(240), Width - x - S(14)));
+        _progress.Location = new Point(x, Height - S(8));
     }
 
     /// <summary>Grid-tile layout: a large centred icon, the name below it, and a compact status line.
@@ -758,8 +773,8 @@ public sealed class AppRowControl : UserControl
         _badge.Location = new Point(S(6), S(88));
         _badge.Size = new Size(w - S(12), S(16));
         _pin.Location = new Point(w - _pin.Width - S(6), S(6));
-        _progress.Location = new Point(S(10), Height - S(12));
-        _progress.Width = w - S(20);
+        _progress.Location = new Point(S(12), Height - S(8));
+        _progress.Width = w - S(24);
         _blurb.Visible = _version.Visible = _whatsNew.Visible = false;
         _install.Visible = _launch.Visible = _more.Visible = _cancel.Visible = false;   // tile: right-click menu
         // The Light/Full picker, as on the list row (it was hidden in grid view, leaving only the ⋯ menu), centred.
@@ -771,6 +786,8 @@ public sealed class AppRowControl : UserControl
     public void SetCompact(bool compact)
     {
         _compact = compact;
+        _tilePressed = false;
+        if (_nameFont != null && _nameTileFont != null) _name.Font = compact ? _nameTileFont : _nameFont;
         BackColor = RowBack();
         if (compact)
         {
@@ -949,8 +966,8 @@ public sealed class AppRowControl : UserControl
         // Stay visible at 100%: the bar used to vanish the instant the download finished, leaving the row
         // motionless for the 5-30 s of verify + extract that follow (the "has it crashed?" moment).
         _progress.Visible = p > 0;
-        if (_progress.Style == ProgressBarStyle.Marquee) return;   // a late 1.0 can land after the phase switched
-        _progress.Value = Math.Clamp((int)(p * 100), 0, 100);
+        if (_progress.Indeterminate) return;   // a late 1.0 can land after the phase switched
+        _progress.Value = p;
     }
 
     private string? _phase;
@@ -964,14 +981,13 @@ public sealed class AppRowControl : UserControl
         if (text == null)
         {
             _phase = null;
-            _progress.Style = ProgressBarStyle.Continuous;
+            _progress.Indeterminate = false;
             UpdateVisual();
             return;
         }
         _phase = text;
         ApplyBadge(text, Theme.Sub(_dark));
-        _progress.Style = indeterminate ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous;
-        _progress.MarqueeAnimationSpeed = 60;
+        _progress.Indeterminate = indeterminate;
         _progress.Visible = true;
         LayoutControls();   // the badge is AutoSize + right-aligned, so a wider text must re-position
     }
@@ -1017,7 +1033,7 @@ public sealed class AppRowControl : UserControl
         _progress.Visible = busy;
         if (!busy)
         {
-            _progress.Style = ProgressBarStyle.Continuous;
+            _progress.Indeterminate = false;
             _progress.Value = 0;
             if (_phase != null) SetPhase(null);   // safety restore (SetState already restored on success/error)
         }
@@ -1086,11 +1102,21 @@ public sealed class AppRowControl : UserControl
     public void RefreshLaunch() => _launch.Enabled = CanLaunch;
 
     /// <summary>The control's own background — which its child labels inherit. A list row is a surface
-    /// that lifts on hover; a GRID TILE is the panel fill (raised on hover), with OnPaint rounding the
-    /// corners back to the window ground.</summary>
+    /// that lifts on hover; a GRID TILE is the panel fill (raised on hover, sunken while pressed), with OnPaint
+    /// rounding the corners back to the window ground.</summary>
     private Color RowBack() => _compact
-        ? (_hover ? Theme.Raised(_dark) : Theme.Surface(_dark))
+        ? (_tilePressed ? Theme.Sunken(_dark) : _hover ? Theme.Raised(_dark) : Theme.Surface(_dark))
         : (_hover ? Theme.CardHover(_dark) : Theme.Card(_dark));
+
+    /// <summary>A grid tile's pressed step (a sunken fill while the button is down), like the house buttons.</summary>
+    private void SetTilePressed(bool on)
+    {
+        on &= _compact;
+        if (_tilePressed == on) return;
+        _tilePressed = on;
+        BackColor = RowBack();
+        Invalidate();
+    }
 
     public void ApplyTheme(bool dark)
     {

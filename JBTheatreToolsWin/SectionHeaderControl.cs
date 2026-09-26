@@ -10,6 +10,9 @@ namespace JBTheatreTools;
 /// </summary>
 public sealed class SectionHeaderControl : UserControl
 {
+    /// <summary>One StringFormat for the count capsule (StringFormat.GenericTypographic builds a new one per call).</summary>
+    private static readonly StringFormat CountFormat = new(StringFormat.GenericTypographic);
+
     public string Key { get; private set; } = "";
     private string _title = "";
     private int _count;
@@ -108,25 +111,59 @@ public sealed class SectionHeaderControl : UserControl
         _up.Location = new Point(_down.Left - _up.Width - S(2), (Height - _up.Height) / 2);
     }
 
+    /// <summary>The title font (t-label 10.5px/600), built for the DPI in Rescale — not per paint.</summary>
+    private Font? _titleFont;
+    private int _fontDpi;
+
+    private Font TitleFont()
+    {
+        if (_titleFont == null || _fontDpi != DeviceDpi)
+        {
+            _titleFont?.Dispose();   // private to this header (never handed to Control.Font)
+            _fontDpi = DeviceDpi;
+            _titleFont = Theme.Ui(Theme.PtLabel, HouseWeight.SemiBold, _fontDpi);
+        }
+        return _titleFont;
+    }
+
+    /// <summary>Parity with the macOS SectionCollapseLabel: a slate disclosure chevron (right when collapsed, down when
+    /// open), the title as a letter-spaced caps micro-label in slate (never the accent — rule 21), and the count in a
+    /// small slate capsule.</summary>
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var sel = new SolidBrush(Theme.Selector);
+        var sel = Theme.Selector;
+        var back = HouseDraw.EffectiveBack(this);
+        float k = DeviceDpi / 96f, cy = Height / 2f, cx = S(10);
 
-        // Pixel-sized fonts: GDI+ DrawString would otherwise size a point font at the canvas DPI.
-        using var chevFont = Theme.Ui(7f, semibold: true, DeviceDpi);
-        var chevron = _collapsed ? "▶" : "▼";   // ▶ collapsed / ▼ expanded
-        g.DrawString(chevron, chevFont, sel, S(6), (Height - S(14)) / 2f);
+        // Chevron: the same stroke as the dropdowns' (HouseDraw.Chevron), turned to point right when collapsed.
+        if (_collapsed)
+        {
+            float w = 8f * k;
+            using var pen = new Pen(sel, 1.6f * k) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+            g.DrawLines(pen, new[] { new PointF(cx - w / 4, cy - w / 2), new PointF(cx + w / 4, cy), new PointF(cx - w / 4, cy + w / 2) });
+        }
+        else HouseDraw.Chevron(g, cx, cy, 8f * k, sel, 1.6f * k);
 
-        // t-label: 10.5px/600 uppercase in the shared slate selector (never the accent — rule 21).
-        using var titleFont = Theme.Ui(Theme.PtLabel, semibold: true, DeviceDpi);
-        var title = _title.ToUpperInvariant();
-        float x = S(24);
-        g.DrawString(title, titleFont, sel, x, (Height - titleFont.Height) / 2f);
-        x += g.MeasureString(title, titleFont).Width + S(4);
+        var font = TitleFont();
+        float ty = cy - font.Height / 2f;
+        float x = HouseDraw.DrawTracked(g, _title.ToUpperInvariant(), font, new PointF(S(22), ty), sel,
+                                        Theme.Pxf(Theme.LabelTracking, DeviceDpi)) + S(6);
 
-        using var countBrush = new SolidBrush(Color.FromArgb(178, Theme.Selector));
-        g.DrawString(_count.ToString(), titleFont, countBrush, x, (Height - titleFont.Height) / 2f);
+        // Count capsule: 12% slate wash, 70% slate figure, 5 × 0.5 px padding (the mac badge).
+        var count = _count.ToString();
+        var size = g.MeasureString(count, font, PointF.Empty, CountFormat);
+        var pill = new RectangleF(x, cy - (font.Height + k) / 2f, size.Width + 10f * k, font.Height + k);
+        using (var path = HouseDraw.Rounded(pill, pill.Height / 2f))
+        using (var fill = new SolidBrush(Theme.Blend(sel, back, 0.12)))
+            g.FillPath(fill, path);
+        HouseDraw.DrawTracked(g, count, font, new PointF(pill.X + 5f * k, ty + k / 2f), Theme.Blend(sel, back, 0.7), 0f);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing) { _titleFont?.Dispose(); _titleFont = null; }
     }
 }

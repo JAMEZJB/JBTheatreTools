@@ -15,6 +15,7 @@ internal static class Program
             return Cli.Run(args).GetAwaiter().GetResult();
 
         ApplicationConfiguration.Initialize();
+        HouseFonts.Load();   // Inter, once, before the first window measures any text
         Application.Run(new MainForm());
         return 0;
     }

@@ -1,6 +1,11 @@
+using System.Drawing.Text;
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace JBTheatreTools;
+
+/// <summary>The three house weights (kit: 400 / 500 / 600 — never 700).</summary>
+public enum HouseWeight { Regular, Medium, SemiBold }
 
 /// <summary>
 /// House Style v2 design tokens (kit v2.0.0) + light/dark theming helpers, at parity with the macOS
@@ -99,9 +104,9 @@ public static class Theme
     public const int RWin = 12;
 
     // ── the six-step type scale ──────────────────────────────────────────────────────────────────
-    // The kit's steps are in CSS pixels; WinForms takes points (pt = px × 0.75). The system font stays
-    // (Inter is a web-kit asset, not bundled natively). Weights are 400 / 500 / 600 — never 700, so a
-    // "semibold" step uses the real Segoe UI Semibold family where present rather than faux-bold.
+    // The kit's steps are in CSS pixels; WinForms takes points (pt = px × 0.75). The house face is Inter (the kit's
+    // font, the same TTFs the Android launcher ships — embedded here and loaded by HouseFonts), at 400 / 500 / 600 —
+    // never 700: Medium and SemiBold are real faces, never faux-bold. Segoe UI stands in if Inter can't load.
     /// <summary>t-title / t-status — 15px.</summary>
     public const float PtTitle = 11.25f;
     /// <summary>body — 13px.</summary>
@@ -110,30 +115,41 @@ public static class Theme
     public const float PtSmall = 9f;
     /// <summary>t-label — 10.5px (uppercase, tracked).</summary>
     public const float PtLabel = 7.9f;
+    /// <summary>Letter-spacing of the caps micro-label (macOS JBFont.labelTracking), in 96-DPI pixels.</summary>
+    public const float LabelTracking = 0.8f;
 
-    private static readonly FontFamily? SemiBold = ResolveSemiBold();
+    private static readonly FontFamily? SegoeSemiBold = ResolveSegoeSemiBold();
 
-    private static FontFamily? ResolveSemiBold()
+    private static FontFamily? ResolveSegoeSemiBold()
     {
         try { return new FontFamily("Segoe UI Semibold"); }
         catch { return null; }   // not installed (or a non-Windows build host) — fall back below
     }
 
-    /// <summary>A font from the house scale. <paramref name="semibold"/> picks weight 600 via the real
-    /// Segoe UI Semibold family, falling back to synthetic bold only where that family is absent.
-    /// With <paramref name="dpi"/> the font is built in DEVICE PIXELS for that DPI (pt × dpi / 72), so it
-    /// renders at the right size on whichever monitor its control is on and can be rebuilt idempotently
-    /// on a DPI change. Without it the font is in points, which GDI sizes at the SYSTEM DPI — right on the
-    /// launch monitor only (fine for the one-shot Settings dialog).</summary>
-    public static Font Ui(float pt, bool semibold = false, int dpi = 0)
+    /// <summary>A font from the house scale: Regular, or SemiBold (600) when <paramref name="semibold"/>.</summary>
+    public static Font Ui(float pt, bool semibold = false, int dpi = 0) =>
+        Ui(pt, semibold ? HouseWeight.SemiBold : HouseWeight.Regular, dpi);
+
+    /// <summary>A font from the house scale in Inter at <paramref name="weight"/> (Medium where the macOS build uses
+    /// .medium — buttons, segmented controls; SemiBold where it uses .semibold — names, titles, micro-labels).
+    /// With <paramref name="dpi"/> the font is built in DEVICE PIXELS for that DPI (pt × dpi / 72), so it renders at
+    /// the right size on whichever monitor its control is on and can be rebuilt idempotently on a DPI change.
+    /// Without it the font is in points, which GDI sizes at the SYSTEM DPI — right on the launch monitor only (fine
+    /// for a form the framework AutoScales). Callers own the returned font (dispose it — see the Control.Font note in
+    /// HouseButton.BuildFonts before disposing one that was handed to a control).</summary>
+    public static Font Ui(float pt, HouseWeight weight, int dpi = 0)
     {
         float size = dpi > 0 ? pt * dpi / 72f : pt;
         var unit = dpi > 0 ? GraphicsUnit.Pixel : GraphicsUnit.Point;
-        if (semibold && SemiBold != null)
+        if (HouseFonts.Family(weight) is { } inter)
         {
-            try { return new Font(SemiBold, size, FontStyle.Regular, unit); } catch { /* fall through */ }
+            try { return new Font(inter, size, FontStyle.Regular, unit); } catch { /* fall through to Segoe UI */ }
         }
-        return new Font("Segoe UI", size, semibold ? FontStyle.Bold : FontStyle.Regular, unit);
+        if (weight != HouseWeight.Regular && SegoeSemiBold != null)
+        {
+            try { return new Font(SegoeSemiBold, size, FontStyle.Regular, unit); } catch { /* fall through */ }
+        }
+        return new Font("Segoe UI", size, weight == HouseWeight.Regular ? FontStyle.Regular : FontStyle.Bold, unit);
     }
 
     // ── DPI ───────────────────────────────────────────────────────────────────────────────────────
@@ -161,5 +177,77 @@ public static class Theme
             DwmSetWindowAttribute(form.Handle, 20, ref v, sizeof(int));
         }
         catch { /* non-fatal on older Windows */ }
+    }
+}
+
+/// <summary>Inter, embedded (the three static TTFs the Android launcher bundles — Regular, Medium, SemiBold — as
+/// resources of this exe; SIL Open Font License 1.1, the licence text is in the fonts' own name table). Loaded once,
+/// from memory, into BOTH text stacks: a GDI+ PrivateFontCollection, which is where the Font objects come from, and
+/// GDI's process-private font table (AddFontMemResourceEx), because every label, button and TextRenderer call draws
+/// through GDI, which looks the face up by name ("Inter", "Inter Medium", "Inter SemiBold"). If any face fails to load
+/// none is used — a half-Inter UI would be worse than all Segoe UI.</summary>
+internal static class HouseFonts
+{
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr AddFontMemResourceEx(IntPtr pbFont, uint cbFont, IntPtr pdv, ref uint pcFonts);
+
+    private static readonly object Gate = new();
+    private static bool _loaded;
+    /// <summary>Kept for the process lifetime: the families below live in it.</summary>
+    private static PrivateFontCollection? Collection { get; set; }
+    private static FontFamily? _regular, _medium, _semibold;
+
+    /// <summary>Loads the three faces (idempotent; Program calls it before the first window).</summary>
+    public static void Load()
+    {
+        lock (Gate)
+        {
+            if (_loaded) return;
+            _loaded = true;
+            try
+            {
+                var collection = new PrivateFontCollection();
+                foreach (var name in new[] { "font-inter-regular.ttf", "font-inter-medium.ttf", "font-inter-semibold.ttf" })
+                {
+                    using var s = Assembly.GetExecutingAssembly().GetManifestResourceStream(name)
+                                  ?? throw new FileNotFoundException(name);
+                    var bytes = new byte[s.Length];
+                    s.ReadExactly(bytes);
+                    // GDI+ reads the font from this memory for as long as the collection lives, so it is never freed
+                    // (three fonts, ~1 MB, once per process). GDI takes its own copy.
+                    IntPtr mem = Marshal.AllocCoTaskMem(bytes.Length);
+                    Marshal.Copy(bytes, 0, mem, bytes.Length);
+                    collection.AddMemoryFont(mem, bytes.Length);
+                    uint added = 0;
+                    if (AddFontMemResourceEx(mem, (uint)bytes.Length, IntPtr.Zero, ref added) == IntPtr.Zero)
+                        throw new InvalidOperationException($"GDI refused {name}");
+                }
+                FontFamily? Find(string family) =>
+                    collection.Families.FirstOrDefault(f => f.Name == family && f.IsStyleAvailable(FontStyle.Regular));
+                var regular = Find("Inter");
+                var medium = Find("Inter Medium");
+                var semibold = Find("Inter SemiBold");
+                if (regular == null || medium == null || semibold == null)
+                    throw new InvalidOperationException("an Inter face is missing from the collection");
+                (Collection, _regular, _medium, _semibold) = (collection, regular, medium, semibold);
+            }
+            catch (Exception ex)
+            {
+                _regular = _medium = _semibold = null;   // Segoe UI throughout
+                try { Log.Write($"Inter not loaded, using Segoe UI: {ex.Message}"); } catch { /* logging is best effort */ }
+            }
+        }
+    }
+
+    /// <summary>The Inter family for a weight, or null when Inter isn't available (the caller falls back).</summary>
+    public static FontFamily? Family(HouseWeight weight)
+    {
+        if (!_loaded) Load();
+        return weight switch
+        {
+            HouseWeight.Medium => _medium,
+            HouseWeight.SemiBold => _semibold,
+            _ => _regular,
+        };
     }
 }
