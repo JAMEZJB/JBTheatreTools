@@ -28,6 +28,9 @@ struct InstalledRecord: Codable {
     /// Which variant (e.g. "standard" / "full") is installed, for apps that ship variants.
     /// Optional so manifests written by older versions decode unchanged (nil = single-variant app).
     var variant: String?
+    /// The version this slot held before the most recent install changed it — the one-click "Roll Back" target.
+    /// Nil until an install replaces a different version (older manifests have no field).
+    var previousVersion: String?
 }
 
 enum InstallError: LocalizedError {
@@ -284,10 +287,14 @@ final class InstallManager: @unchecked Sendable {
         try fm.moveItem(at: bundle, to: dest)
 
         var m = manifest()
-        // Preserve any desktop-alias path already recorded for this slot; update version/path/variant.
-        let priorAlias = m[key]?.desktopAlias
+        // Preserve any desktop-alias path already recorded for this slot; update version/path/variant, and remember
+        // what this install replaced (a reinstall of the same version keeps the older one).
+        let prior = m[key]
+        let previous: String? = prior.flatMap { p in
+            VersionDisplay.equal(p.version, version) ? p.previousVersion : p.version
+        }
         m[key] = InstalledRecord(version: version, path: dest.path, installedAt: Self.isoNow(),
-                                 desktopAlias: priorAlias, variant: variant)
+                                 desktopAlias: prior?.desktopAlias, variant: variant, previousVersion: previous)
         writeManifest(m)
         return dest
     }
@@ -406,6 +413,64 @@ final class InstallManager: @unchecked Sendable {
         if let alias = m[appId]?.desktopAlias { try? fm.removeItem(at: URL(fileURLWithPath: alias)) }
         m[appId]?.desktopAlias = nil
         writeManifest(m)
+    }
+
+    // MARK: - Details, storage, free space
+
+    /// A copy of one slot's manifest record (for the details view and roll back), or nil.
+    func record(_ key: String) -> InstalledRecord? { manifest()[key] }
+
+    /// Bytes on disk for one installed slot's bundle. Walks the disk — call it off the main actor.
+    func sizeOnDisk(_ key: String) -> Int64 {
+        guard let path = installedPath(key) else { return 0 }
+        return Self.directorySize(path)
+    }
+
+    /// Bytes on disk for every installed slot (wherever each bundle lives). Off the main actor.
+    func installedSize() -> Int64 {
+        ByteSize.sum(manifest().keys.map { sizeOnDisk($0) })
+    }
+
+    /// Bytes in the download cache (downloads awaiting verification, leftovers of interrupted ones).
+    func cacheSize() -> Int64 { Self.directorySize(cacheDir) }
+
+    /// Empties the download cache. Only call it when nothing is downloading or installing (the caller checks):
+    /// installs extract inside the cache.
+    func clearCache() {
+        let items = (try? fm.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil)) ?? []
+        for item in items { try? fm.removeItem(at: item) }
+    }
+
+    /// Total allocated size of the files under `url` (a bundle or folder); a plain file's own size; 0 if absent.
+    static func directorySize(_ url: URL) -> Int64 {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return 0 }
+        let keys: [URLResourceKey] = [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileSizeKey]
+        if !isDir.boolValue {
+            let v = try? url.resourceValues(forKeys: Set(keys))
+            return Int64(v?.totalFileAllocatedSize ?? v?.fileSize ?? 0)
+        }
+        guard let walker = fm.enumerator(at: url, includingPropertiesForKeys: keys, options: [], errorHandler: { _, _ in true })
+        else { return 0 }
+        var total: Int64 = 0
+        for case let file as URL in walker {
+            guard let v = try? file.resourceValues(forKeys: Set(keys)), v.isRegularFile == true else { continue }
+            total += Int64(v.totalFileAllocatedSize ?? v.fileSize ?? 0)
+        }
+        return total
+    }
+
+    /// Free bytes on the volume holding the download cache, or -1 if it can't be read. On macOS this is the
+    /// "important usage" figure (it counts space the system can purge for an install, as Finder does).
+    func freeSpace() -> Int64 {
+        #if os(macOS)
+        if let v = try? cacheDir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+           let bytes = v.volumeAvailableCapacityForImportantUsage { return bytes }
+        #endif
+        if let attrs = try? fm.attributesOfFileSystem(forPath: cacheDir.path),
+           let free = attrs[.systemFreeSize] as? NSNumber { return free.int64Value }
+        return -1
     }
 
     // MARK: - Helpers

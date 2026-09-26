@@ -25,7 +25,14 @@ data class ReleaseInfo(
     val assets: List<ReleaseAsset> = emptyList(),
     val prerelease: Boolean = false,
     val draft: Boolean = false,
+    /** The release's Markdown notes (shown in-app via ReleaseNotesText). */
+    val body: String? = null,
+    /** ISO 8601 publish time, kept as text so an odd value can never fail the whole release list. */
+    @SerialName("published_at") val publishedAt: String? = null,
 )
+
+/** Thrown out of [GitHubClient.downloadAsset] when its `shouldCancel` check says stop. Not a failure. */
+class DownloadCancelledException : IOException("Download cancelled")
 
 class GitHubException(val kind: Kind, message: String) : IOException(message) {
     enum class Kind { NO_RELEASE, NOT_ACCESSIBLE, UNAUTHORIZED, HTTP, ASSET_NOT_FOUND, BAD_RESPONSE, BAD_URL }
@@ -59,6 +66,12 @@ class GitHubClient private constructor(
     companion object {
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
         const val GITHUB_API = "https://api.github.com"
+        /** Releases per page of the list endpoint. */
+        const val PAGE_SIZE = 50
+        /** A download that receives nothing for this long has stalled — generous, as the relay can be slow to start
+         *  streaming a large APK. Cancel doesn't wait for it: the cancel watcher checks every 250 ms. */
+        private const val DOWNLOAD_STALL_MS = 60_000
+        private const val DOWNLOAD_CONNECT_MS = 15_000
 
         /** Direct GitHub access with a fine-grained PAT (or none, for public repos). */
         fun direct(token: String?): GitHubClient =
@@ -131,8 +144,14 @@ class GitHubClient private constructor(
      * with no releases and `404` only when the credential can't see the repo, so a 404 here means NO
      * ACCESS (not "no release") and a 401 means the credential itself is bad.
      */
-    fun releases(owner: String, repo: String): List<ReleaseInfo> {
-        val conn = open(url("/repos/$owner/$repo/releases?per_page=50"), "application/vnd.github+json")
+    fun releases(owner: String, repo: String): List<ReleaseInfo> = releasesPage(owner, repo, 1).filter { !it.draft }
+
+    /**
+     * One page of [PAGE_SIZE] releases, drafts INCLUDED (so a caller paging on can tell a full page from the last
+     * one). Same errors as [releases].
+     */
+    fun releasesPage(owner: String, repo: String, page: Int): List<ReleaseInfo> {
+        val conn = open(url("/repos/$owner/$repo/releases?per_page=$PAGE_SIZE&page=$page"), "application/vnd.github+json")
         try {
             when (val code = conn.responseCode) {
                 200 -> Unit
@@ -145,7 +164,7 @@ class GitHubClient private constructor(
                 json.decodeFromString(
                     kotlinx.serialization.builtins.ListSerializer(ReleaseInfo.serializer()),
                     String(body, Charsets.UTF_8),
-                ).filter { !it.draft }
+                )
             } catch (e: Exception) {
                 throw GitHubException.badResponse()
             }
@@ -176,27 +195,35 @@ class GitHubClient private constructor(
         }
     }
 
-    /** Downloads a release asset by id to [dest], reporting fractional progress (0…1). */
+    /**
+     * Downloads a release asset by id to [dest], reporting fractional progress (0…1). [shouldCancel] is polled
+     * between chunks AND by a watcher every quarter second while connecting or waiting on a read — which drops the
+     * connection — so Cancel takes effect at once instead of after a timeout. Either way the transfer stops with
+     * [DownloadCancelledException] (the caller removes the partial file).
+     */
     fun downloadAsset(
         owner: String,
         repo: String,
         assetId: Long,
         dest: File,
         progress: ((Double) -> Unit)? = null,
+        shouldCancel: (() -> Boolean)? = null,
     ) {
         var target = url("/repos/$owner/$repo/releases/assets/$assetId")
         var carryAuth = true
         var hops = 0
         while (true) {
+            if (shouldCancel?.invoke() == true) throw DownloadCancelledException()
             val conn = if (carryAuth) open(target, "application/octet-stream") else {
                 (target.openConnection() as HttpURLConnection).apply {
                     instanceFollowRedirects = false
-                    connectTimeout = 20_000
-                    readTimeout = 60_000
                     setRequestProperty("Accept", "application/octet-stream")
                     setRequestProperty("User-Agent", "JBTheatreTools")
                 }
             }
+            conn.connectTimeout = DOWNLOAD_CONNECT_MS
+            conn.readTimeout = DOWNLOAD_STALL_MS
+            val watcher = shouldCancel?.let { CancelWatcher(conn, it).also { w -> w.start() } }
             try {
                 val code = conn.responseCode
                 if (code in 300..399) {
@@ -215,20 +242,62 @@ class GitHubClient private constructor(
                 }
                 val total = conn.contentLengthLong
                 dest.parentFile?.mkdirs()
-                conn.inputStream.use { input -> copy(input, dest, total, progress) }
+                conn.inputStream.use { input -> copy(input, dest, total, progress, shouldCancel) }
                 progress?.invoke(1.0)
                 return
+            } catch (e: DownloadCancelledException) {
+                throw e
+            } catch (e: Exception) {
+                // The watcher dropped the connection mid-connect or mid-read: that's the Cancel, not an error.
+                if (watcher?.tripped == true || shouldCancel?.invoke() == true) throw DownloadCancelledException()
+                throw e
             } finally {
+                watcher?.finish()
                 conn.disconnect()
             }
         }
     }
 
-    private fun copy(input: InputStream, dest: File, total: Long, progress: ((Double) -> Unit)?) {
+    /** Polls [shouldCancel] while a download connects or reads, and drops the connection when it says stop. */
+    private class CancelWatcher(
+        private val conn: HttpURLConnection,
+        private val shouldCancel: () -> Boolean,
+    ) : Thread("download-cancel") {
+        @Volatile var tripped = false
+            private set
+        @Volatile private var done = false
+
+        init { isDaemon = true }
+
+        override fun run() {
+            while (!done) {
+                if (shouldCancel()) {
+                    tripped = true
+                    runCatching { conn.disconnect() }
+                    return
+                }
+                try { sleep(250) } catch (_: InterruptedException) { return }
+            }
+        }
+
+        fun finish() {
+            done = true
+            interrupt()
+        }
+    }
+
+    private fun copy(
+        input: InputStream,
+        dest: File,
+        total: Long,
+        progress: ((Double) -> Unit)?,
+        shouldCancel: (() -> Boolean)?,
+    ) {
         dest.outputStream().use { out ->
             val buf = ByteArray(1 shl 16)
             var written = 0L
             while (true) {
+                if (shouldCancel?.invoke() == true) throw DownloadCancelledException()
                 val n = input.read(buf)
                 if (n <= 0) break
                 out.write(buf, 0, n)

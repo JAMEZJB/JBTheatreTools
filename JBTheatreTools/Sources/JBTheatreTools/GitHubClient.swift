@@ -11,10 +11,16 @@ struct ReleaseInfo: Decodable, Identifiable, Sendable {
     let assets: [ReleaseAsset]
     let prerelease: Bool
     let draft: Bool
+    /// The release's Markdown notes (shown in-app via `ReleaseNotesText`).
+    var body: String? = nil
+    /// ISO 8601 publish time, kept as text so an odd value can never fail the whole release list.
+    var publishedAt: String? = nil
     var id: String { tagName }
+    var published: Date? { RelativeAge.parseISO(publishedAt) }
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
-        case assets, prerelease, draft
+        case assets, prerelease, draft, body
+        case publishedAt = "published_at"
     }
 }
 
@@ -152,16 +158,23 @@ final class GitHubClient: NSObject, @unchecked Sendable {
         return (notes, data)
     }
 
-    /// Downloads a release asset by id to `dest`, reporting fractional progress (0…1).
+    /// Downloads a release asset by id to `dest`, reporting fractional progress (0…1). Cancelling the calling Task
+    /// cancels the transfer (the caller sees `URLError(.cancelled)` or a `CancellationError`; nothing is written).
     func downloadAsset(owner: String, repo: String, assetId: Int, to dest: URL,
                        progress: (@Sendable (Double) -> Void)? = nil) async throws {
         guard let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases/assets/\(assetId)") else { throw GitHubError.badURL }
         let req = apiRequest(url, accept: "application/octet-stream")
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            let task = session.downloadTask(with: req)
-            let ctx = DownloadContext(dest: dest, progress: progress, continuation: cont)
-            lock.lock(); contexts[task.taskIdentifier] = ctx; lock.unlock()
-            task.resume()
+        let task = session.downloadTask(with: req)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                // Already cancelled before the transfer started: never start it.
+                if Task.isCancelled { cont.resume(throwing: CancellationError()); return }
+                let ctx = DownloadContext(dest: dest, progress: progress, continuation: cont)
+                lock.lock(); contexts[task.taskIdentifier] = ctx; lock.unlock()
+                task.resume()
+            }
+        } onCancel: {
+            task.cancel()   // the delegate then completes the context with URLError(.cancelled)
         }
     }
 

@@ -76,6 +76,43 @@ class Settings(context: Context) {
     fun setInstalledTag(catalogId: String, tag: String?) =
         prefs.edit().apply { if (tag == null) remove(KEY_TAG_PREFIX + catalogId) else putString(KEY_TAG_PREFIX + catalogId, tag) }.apply()
 
+    // ── v1.30: show lock, holds, scheduled checks, notifications, what's new, quick launch ──
+
+    /** Show lock: installs, updates and removals are paused; opening apps still works. */
+    var showLock: Boolean
+        get() = prefs.getBoolean(KEY_SHOW_LOCK, false)
+        set(value) = prefs.edit().putBoolean(KEY_SHOW_LOCK, value).apply()
+
+    /** Catalog ids held at their installed version (Update all and notifications leave them alone). */
+    var heldApps: Set<String>
+        get() = prefs.getStringSet(KEY_HELD, null)?.toSet() ?: emptySet()
+        set(value) = prefs.edit().putStringSet(KEY_HELD, HashSet(value)).apply()
+
+    /** "While open, check again": 1h / 4h / 12h / 24h / off (see [UpdatePolicy.intervals]). */
+    var autoCheckInterval: String
+        get() = prefs.getString(KEY_AUTO_CHECK, null) ?: UpdatePolicy.DEFAULT_INTERVAL
+        set(value) = prefs.edit().putString(KEY_AUTO_CHECK, value).apply()
+
+    /** Notify about new updates (also needs the POST_NOTIFICATIONS permission on Android 13+). */
+    var notifyUpdates: Boolean
+        get() = prefs.getBoolean(KEY_NOTIFY, false)   // opt-in: no background checks or notifications unless asked
+        set(value) = prefs.edit().putBoolean(KEY_NOTIFY, value).apply()
+
+    /** "id version" keys already announced. */
+    var notifiedUpdates: Set<String>
+        get() = prefs.getStringSet(KEY_NOTIFIED, null)?.toSet() ?: emptySet()
+        set(value) = prefs.edit().putStringSet(KEY_NOTIFIED, HashSet(value)).apply()
+
+    /** The launcher version last seen running — drives the one-time "Updated to vX" banner. */
+    var lastSeenLauncherVersion: String
+        get() = prefs.getString(KEY_LAST_SEEN, "").orEmpty()
+        set(value) = prefs.edit().putString(KEY_LAST_SEEN, value).apply()
+
+    /** Catalog ids most recently opened from the launcher, newest first (the launcher-icon shortcuts). */
+    var recentOpens: List<String>
+        get() = prefs.getString(KEY_RECENT, "").orEmpty().split(',').filter { it.isNotBlank() }
+        set(value) = prefs.edit().putString(KEY_RECENT, value.take(8).joinToString(",")).apply()
+
     var firstRunDone: Boolean
         get() = prefs.getBoolean(KEY_FIRST_RUN_DONE, false)
         set(value) = prefs.edit().putBoolean(KEY_FIRST_RUN_DONE, value).apply()
@@ -89,5 +126,12 @@ class Settings(context: Context) {
         const val KEY_FIRST_RUN_DONE = "first-run-done"
         const val KEY_DEV_CHANNEL = "dev-channel"
         const val KEY_TAG_PREFIX = "installed-tag:"
+        const val KEY_SHOW_LOCK = "show-lock"
+        const val KEY_HELD = "held-apps"
+        const val KEY_AUTO_CHECK = "auto-check-interval"
+        const val KEY_NOTIFY = "notify-updates"
+        const val KEY_NOTIFIED = "notified-updates"
+        const val KEY_LAST_SEEN = "last-seen-launcher-version"
+        const val KEY_RECENT = "recent-opens"
     }
 }

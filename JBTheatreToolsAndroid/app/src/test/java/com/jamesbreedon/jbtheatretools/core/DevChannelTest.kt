@@ -38,6 +38,19 @@ class DevChannelTest {
         assertEquals("v0.2.0", ReleasePick.latest(released, devChannel = true)!!.tagName)
     }
 
+    @Test fun setupVersionsMatchByVersionAndUseTheRealTag() {
+        val list = listOf(rel("v1.3.0-dev.1", pre = true), rel("v1.2.0"), rel("V1.1.0"), rel("build-20260912"))
+        // "1.2.0" in a setup file finds the release tagged "v1.2.0" — and the install uses that real tag.
+        assertEquals("v1.2.0", ReleasePick.byVersion(list, "1.2.0", allowDev = false)!!.tagName)
+        assertEquals("v1.2.0", ReleasePick.byVersion(list, "v1.2.0", allowDev = false)!!.tagName)
+        assertEquals("V1.1.0", ReleasePick.byVersion(list, "1.1.0", allowDev = false)!!.tagName)
+        assertEquals("build-20260912", ReleasePick.byVersion(list, "build-20260912", allowDev = false)!!.tagName)
+        assertNull(ReleasePick.byVersion(list, "1.0.0", allowDev = false))
+        // A development build is found only with Development builds on.
+        assertNull(ReleasePick.byVersion(list, "1.3.0-dev.1", allowDev = false))
+        assertEquals("v1.3.0-dev.1", ReleasePick.byVersion(list, "1.3.0-dev.1", allowDev = true)!!.tagName)
+    }
+
     @Test fun devApkNameCarriesTheFullTag() {
         val app = CatalogApp(id = "x", name = "X", owner = "o", repo = "NetgearSwitchTools",
             assets = mapOf("macos" to "NetgearSwitchTools-macOS.zip"))

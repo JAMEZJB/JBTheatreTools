@@ -23,7 +23,19 @@ The version comes from [`launcher.properties`](launcher.properties) and is the s
 - **Apps** — a three-column grid of the suite's app tiles, each with its version. Long-press (or tap) a
   tile for Install / Update / Open / Remove / Open release notes.
 - **Updates** — what has an update, with per-app progress, and a pinned **Update all**.
-- **About** — Appearance (Light / Dark / System), the download settings, the log, and the credit line.
+- **About** — Appearance (Light / Dark / System), the download settings, show lock, automatic checks and
+  update notifications, setup export / import, storage (with Clear download cache), recent activity,
+  Share diagnostics, the log, and the credit line.
+
+The Apps tab has a search field and an All / Installed / Updates / Not installed filter. A tile's actions
+also offer its release notes (newest first, with dates), its details (version, install date, size,
+latest release) and **Hold at this version**; a download in progress can be cancelled, and Update all
+has a Stop. Up to four installed apps (most recently opened first) become shortcuts on the launcher's
+icon, and after the launcher updates itself it offers its own release notes once. With update notifications on,
+checks also run while the launcher is closed — a periodic JobScheduler job that needs a network connection and only
+ever notifies (it never installs). The rules behind these
+(filtering, notes cleanup, schedules, the setup file, the history, redaction) match the desktop
+launchers', with the same unit-test cases on all three.
 
 At tablet width the grid becomes the desktop launcher's grouped list, with the same 220 dp sidebar,
 the same category sections and the same rows. Phone portrait, phone landscape, tablet portrait, tablet

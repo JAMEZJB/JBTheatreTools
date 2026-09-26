@@ -139,6 +139,9 @@ struct SelfInfo: Decodable {
     let owner: String
     let repo: String
     let assets: [String: String]
+    /// The launcher's own one-line what's-new (the offline fallback for the "Updated to vX" notes).
+    var whatsNew: String? = nil
+    var whatsNewVersion: String? = nil
     var macAssetName: String? { MacArch.pick(from: assets) }
 }
 

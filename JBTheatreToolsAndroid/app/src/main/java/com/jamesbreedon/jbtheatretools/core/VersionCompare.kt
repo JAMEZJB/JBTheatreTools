@@ -46,6 +46,15 @@ object VersionCompare {
         return pa.size.compareTo(pb.size)
     }
 
+    /**
+     * A tag as the launchers print it: "v" + the normalised version for a numeric tag ("1.2.0" and "v1.2.0" both
+     * -> "v1.2.0"), the tag itself otherwise (Convert's "build-20260912").
+     */
+    fun display(tag: String): String {
+        val n = norm(tag)
+        return if (n.isNotEmpty() && n[0].isDigit()) "v$n" else tag.trim()
+    }
+
     /** True for development pre-releases (`vX.Y.Z-dev.N`). */
     fun isDev(tag: String): Boolean = norm(tag).lowercase().contains("-dev.")
 

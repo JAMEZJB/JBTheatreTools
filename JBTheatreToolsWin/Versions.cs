@@ -60,6 +60,15 @@ public static class Versions
         return VersionCompare.IsDev(current) ? latest : null;
     }
 
+    /// <summary>The releases a person is shown or offered (release notes, the ⋯ version list, Roll Back): development
+    /// builds only with the Development builds switch on.</summary>
+    public static List<ReleaseInfo> Offered(IEnumerable<ReleaseInfo> releases) =>
+        releases.Where(r => DevChannel || !VersionCompare.IsDev(r.TagName)).ToList();
+
+    /// <summary>True when the release carries the signed checksum manifest a strict install needs.</summary>
+    public static bool HasSignedManifest(ReleaseInfo r) =>
+        r.Assets.Any(a => a.Name == "SHA256SUMS") && r.Assets.Any(a => a.Name == "SHA256SUMS.minisig");
+
     /// <summary>This PC's Dev channel (settings.json <c>DevChannel</c>; MainForm keeps it in step). Off by
     /// default and for the CLI: development pre-releases are never picked.</summary>
     public static bool DevChannel { get; set; }

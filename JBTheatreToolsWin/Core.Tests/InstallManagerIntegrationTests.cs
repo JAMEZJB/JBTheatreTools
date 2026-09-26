@@ -55,6 +55,39 @@ public sealed class InstallManagerIntegrationTests : IDisposable
     }
 
     [Fact]
+    public void RecordsThePreviousVersionForRollBack()
+    {
+        manager.Install(app, "v1", Exe(), "Demo.exe", false);
+        Assert.Null(manager.Record("demo")!.PreviousVersion);           // a first install replaced nothing
+        manager.Install(app, "v2", Exe(), "Demo.exe", false);
+        Assert.Equal("v1", manager.Record("demo")!.PreviousVersion);
+        manager.Install(app, "2", Exe(), "Demo.exe", false);             // a reinstall of the same version…
+        Assert.Equal("v1", manager.Record("demo")!.PreviousVersion);     // …keeps the older one
+        manager.Install(app, "v1", Exe(), "Demo.exe", false);            // roll back
+        Assert.Equal("2", manager.Record("demo")!.PreviousVersion);      // → rolling forward is one click too
+        Assert.Null(manager.Record("demo@full"));
+    }
+
+    [Fact]
+    public void MeasuresAndClearsTheDownloadCache()
+    {
+        string installed = manager.Install(app, "v1", Exe("12345"), "Demo.exe", false);
+        Assert.Equal(5, manager.SizeOnDisk("demo"));
+        Assert.Equal(0, manager.SizeOnDisk("demo@full"));
+        Assert.True(manager.InstalledSize() >= 5);
+        File.WriteAllText(Path.Combine(manager.CacheDir, "leftover.part"), "0123456789");
+        Directory.CreateDirectory(Path.Combine(manager.CacheDir, "extract-x"));
+        File.WriteAllText(Path.Combine(manager.CacheDir, "extract-x", "f"), "abc");
+        Assert.True(manager.CacheSize() >= 13);
+        manager.ClearCache();
+        Assert.Equal(0, manager.CacheSize());
+        Assert.True(Directory.Exists(manager.CacheDir));
+        Assert.True(File.Exists(installed));                              // installs are never in the cache
+        Assert.True(manager.FreeSpace() > 0);
+        Assert.Equal(0, InstallManager.DirectorySize(Path.Combine(root, "does-not-exist")));
+    }
+
+    [Fact]
     public void FailedExtractionPreservesMetadataPayloadAndShortcuts()
     {
         string old = manager.Install(app, "v1", Exe(), "Demo.exe", true);
@@ -129,6 +162,35 @@ public sealed class InstallManagerIntegrationTests : IDisposable
         Assert.Throws<InvalidDataException>(() => manager.Install(app, "v2", Exe(""), "Demo.exe", false));
         Assert.Equal(metadata, File.ReadAllText(manager.ManifestPath));
         Assert.True(File.Exists(old));
+    }
+
+    [Fact]
+    public void RemovesOldVersionsKeptAsideOnTheSlotsNextInstallOrUninstall()
+    {
+        manager.Install(app, "v1", Exe(), "Demo.exe", false);
+        manager.Install(app, "v1", Exe(), "Demo.exe", false, "full");
+        string directory = Path.Combine(manager.AppsDir, app.Id);
+        string Aside(string slot, TimeSpan age)
+        {
+            string d = Path.Combine(directory, slot + "-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(d);
+            File.WriteAllText(Path.Combine(d, "Demo.exe"), "old");
+            Directory.SetCreationTimeUtc(d, DateTime.UtcNow - age);
+            return d;
+        }
+        string stale = Aside("demo", TimeSpan.FromHours(2));
+        string recent = Aside("demo", TimeSpan.FromMinutes(1));        // maybe another process's install in flight
+        string sibling = Aside("demo@full", TimeSpan.FromHours(2));   // another edition's: only its own slot cleans it
+        string current = manager.InstalledPath("demo")!;
+        string next = manager.Install(app, "v2", Exe(), "Demo.exe", false);
+        Assert.False(Directory.Exists(stale));
+        Assert.True(Directory.Exists(recent));
+        Assert.True(Directory.Exists(sibling));
+        Assert.False(File.Exists(current));                           // the replaced version: removed as before
+        Assert.True(File.Exists(next));
+        manager.Uninstall("demo@full");
+        Assert.False(Directory.Exists(sibling));
+        Assert.True(File.Exists(next));
     }
 
     public void Dispose() => Directory.Delete(root, recursive: true);

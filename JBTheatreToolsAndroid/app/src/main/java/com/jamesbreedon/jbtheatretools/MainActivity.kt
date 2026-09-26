@@ -92,6 +92,14 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Notifications are only posted while the launcher isn't on screen.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                vm.setForeground(true)
+                try { kotlinx.coroutines.awaitCancellation() } finally { vm.setForeground(false) }
+            }
+        }
+
         // A removal happens in the system's uninstall flow, so re-read what's installed on resume.
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) { vm.refreshInstalledOnly() }

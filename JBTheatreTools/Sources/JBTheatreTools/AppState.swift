@@ -2,8 +2,9 @@ import Foundation
 import SwiftUI
 import AppKit
 import Combine
+import UniformTypeIdentifiers
 
-/// Where downloads authenticate: a personal GitHub token (direct API access), or James's
+/// Where downloads authenticate: a personal GitHub token (direct API access), or the suite's
 /// download server (relay) with a shared suite passphrase — no GitHub token on the machine.
 enum AuthMode: String, CaseIterable, Identifiable {
     case token, server
@@ -25,6 +26,42 @@ enum FetchOutcome: Sendable {
     case unauthorized
     case noRelease
     case error(String)
+}
+
+/// The one secondary sheet the launcher shows at a time (release notes, an app's details, the activity history,
+/// a setup-file preview) — a single `.sheet(item:)` in ContentView presents whichever is set.
+enum LauncherSheet: Identifiable {
+    case notes(NotesModel)
+    case details(String)                 // row id
+    case activity([ActivityEvent])
+    case importPreview(ImportPreviewModel)
+
+    var id: String {
+        switch self {
+        case .notes: return "notes"
+        case .details(let id): return "details-\(id)"
+        case .activity: return "activity"
+        case .importPreview: return "import"
+        }
+    }
+}
+
+/// In-app release notes: releases newest first, with the installed version to flag "New since your version".
+struct NotesModel {
+    let title: String
+    let installed: String?
+    var releases: [ReleaseInfo]
+    var loading: Bool
+    /// Shown when there are no releases to list (none yet, or the launcher's catalog line offline).
+    var message: String?
+}
+
+/// What importing a setup file would do, shown before anything installs.
+struct ImportPreviewModel {
+    let source: String
+    let summary: String
+    let plan: SetupPlanner.Plan
+    let layout: SetupProfile.Layout?
 }
 
 /// Download progress, published SEPARATELY from `AppState.rows`. A progress tick used to mutate the whole
@@ -94,11 +131,20 @@ final class AppState: ObservableObject {
         /// call `latest(from:)` per render (the header's update/download counts, slot checks) reads this instead —
         /// re-sorting 21 release lists on every render was a hidden per-frame cost.
         @Published var latestRelease: ReleaseInfo?
-        @Published var status: Status = .unknown
+        @Published var status: Status = .unknown { didSet { if status != .checking { settledStatus = status } } }
+        /// The last status that wasn't "Checking…". Visibility and the status filter use it while a check runs, so
+        /// a refresh neither empties a filtered list nor flashes rows out of the list and back in.
+        private(set) var settledStatus: Status = .unknown
         @Published var busy: Bool = false
+        /// A download of this row is in flight and can be cancelled (the row's Cancel button).
+        @Published var cancellable: Bool = false
         /// Slots of THIS app currently in flight (a pipelined Download All can have the Full edition downloading
         /// while the Light edition is still extracting). `busy` mirrors `busyCount > 0`.
         var busyCount: Int = 0
+        /// A slot of this app is being verified / installed (not just downloaded). Launch waits only for this: a
+        /// download — say an automatic update on slow venue Wi-Fi — never stops the operator opening the app.
+        @Published var installing: Bool = false
+        var installingCount: Int = 0
         /// The installed app's self-declared bundle name (kept for diagnostics only — NOT shown; see displayName).
         @Published var resolvedName: String?
         /// Suffix for the selected non-default variant (e.g. " (Full)"), appended to the curated name so a Full
@@ -108,10 +154,10 @@ final class AppState: ObservableObject {
         /// (`WhatsNewNotes`) when the relay has one for this app.
         @Published var whatsNew: String?
         @Published var whatsNewVersion: String?
-        /// Name to show: the launcher's CURATED catalog name (James's naming) + the variant suffix. We do NOT
+        /// Name to show: the launcher's CURATED catalog name (the suite's curated naming) + the variant suffix. We do NOT
         /// use the installed bundle's self-name — several bundles diverge from the curated name (e.g. the
         /// Convert app calls itself "Convert to it!", Network Port Map's bundle is "Build Port Map", Show
-        /// Dashboard's is "ShowDashboard"), and the catalog name is what James curates for the suite.
+        /// Dashboard's is "ShowDashboard"), and the catalog name is the suite's curated name.
         var displayName: String { app.name + variantSuffix }
         /// The error text when the row is in `.error`, else nil (the row shows it as a tooltip).
         var errorMessage: String? { if case .error(let m) = status { return m } else { return nil } }
@@ -120,7 +166,7 @@ final class AppState: ObservableObject {
         /// hidden, so inaccessible apps never flash into view and back out during a refresh.
         var isVisible: Bool {
             if installed != nil { return true }
-            switch status {
+            switch status == .checking ? settledStatus : status {
             case .unknown, .checking, .noAccess: return false
             // Nothing released on this Mac's channel (an app with only development builds so far, or none):
             // shown only with the Development builds switch on, so everyone else never sees a dead row.
@@ -148,7 +194,22 @@ final class AppState: ObservableObject {
     /// Bumped when a row's VISIBILITY flips or a slot/refresh completes — the list/header re-render (cheaply: rows
     /// whose inputs didn't change skip their bodies) without `rows` itself having to republish.
     @Published private(set) var rowsGen = 0
-    func bumpRows() { LoopWatch.mark("bumpRows"); rowsGen &+= 1 }
+    func bumpRows() { LoopWatch.mark("bumpRows"); rowsGen &+= 1; syncChrome() }
+
+    /// What the menu bar commands and the menu-bar extra show. They observe THIS small object, not AppState: watching
+    /// the whole model re-built the main menu (and re-sorted every row's releases for the Update All count) on every
+    /// publish. Updated only when a value actually changes.
+    let chrome = ChromeState()
+
+    func syncChrome() {
+        let lock = showLock, busy = batchRunning
+        if chrome.showLock != lock { chrome.showLock = lock }
+        // Counting updates walks every row's releases; bumpRows fires per install phase, so only count when it can matter.
+        let canUpdate = !lock && !busy && updatesAvailable > 0
+        if chrome.canUpdateAll != canUpdate { chrome.canUpdateAll = canUpdate }
+        let slots = installedSlotsForLaunch.map { ChromeState.LaunchSlot(key: $0.key, name: $0.name) }
+        if chrome.launchSlots != slots { chrome.launchSlots = slots }
+    }
     /// Per-download progress, published separately so ticks never re-render the list (see `ProgressHub`).
     let progressHub = ProgressHub()
     @Published var hasToken: Bool = TokenStore.exists()
@@ -181,6 +242,47 @@ final class AppState: ObservableObject {
     /// Per-app selected variant id (per-machine), for apps that ship variants (e.g. NDI Light/Full).
     /// Absent → the app's default (first) variant.
     @Published var variantSelection: [String: String] = [:]
+
+    // ── v1.30 ─────────────────────────────────────────────────────────────────────────────────────────
+    /// Find & filter: the search text and the status filter (session-only).
+    @Published var searchText = ""
+    @Published var statusFilter: StatusFilter = .all
+    /// Show lock: installs, updates and uninstalls are paused; Launch still works (per machine).
+    @Published private(set) var showLock = UserDefaults.standard.bool(forKey: AppState.showLockKey)
+    /// Apps held at their installed version: no Update, left out of Update All / automatic updates (per machine).
+    @Published private(set) var heldIds: Set<String> = []
+    /// A batch (Download All / Update All / an import / automatic updates) is running — the header offers Stop.
+    @Published private(set) var batchRunning = false { didSet { syncChrome() } }
+    /// This build's version on the first launch after the launcher itself was updated (the "Updated to" banner).
+    @Published var launcherWhatsNew: String?
+    /// The secondary sheet on screen (release notes, details, activity, import preview), or nil.
+    @Published var activeSheet: LauncherSheet?
+    /// Stop pressed during a batch: finish the slot that's installing, start nothing more.
+    /// Stop was pressed: the header shows "Stopping…" until the app that's installing finishes.
+    @Published private(set) var batchStopRequested = false
+    /** A check was asked for while one was running (e.g. a new passphrase saved mid-check): run one more after it. */
+    private var refreshRequested = false
+    /** The rows of the running batch — what Stop cancels (never a separate install started from a row). */
+    private var batchIds: Set<String> = []
+    /// In-flight downloads by row id — cancelled by the row's Cancel button or a batch Stop.
+    private var downloadTasks: [String: Task<Void, Error>] = [:]
+    /// Install slots (app + edition) being downloaded or installed right now: a second request for the same slot
+    /// (a row's Update while a batch has it, a double click) is refused instead of racing it for the same zip.
+    private var slotsInFlight: Set<String> = []
+    /// Set when someone asks for a visible check while a quiet one runs (see `refreshAll`).
+    private var nextRefreshVisible = false
+    private(set) var isRefreshing = false
+    /// When the last check ran (the "While open, check every…" scheduler's clock).
+    private var lastCheck: Date?
+    private var scheduler: Task<Void, Never>?
+    nonisolated static let showLockKey = "theatre.showLock"
+    nonisolated static let heldKey = "theatre.heldApps"
+    nonisolated static let autoCheckKey = "theatre.autoCheckInterval"
+    nonisolated static let notifyKey = "theatre.notifyUpdates"
+    nonisolated static let autoInstallKey = "theatre.autoInstallUpdates"
+    nonisolated static let notifiedKey = "theatre.notifiedUpdates"
+    nonisolated static let lastSeenKey = "theatre.lastSeenLauncherVersion"
+    nonisolated static let menuBarKey = "theatre.showMenuBarExtra"
 
     private var selfInfo: SelfInfo?
     /// The download-relay base URL: an (invisible, settings-only) local override wins, else the
@@ -242,6 +344,7 @@ final class AppState: ObservableObject {
             Task.detached(priority: .utility) { AppIconImage.prewarm(paths: prewarmPaths, ids: prewarmIds) }
             pinnedIds = Set(UserDefaults.standard.stringArray(forKey: Self.pinnedKey) ?? []).intersection(known)
             hiddenIds = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? []).intersection(known)
+            heldIds = Set(UserDefaults.standard.stringArray(forKey: Self.heldKey) ?? []).intersection(known)
         } catch {
             globalError = "Could not load app catalog: \(error.localizedDescription)"
         }
@@ -256,7 +359,9 @@ final class AppState: ObservableObject {
         hasServerAuth = serverBase != nil && ServerAuthStore.exists()
         if let cached = WhatsNewNotes.loadCached() { applyWhatsNew(cached) }   // last relay copy, for offline starts
         UserDefaults.standard.removeObject(forKey: Self.devChannelRevealedKey)   // retired: the reveal is never stored
+        prepareLauncherWhatsNew()
         AppLog.shared.log("launched v\(currentVersion)")
+        syncChrome()   // the menus' first state (show lock, Update All, launchable apps)
     }
 
     // MARK: - Auth mode
@@ -423,7 +528,31 @@ final class AppState: ObservableObject {
 
     // MARK: - Refresh
 
-    func refreshAll() async {
+    /// `quiet`: a scheduled background check — rows keep what they show while it runs (no "Checking…", which hides
+    /// every not-installed row and its Install button) and only change when a result lands.
+    func refreshAll(quiet: Bool = false) async {
+        // One check at a time: a scheduled check, the menu-bar item and the Refresh button can all ask. A request
+        // made meanwhile runs once more afterwards — it may carry new credentials the running check doesn't have.
+        // The asker waits for it (so Refresh keeps showing "Checking…" until results are in), and a visible request
+        // made during a quiet scheduled check makes the re-run visible.
+        if isRefreshing {
+            refreshRequested = true
+            if !quiet { nextRefreshVisible = true }
+            while isRefreshing && !Task.isCancelled { try? await Task.sleep(nanoseconds: 100_000_000) }
+            return
+        }
+        isRefreshing = true
+        var visible = !quiet
+        repeat {
+            refreshRequested = false
+            nextRefreshVisible = false
+            await refreshOnce(quiet: !visible)
+            visible = nextRefreshVisible
+        } while refreshRequested
+        isRefreshing = false
+    }
+
+    private func refreshOnce(quiet: Bool = false) async {
         await ensureKeychainExplained()
         guard let client = activeClient() else { return }
         // Clear a stale network/credential error from a previous run (but keep a catalog-load error,
@@ -433,7 +562,7 @@ final class AppState: ObservableObject {
         // Mark every row "checking" in a SINGLE publish — mutate a local copy and assign `rows` once — so we
         // don't re-render the whole list 20× just to show the spinners (that churn was the boot-time lag).
         for row in rows {
-            row.status = .checking
+            if !quiet { row.status = .checking }
             row.installed = InstallManager.shared.installedVersion(installKey(for: row.app))
         }
         bumpRows()
@@ -456,7 +585,7 @@ final class AppState: ObservableObject {
                     catch { return (a.id, .error(error.localizedDescription)) }
                 }
             }
-            for await (id, outcome) in group { applyRefreshOutcome(id: id, outcome: outcome) }
+            for await (id, outcome) in group { applyRefreshOutcome(id: id, outcome: outcome, quiet: quiet) }
         }
         if let (notes, data) = await notesFetch {
             applyWhatsNew(notes)
@@ -464,6 +593,8 @@ final class AppState: ObservableObject {
             AppLog.shared.log("what's-new: applied \(notes.notes.count) relay line(s)")
         }
         hasRefreshed = true
+        lastCheck = Date()
+        afterCheck()
     }
 
     /// Overlays the relay's "New in" lines on every row (catalog line where the relay has none).
@@ -476,7 +607,9 @@ final class AppState: ObservableObject {
     }
 
     /// Applies one concurrent check's outcome to its row (on the main actor), re-finding the row by id.
-    private func applyRefreshOutcome(id: String, outcome: FetchOutcome) {
+    /// `quiet` (a scheduled check): a failed check leaves the row as it was — an offline show machine shouldn't turn
+    /// every row into an error with a Retry button every few hours. The launch check and Refresh still show errors.
+    private func applyRefreshOutcome(id: String, outcome: FetchOutcome, quiet: Bool) {
         guard let app = rows.first(where: { $0.id == id })?.app else { return }
         let slot = installKey(for: app)
         switch outcome {
@@ -498,8 +631,9 @@ final class AppState: ObservableObject {
             // Token can't see this repo → hide the row from the list.
             update(id) { $0.latest = nil; $0.latestAssetId = nil; $0.releases = []; $0.latestRelease = nil; $0.status = .noAccess }
         case .unauthorized:
-            // The credential itself is bad — surface one clear message instead of N broken rows.
-            update(id) { $0.status = .noAccess }
+            // The credential itself is bad — surface one clear message instead of N broken rows. The cached releases
+            // go too, so nothing (e.g. automatic updates) keeps acting on data this credential can no longer reach.
+            update(id) { $0.status = .noAccess; $0.releases = []; $0.latestRelease = nil; $0.latest = nil; $0.latestAssetId = nil }
             globalError = Self.authMode == .token
                 ? "Your GitHub token is invalid or expired. Open Settings to paste a new one."
                 : "The download server rejected the passphrase. Check it in Settings."
@@ -507,8 +641,8 @@ final class AppState: ObservableObject {
         case .noRelease:
             update(id) { $0.latest = nil; $0.releases = []; $0.latestRelease = nil; $0.status = .noRelease }
         case .error(let msg):
-            update(id) { $0.status = .error(msg) }
-            AppLog.shared.log("refresh \(id) error: \(msg)")
+            if !quiet { update(id) { $0.status = .error(msg) } }
+            AppLog.shared.log("refresh \(id) error\(quiet ? " (scheduled check — row left as it was)" : ""): \(msg)")
         }
     }
 
@@ -547,7 +681,8 @@ final class AppState: ObservableObject {
     /// disk. Update All used to act on `row.status == .updateAvailable`, which reflects only the SELECTED
     /// variant — so an installed Full edition was never updated unless its toggle happened to be on.
     private func slotsToUpdate(_ app: CatalogApp) -> [String?] {
-        guard let row = rows.first(where: { $0.id == app.id }), row.latestRelease != nil else { return [] }
+        // A held app is left alone by Update All, automatic updates and notifications.
+        guard !isHeld(app.id), let row = rows.first(where: { $0.id == app.id }), row.latestRelease != nil else { return [] }
         var variants: [String?] = [app.hasVariants ? app.variants?.first?.id : nil]
         if let vs = app.variants { variants += vs.dropFirst().map { $0.id } }
         return variants.filter { vid in
@@ -631,9 +766,12 @@ final class AppState: ObservableObject {
     /// for any not covered, then any leftover category alphabetically. Empty categories are dropped.
     var displayGroups: [DisplayGroup] {
         var groups: [DisplayGroup] = []
-        let pinned = pinnedDisplayRows
+        // Find & filter narrows what's shown here only; the drag / move helpers keep working on the full groups
+        // (and are switched off while a filter is active — see `isFiltering`).
+        let filtering = isFiltering
+        let pinned = filtering ? pinnedDisplayRows.filter { matchesFilter($0) } : pinnedDisplayRows
         if !pinned.isEmpty { groups.append(DisplayGroup(key: Self.pinnedGroupKey, title: "Pinned", rows: pinned)) }
-        let main = mainDisplayRows
+        let main = filtering ? mainDisplayRows.filter { matchesFilter($0) } : mainDisplayRows
         var order: [String] = []
         for c in categoryOrder where !order.contains(c) { order.append(c) }          // user's saved order first
         for c in catalogCategories where !order.contains(c) { order.append(c) }       // then catalog order
@@ -659,13 +797,23 @@ final class AppState: ObservableObject {
 
     // MARK: Collapse / reorder whole category sections (per-machine)
 
-    func isCollapsed(_ key: String) -> Bool { collapsedGroups.contains(key) }
+    /// While filtering, every section shows open so a match can never hide behind a fold.
+    func isCollapsed(_ key: String) -> Bool { collapsedGroups.contains(key) && !isFiltering }
 
     /// Toggles a section's collapsed state (call inside `withAnimation` for the fold to animate) and persists.
     func toggleCollapsed(_ key: String) {
         if collapsedGroups.contains(key) { collapsedGroups.remove(key) } else { collapsedGroups.insert(key) }
         UserDefaults.standard.set(Array(collapsedGroups), forKey: Self.collapsedKey)
         AppLog.shared.log("\(collapsedGroups.contains(key) ? "collapsed" : "expanded") section \(key)")
+    }
+
+    /// Every category in the effective section order, whatever is filtered or pinned (what a setup file saves).
+    var fullCategoryOrder: [String] {
+        var order: [String] = []
+        for c in categoryOrder where !order.contains(c) { order.append(c) }
+        for c in catalogCategories where !order.contains(c) { order.append(c) }
+        for c in Set(rows.map { categoryOf($0) }).sorted() where !order.contains(c) { order.append(c) }
+        return order
     }
 
     /// The category section keys in their current display order (excluding Pinned) — the baseline a live
@@ -802,7 +950,7 @@ final class AppState: ObservableObject {
     }
 
     /// Whether the row can move up/down within its own display group (pinned/main), skipping hidden.
-    func canMove(_ id: String, up: Bool) -> Bool { groupNeighbour(of: id, up: up) != nil }
+    func canMove(_ id: String, up: Bool) -> Bool { !isFiltering && groupNeighbour(of: id, up: up) != nil }
 
     /// Moves the row past its nearest same-group neighbour and persists the new order.
     func moveRow(_ id: String, up: Bool) {
@@ -952,20 +1100,66 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// One install slot of a batch: a row, the edition (its REAL variant id for variant apps — nil would mean
+    /// "whatever the row shows"), and a specific tag (nil = the latest).
+    typealias Slot = (id: String, variant: String?, tag: String?)
+
     /// Updates every app that currently has an update available, one at a time.
     func updateAll() async {
-        let work = orderedSlots(rows.flatMap { row in slotsToUpdate(row.app).map { (row.id, $0) } })
+        guard !blockedByLock("update all") else { return }
+        let work = updateWork()
         AppLog.shared.log("update all: \(work.count) slot(s)")
         await runSlots(work, label: "update all")
     }
 
+    /// Every installed, non-held slot with an update, default editions first.
+    private func updateWork() -> [Slot] {
+        orderedSlots(rows.flatMap { row in slotsToUpdate(row.app).map { Slot(id: row.id, variant: $0, tag: nil) } })
+    }
+
     /// Default editions first, then Full editions — so consecutive slots are (almost always) different apps and
     /// the pipelined runner overlaps two apps rather than two slots of one row.
-    private func orderedSlots(_ slots: [(String, String?)]) -> [(String, String?)] {
-        func isDefault(_ s: (String, String?)) -> Bool {
-            rows.first { $0.id == s.0 }.map { $0.app.isDefaultVariant(s.1) } ?? true
+    private func orderedSlots(_ slots: [Slot]) -> [Slot] {
+        func isDefault(_ s: Slot) -> Bool {
+            rows.first { $0.id == s.id }.map { $0.app.isDefaultVariant(s.variant) } ?? true
         }
         return slots.filter { isDefault($0) } + slots.filter { !isDefault($0) }
+    }
+
+    /// The installed version of a slot, if any.
+    private func installedVersion(_ slot: Slot) -> String? {
+        guard let app = rows.first(where: { $0.id == slot.id })?.app else { return nil }
+        return InstallManager.shared.installedVersion(app.installKey(variantId: slot.variant))
+    }
+
+    /// The download size of a batch's latest assets (the Download All / Update All menu labels).
+    private func workBytes(_ work: [Slot]) -> Int64 {
+        ByteSize.sum(work.compactMap { slot -> Int64? in
+            guard let row = rows.first(where: { $0.id == slot.id }),
+                  let name = row.app.macAssetName(variantId: slot.variant),
+                  let rel = Self.latest(from: row.releases, for: name),
+                  let asset = rel.assets.first(where: { $0.name == name }) else { return nil }
+            return Int64(asset.size)
+        })
+    }
+
+    /// Download sizes for the header menu: pending updates, Install every app, and with the Full editions.
+    /// The header's "(120 MB)" totals. Computed once per list change (`rowsGen`), not per header render: each is a
+    /// release pick across every row and edition, and the header re-renders on every publish.
+    var updateAllBytes: Int64 { batchBytes().update }
+    func downloadAllBytes(includeFull: Bool) -> Int64 { includeFull ? batchBytes().allFull : batchBytes().all }
+
+    private var bytesCache: (gen: Int, update: Int64, all: Int64, allFull: Int64)?
+    private func batchBytes() -> (update: Int64, all: Int64, allFull: Int64) {
+        if let c = bytesCache, c.gen == rowsGen { return (c.update, c.all, c.allFull) }
+        func dl(_ full: Bool) -> Int64 {
+            workBytes(orderedSlots(rows.flatMap { row in
+                slotsToDownload(row.app, includeFull: full).map { Slot(id: row.id, variant: $0, tag: nil) }
+            }))
+        }
+        let v = (update: workBytes(updateWork()), all: dl(false), allFull: dl(true))
+        bytesCache = (rowsGen, v.update, v.all, v.allFull)
+        return v
     }
 
     /// Runs install slots with ONE download of lookahead: while slot N verifies + extracts (CPU/disk), slot
@@ -973,19 +1167,100 @@ final class AppState: ObservableObject {
     /// the disk idle through every download — minutes per Download All on a slow machine. Downloads
     /// themselves stay serial (venue Wi-Fi is the bottleneck; two at once would just split it) and at most two
     /// downloaded zips exist at any moment (the one being installed + the one arriving).
-    private func runSlots(_ work: [(String, String?)], label: String) async {
+    /// Stop (`stopBatch`) cancels the download in flight and starts nothing more; `unattended` (automatic
+    /// updates) never asks to quit an open app. Returns what was installed.
+    @discardableResult
+    private func runSlots(_ work: [Slot], label: String, unattended: Bool = false) async -> [(name: String, version: String)] {
+        var done: [(name: String, version: String)] = []
+        guard !batchRunning else {
+            AppLog.shared.log("\(label): another batch is running — not started")
+            return done
+        }
+        batchRunning = true
+        batchStopRequested = false
+        batchIds = Set(work.map(\.id))
+        // The list is fixed when the batch starts, but the person can keep working: each slot is re-checked just
+        // before its turn (and before its look-ahead download starts) so the batch never undoes or repeats that.
+        let installedAtStart = work.map { installedVersion($0) }
+        func skipReason(_ i: Int) -> String? {
+            let slot = work[i]
+            // Held after the batch started: an update (latest, already installed) leaves it where it is.
+            if heldNow(slot) { return "is held" }
+            let now = installedVersion(slot)
+            if slot.tag == nil, installedAtStart[i] != nil, now == nil { return "was removed meanwhile" }
+            if let now, let app = rows.first(where: { $0.id == slot.id })?.app {
+                let target = slot.tag ?? rows.first(where: { $0.id == slot.id })
+                    .flatMap { Self.latest(from: $0.releases, for: app.macAssetName(variantId: slot.variant)) }?.tagName
+                if let target, VersionDisplay.equal(now, target) { return "is already at \(VersionDisplay.display(target))" }
+            }
+            return nil
+        }
         var next: Task<Downloaded?, Never>? = nil
         for (i, slot) in work.enumerated() {
-            let current = next ?? Task { await self.downloadPhase(slot.0, tag: nil, variantOverride: slot.1) }
+            if batchStopRequested { break }
+            if let reason = skipReason(i) {
+                if next != nil { downloadTasks[slot.id]?.cancel() }   // its look-ahead download: no point finishing it
+                if let n = next, let d = await n.value { discard(d) }
+                next = nil
+                AppLog.shared.log("\(label): \(slot.id) \(reason) — skipped")
+                continue
+            }
+            let before = installedVersion(slot)
+            let current = next ?? Task { await self.downloadPhase(slot.id, tag: slot.tag, variantOverride: slot.variant, unattended: unattended) }
             let d = await current.value                       // download N done (or failed + recorded)
             next = nil
-            if i + 1 < work.count {
+            if i + 1 < work.count, !batchStopRequested, skipReason(i + 1) == nil {
                 let n = work[i + 1]                           // start download N+1 now…
-                next = Task { await self.downloadPhase(n.0, tag: nil, variantOverride: n.1) }
+                next = Task { await self.downloadPhase(n.id, tag: n.tag, variantOverride: n.variant, unattended: unattended) }
             }
-            if let d { await installPhase(d, id: slot.0) }    // …and verify + extract N meanwhile
+            if let d {
+                if let reason = skipReason(i) {
+                    discard(d)
+                    AppLog.shared.log("\(label): \(slot.id) \(reason) — skipped")
+                } else { await installPhase(d, id: slot.id) }   // …and verify + extract N meanwhile
+            }
+            if let after = installedVersion(slot), before.map({ !VersionDisplay.equal($0, after) }) ?? true,
+               let app = rows.first(where: { $0.id == slot.id })?.app {
+                done.append((name: app.name + app.variantSuffix(slot.variant), version: after))
+            }
         }
-        AppLog.shared.log("\(label) complete")
+        // A stopped batch may leave the look-ahead download running or finished: wait for it and drop it.
+        if let next, let d = await next.value { discard(d) }
+        let stopped = batchStopRequested
+        batchIds = []
+        batchRunning = false
+        batchStopRequested = false
+        AppLog.shared.log("\(label) \(stopped ? "stopped" : "complete") (\(done.count) installed)")
+        bumpRows()
+        return done
+    }
+
+    /// Stop a running batch: the batch's download in flight is cancelled and nothing more starts (a slot that has
+    /// already downloaded still finishes installing). A separate install started from a row carries on.
+    func stopBatch() {
+        guard batchRunning else { return }
+        batchStopRequested = true
+        for (id, task) in downloadTasks where batchIds.contains(id) { task.cancel() }
+        AppLog.shared.log("batch: stop requested")
+    }
+
+    /// A latest-version slot of an app that's held and already installed (a hold set after the batch started).
+    private func heldNow(_ slot: Slot) -> Bool {
+        slot.tag == nil && isHeld(slot.id) && installedVersion(slot) != nil
+    }
+
+    /// Drops a downloaded slot that won't be installed.
+    private func discard(_ d: Downloaded) {
+        Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: d.zip) }
+        slotsInFlight.remove(d.app.installKey(variantId: d.variantId))
+        endBusy(d.app.id)
+    }
+
+    /// Cancels a row's in-flight download (its Cancel button). Not an error: the row goes back to how it was.
+    func cancelDownload(_ id: String) {
+        guard let task = downloadTasks[id] else { return }
+        AppLog.shared.log("install \(id): cancel requested")
+        task.cancel()
     }
 
     /// True if any app has something to fetch — a not-installed or updatable slot (drives the Download All
@@ -1007,7 +1282,9 @@ final class AppState: ObservableObject {
                   let latest = Self.latest(from: row.releases, for: name),   // per edition (dev builds may lack one)
                   latest.assets.contains(where: { $0.name == name }) else { return false }   // no asset for this arch → skip
             let installed = InstallManager.shared.installedVersion(app.installKey(variantId: vid))
-            return installed == nil || Self.versionIsNewer(latest.tagName, than: installed!)
+            // A held app is only ever fetched when that edition isn't installed at all.
+            guard let installed else { return true }
+            return !isHeld(app.id) && Self.versionIsNewer(latest.tagName, than: installed)
         }
     }
 
@@ -1015,7 +1292,10 @@ final class AppState: ObservableObject {
     /// so Light and Full end up installed side by side). Skips anything already current or with no
     /// asset for this OS/arch.
     func downloadAll(includeFull: Bool) async {
-        let work = orderedSlots(rows.flatMap { row in slotsToDownload(row.app, includeFull: includeFull).map { (row.id, $0) } })
+        guard !blockedByLock("download all") else { return }
+        let work = orderedSlots(rows.flatMap { row in
+            slotsToDownload(row.app, includeFull: includeFull).map { Slot(id: row.id, variant: $0, tag: nil) }
+        })
         AppLog.shared.log("download all\(includeFull ? " (incl. Full)" : ""): \(work.count) slot(s)")
         await runSlots(work, label: "download all\(includeFull ? " (incl. Full)" : "")")
     }
@@ -1210,6 +1490,12 @@ final class AppState: ObservableObject {
     struct Downloaded: Sendable {
         let app: CatalogApp; let rel: ReleaseInfo; let asset: ReleaseAsset; let zip: URL
         let variantId: String?; let tag: String?
+        /// An automatic update: never asks to quit an open app (it's left for the next check).
+        var unattended = false
+        /// Only a version hand-picked from the ⋯ version list may install without a signed checksum manifest
+        /// (very old releases predate it). Everything else — latest, Roll Back, Back to release, a setup file's
+        /// versions — must verify against the signed manifest.
+        var lenient = false
     }
 
     private func beginBusy(_ id: String) { update(id) { $0.busyCount += 1; $0.busy = true } }
@@ -1223,16 +1509,19 @@ final class AppState: ObservableObject {
     /// (used by Download All to fetch Light and/or Full); nil = the row's selected variant.
     /// Two phases so Download All can overlap them (see `runSlots`): phase 1 is network-bound, phase 2 is
     /// CPU/disk-bound. A single interactive install just runs them back to back.
-    func install(_ id: String, tag: String? = nil, variantOverride: String? = nil) async {
-        guard let d = await downloadPhase(id, tag: tag, variantOverride: variantOverride) else { return }
+    func install(_ id: String, tag: String? = nil, variantOverride: String? = nil, lenient: Bool = false) async {
+        guard var d = await downloadPhase(id, tag: tag, variantOverride: variantOverride, lenient: lenient && tag != nil) else { return }
+        d.lenient = lenient && tag != nil
         await installPhase(d, id: id)
     }
 
     /// Phase 1 — resolve the release + asset and download it into the cache. Marks the row busy for the whole
     /// slot; on failure it records the error, ends busy and returns nil. Nothing here touches the disk beyond
     /// the download itself.
-    private func downloadPhase(_ id: String, tag: String?, variantOverride: String?) async -> Downloaded? {
+    private func downloadPhase(_ id: String, tag: String?, variantOverride: String?, unattended: Bool = false,
+                               lenient: Bool = false) async -> Downloaded? {
         guard let app = rows.first(where: { $0.id == id })?.app else { return nil }
+        guard !blockedByLock("install \(id)") else { return nil }
         await ensureKeychainExplained()
         guard let client = activeClient() else { return nil }
         // Address the row BY ID after every `await` — a concurrent drag/Move can permute `rows` while
@@ -1249,7 +1538,8 @@ final class AppState: ObservableObject {
 
         let variantId = variantOverride ?? selectedVariantId(app)
         // Per edition: a dev build may carry only some editions (PDF Tools' dev builds are Light only).
-        let release = tag != nil ? releases.first { $0.tagName == tag }
+        // A named version matches "1.2.0" and "v1.2.0" alike (setup files from another launcher may omit the "v").
+        let release = tag != nil ? releases.first { VersionDisplay.equal($0.tagName, tag!) }
                                  : Self.latest(from: releases, for: app.macAssetName(variantId: variantId))
         guard let rel = release else {
             update(id) { $0.status = .error("Version \(tag ?? "latest") not found.") }; endBusy(id); return nil
@@ -1257,37 +1547,113 @@ final class AppState: ObservableObject {
         guard let asset = rel.assets.first(where: { $0.name == app.macAssetName(variantId: variantId) }) else {
             update(id) { $0.status = .error("No macOS asset in \(rel.tagName).") }; endBusy(id); return nil
         }
+        let slotName = app.name + app.variantSuffix(variantId)
+        let slotKey = app.installKey(variantId: variantId)
+        guard slotsInFlight.insert(slotKey).inserted else {
+            AppLog.shared.log("install \(slotKey): already downloading or installing — not started again")
+            endBusy(id)
+            return nil
+        }
+        var handedOn = false   // true once the Downloaded goes to installPhase / discard, which free the slot
+        defer { if !handedOn { slotsInFlight.remove(slotKey) } }
+        // A strict install (everything but the ⋯ version list) needs signed checksums: say so now rather than after
+        // downloading 300–450 MB that could never pass.
+        if !lenient, !Self.hasSignedManifest(rel) {
+            let reason = Self.strictFailureReason(
+                rel.assets.contains { $0.name == "SHA256SUMS" } ? .unsigned : .noManifest, assetName: asset.name)
+            update(id) { $0.status = .error("\(VersionDisplay.display(rel.tagName)) can’t be verified: \(reason).") }
+            AppLog.shared.log("install \(app.id) \(rel.tagName): BLOCKED (strict, before download) — \(reason)")
+            HistoryStore.add(app: slotKey, name: slotName, action: "failed", to: rel.tagName, note: reason)
+            endBusy(id)
+            return nil
+        }
 
-        let zipDest = InstallManager.shared.cacheDir.appendingPathComponent("\(app.id)-\(PathSafe.component(rel.tagName)).zip")
+        // Refuse up front rather than failing half-way through an extract on a full disk.
+        let needed = DiskSpace.required(assetSize: Int64(asset.size), assetName: asset.name)
+        // The free-space query is a CacheDelete XPC round-trip (~100 ms): never on the main actor.
+        let free = await Task.detached(priority: .userInitiated) { InstallManager.shared.freeSpace() }.value
+        if let message = DiskSpace.shortfall(required: needed, free: free) {
+            update(id) { $0.status = .error(message) }
+            AppLog.shared.log("install \(app.id) \(rel.tagName): \(message)")
+            HistoryStore.add(app: slotKey, name: slotName, action: "failed", to: rel.tagName, note: message)
+            endBusy(id)
+            return nil
+        }
+
+        // Named per install SLOT (not per app): a batch downloads Light and Full of one app back to back, and the
+        // look-ahead download must never overwrite the zip the previous slot is still verifying / installing.
+        let zipDest = InstallManager.shared.cacheDir.appendingPathComponent(
+            "\(PathSafe.component(slotKey))-\(PathSafe.component(rel.tagName)).zip")
         let appId = id
-        do {
+        // Stop or show lock may have come while this slot was still resolving (before its transfer was registered
+        // below, where Stop / the lock can reach it): don't start a 300–450 MB download that nobody wants.
+        if showLock || (batchStopRequested && batchIds.contains(id)) {
+            AppLog.shared.log("install \(app.id): not started — \(showLock ? "show lock is on" : "stopped")")
+            endBusy(id)
+            return nil
+        }
+        // The transfer runs in its own Task so the row's Cancel (or a batch Stop) can cancel exactly it.
+        let download = Task {
             try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: asset.id, to: zipDest) { p in
                 // Progress goes to the hub, NOT `rows`: only the row's progress bar re-renders (≥1% steps).
                 Task { @MainActor [weak self] in self?.progressHub.set(appId, p) }
             }
-            return Downloaded(app: app, rel: rel, asset: asset, zip: zipDest, variantId: variantId, tag: tag)
+        }
+        downloadTasks[id] = download
+        update(id) { $0.cancellable = true }
+        do {
+            try await download.value
+            finishDownload(id, download)
+            var d = Downloaded(app: app, rel: rel, asset: asset, zip: zipDest, variantId: variantId, tag: tag)
+            d.unattended = unattended
+            handedOn = true
+            return d
         } catch {
+            finishDownload(id, download)
+            if download.isCancelled {
+                // Cancelled (the row's Cancel, or Stop): not a failure — the row simply goes back to how it was.
+                try? FileManager.default.removeItem(at: zipDest)
+                AppLog.shared.log("install \(app.id): download cancelled")
+                endBusy(id)
+                return nil
+            }
             update(id) { $0.status = .error(error.localizedDescription) }
             AppLog.shared.log("install \(app.id) FAILED: \(error.localizedDescription)")
+            HistoryStore.add(app: slotKey, name: slotName, action: "failed", to: rel.tagName, note: error.localizedDescription)
             endBusy(id)
             return nil
         }
     }
 
+    /// Forgets a finished download task (unless a newer one for the same row has replaced it).
+    private func finishDownload(_ id: String, _ task: Task<Void, Error>) {
+        if downloadTasks[id] == task { downloadTasks[id] = nil }
+        let stillDownloading = downloadTasks[id] != nil
+        update(id) { $0.cancellable = stillDownloading }
+    }
+
     /// Phase 2 — verify (size + signed SHA256SUMS + hash), then extract + install OFF the main actor, then
     /// reflect it in the row. Always ends the row's busy state.
     private func installPhase(_ d: Downloaded, id: String) async {
-        let (app, rel, asset, zipDest, variantId, tag) = (d.app, d.rel, d.asset, d.zip, d.variantId, d.tag)
-        defer { endBusy(id) }
+        let (app, rel, asset, zipDest, variantId) = (d.app, d.rel, d.asset, d.zip, d.variantId)
+        update(id) { $0.installingCount += 1; $0.installing = true }
+        defer {
+            update(id) { $0.installingCount = max(0, $0.installingCount - 1); $0.installing = $0.installingCount > 0 }
+            endBusy(id); slotsInFlight.remove(app.installKey(variantId: variantId))
+        }
+        // Show lock turned on while this was downloading: drop it, install nothing.
+        if blockedByLock("install \(app.id) \(rel.tagName)") {
+            Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: zipDest) }
+            return
+        }
         guard let client = activeClient() else { return }
         do {
             let verification = try await Self.verifyDownload(zipDest, asset: asset, release: rel, app: app, client: client)
-            // Strict for current releases: a "latest" install (tag == nil) MUST checksum-verify — every
-            // current release ships a correct SHA256SUMS, so a missing/incomplete manifest here is
-            // anomalous (e.g. tampering) → abort. Explicit older-tag installs (the version picker) may
-            // predate the manifest, so they stay verify-if-present. A hash MISMATCH always aborts (it
-            // throws from verifyDownload) regardless of tag; size is always checked too.
-            if tag == nil, verification != .verified {
+            // Strict unless the user hand-picked an older version from the ⋯ list (`lenient`, which may predate
+            // the signed manifest): latest, Roll Back, Back to release and setup-file installs MUST verify against
+            // the signed SHA256SUMS — a missing / unsigned / incomplete manifest aborts. A hash MISMATCH always
+            // aborts (it throws from verifyDownload); size is always checked too.
+            if !d.lenient, verification != .verified {
                 Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: zipDest) }   // 300-450 MB unlink: never on main
                 let reason = Self.strictFailureReason(verification, assetName: asset.name)
                 AppLog.shared.log("install \(app.id) \(rel.tagName): BLOCKED (strict) — \(reason)")
@@ -1302,11 +1668,25 @@ final class AppState: ObservableObject {
             let toApps = UserDefaults.standard.bool(forKey: "theatre.installToApplications")
             let tagName = rel.tagName
             let slotKey = app.installKey(variantId: variantId)
+            let fromVersion = InstallManager.shared.installedVersion(slotKey)   // for the history line
             // The app is open: ASK (sheet) instead of failing with a log-only "Quit X first". Quit → wait for it
             // to exit, then install; Not Now → skip quietly (the row keeps its Update button).
+            // Show lock switched on while this downloaded or verified: install nothing, and never raise the
+            // "quit it?" prompt below (it brings the launcher to the front, over the show).
+            if showLock {
+                Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: zipDest) }
+                AppLog.shared.log("install \(app.id) \(rel.tagName): not installed — show lock is on")
+                return
+            }
+            if d.unattended, InstallManager.shared.runningInstance(slotKey) != nil {
+                // An automatic update never interrupts an open app: leave it for the next check.
+                Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: zipDest) }
+                AppLog.shared.log("install \(app.id) \(rel.tagName): left for later — it's open (automatic update)")
+                return
+            }
             if let running = InstallManager.shared.runningInstance(slotKey) {
                 let name = app.name + app.variantSuffix(variantId)
-                switch await Self.askToQuit(name, running) {
+                switch await Self.askToQuit(name, running, stillWanted: { [weak self] in self?.showLock == false }) {
                 case .quit: break
                 case .declined:
                     Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: zipDest) }
@@ -1316,6 +1696,12 @@ final class AppState: ObservableObject {
                     Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: zipDest) }
                     throw InstallError.appRunning(name)
                 }
+            }
+            // Show lock switched on while the "quit it first?" prompt was up: install nothing.
+            if showLock {
+                Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: zipDest) }
+                AppLog.shared.log("install \(app.id) \(rel.tagName): not installed — show lock is on")
+                return
             }
             // Everything disk-heavy OFF the main actor, in one detached block: `ditto` (seconds for a Full
             // edition), the unlink of the 300-450 MB zip (12-50 ms on a busy disk — it used to sit on the main
@@ -1341,11 +1727,15 @@ final class AppState: ObservableObject {
                 }
             }
             AppLog.shared.log("installed \(app.id) \(rel.tagName)\(variantId.map { " [\($0)]" } ?? "")\(toApps ? " (Applications)" : "")")
+            HistoryStore.add(app: slotKey, name: app.name + app.variantSuffix(variantId),
+                             action: ActivityHistory.action(from: fromVersion, to: rel.tagName), from: fromVersion, to: rel.tagName)
             bumpRows()   // header counts (Update All (N) / Download All) re-derive once per slot
             LoopWatch.mark("install-main end \(app.id)")
         } catch {
             update(id) { $0.status = .error(error.localizedDescription) }
             AppLog.shared.log("install \(app.id) FAILED: \(error.localizedDescription)")
+            HistoryStore.add(app: app.installKey(variantId: variantId), name: app.name + app.variantSuffix(variantId),
+                             action: "failed", to: rel.tagName, note: error.localizedDescription)
         }
     }
 
@@ -1353,13 +1743,24 @@ final class AppState: ObservableObject {
     /// runs off the main actor with the row busy, then the row is updated. `uninstall(_:)` below stays
     /// synchronous for the CLI.
     func uninstallAsync(_ id: String) async {
-        guard let row = rows.first(where: { $0.id == id }) else { return }
+        guard let row = rows.first(where: { $0.id == id }), !blockedByLock("uninstall \(id)") else { return }
         let key = installKey(for: row.app)
+        let fromVersion = InstallManager.shared.installedVersion(key)
+        let name = row.displayName
+        // Registered like an install: a batch can't start downloading this slot, and Launch waits while it's removed.
+        guard slotsInFlight.insert(key).inserted else {
+            AppLog.shared.log("uninstall \(key): an install of it is in progress — not started")
+            return
+        }
         beginBusy(id)
+        update(id) { $0.installingCount += 1; $0.installing = true }
         let failure: String? = await Task.detached(priority: .userInitiated) {
             do { try InstallManager.shared.uninstall(key); return nil } catch { return error.localizedDescription }
         }.value
+        update(id) { $0.installingCount = max(0, $0.installingCount - 1); $0.installing = $0.installingCount > 0 }
+        slotsInFlight.remove(key)
         endBusy(id)
+        if failure == nil, let fromVersion { HistoryStore.add(app: key, name: name, action: "uninstall", from: fromVersion) }
         applyUninstallOutcome(id, failure: failure)
     }
 
@@ -1387,7 +1788,9 @@ final class AppState: ObservableObject {
 
     /// "Repo Radar is open — quit it and update?" as a sheet on the launcher window. On Quit, asks the app
     /// to quit normally (it may show its own save prompt) and waits up to 15 s for it to exit.
-    static func askToQuit(_ name: String, _ running: NSRunningApplication) async -> QuitAnswer {
+    /// `stillWanted` is asked again after the answer: if show lock came on while the prompt was up, nothing is quit.
+    static func askToQuit(_ name: String, _ running: NSRunningApplication,
+                          stillWanted: @MainActor () -> Bool) async -> QuitAnswer {
         let alert = NSAlert()
         alert.messageText = "\(name) is open"
         alert.informativeText = "Quit \(name) to install the update? If it has unsaved work it will ask you first."
@@ -1402,7 +1805,7 @@ final class AppState: ObservableObject {
         } else {
             answer = alert.runModal()
         }
-        guard answer == .alertFirstButtonReturn else { return .declined }
+        guard answer == .alertFirstButtonReturn, stillWanted() else { return .declined }
         running.terminate()
         for _ in 0..<75 where !running.isTerminated {
             try? await Task.sleep(nanoseconds: 200_000_000)
@@ -1432,7 +1835,7 @@ final class AppState: ObservableObject {
     }
 
     func launch(_ id: String) {
-        guard let i = rows.firstIndex(where: { $0.id == id }) else { return }
+        guard let i = rows.firstIndex(where: { $0.id == id }), !rows[i].installing else { return }
         do {
             try InstallManager.shared.launch(installKey: installKey(for: rows[i].app))
         } catch {
@@ -1461,6 +1864,11 @@ final class AppState: ObservableObject {
     /// "Move" appeared to do nothing.
     func performRelocation(toApplications: Bool) async {
         relocationPrompt = nil
+        // Moving every installed app breaks paths show-control cues, Dock pins and aliases point at: never under lock.
+        guard !blockedByLock("move installed apps") else {
+            inform("Show Lock Is On", "Installed apps weren't moved. Turn off show lock to move them.")
+            return
+        }
         var moved = 0
         var failed: [String] = []
         // Move every installed slot (both variants of a variant app), then refresh each row from its
@@ -1487,6 +1895,502 @@ final class AppState: ObservableObject {
     }
 
     func cancelRelocation() { relocationPrompt = nil }
+
+    // MARK: - Find & filter
+
+    /// The list is narrowed by the search field or the status filter: reordering is off and sections show open.
+    var isFiltering: Bool { AppFilter.isActive(searchText, statusFilter) }
+
+    func matchesFilter(_ row: Row) -> Bool {
+        AppFilter.matchesQuery(searchText, row.displayName, row.app.blurb, row.app.category, row.app.id)
+            && AppFilter.matchesStatus(statusFilter, installed: row.installed != nil,
+                                       updateAvailable: row.settledStatus == .updateAvailable && !isHeld(row.id),
+                                       installable: row.settledStatus == .notInstalled)
+    }
+
+    /// "12 apps" / "3 of 12 apps" for the filter bar.
+    var filterCountText: String {
+        let total = pinnedDisplayRows.count + mainDisplayRows.count
+        let noun = total == 1 ? "app" : "apps"
+        guard isFiltering else { return "\(total) \(noun)" }
+        return "\(displayGroups.reduce(0) { $0 + $1.rows.count }) of \(total) \(noun)"
+    }
+
+    func clearFilter() {
+        searchText = ""
+        statusFilter = .all
+    }
+
+    // MARK: - Hold (keep an app at its installed version)
+
+    func isHeld(_ id: String) -> Bool { heldIds.contains(id) }
+
+    func toggleHold(_ id: String) {
+        if heldIds.contains(id) { heldIds.remove(id) } else { heldIds.insert(id) }
+        UserDefaults.standard.set(Array(heldIds), forKey: Self.heldKey)
+        bumpRows()   // header counts (Update All) re-derive
+        AppLog.shared.log("\(isHeld(id) ? "held" : "released hold on") \(id)")
+    }
+
+    // MARK: - Show lock (installs / updates / uninstalls paused; Launch still works)
+
+    /// From the UI (⌘L, the banner, the More menu, Settings): turning the lock ON is one step; turning it OFF asks,
+    /// so a stray keystroke or click mid-show can't re-enable installs and automatic updates.
+    func requestShowLock(_ on: Bool) {
+        guard on != showLock else { return }
+        if on { setShowLock(true); return }
+        let alert = NSAlert()
+        alert.messageText = "Turn Off Show Lock?"
+        alert.informativeText = "Installs, updates and uninstalls can run again, including automatic updates if they're switched on."
+        // Keep On is the default (Return): turning the lock off mid-show takes a deliberate click.
+        alert.addButton(withTitle: "Keep On")
+        let off = alert.addButton(withTitle: "Turn Off")
+        off.keyEquivalent = ""
+        alert.buttons[0].keyEquivalent = "\r"
+        if alert.runModal() == .alertSecondButtonReturn { setShowLock(false) }
+        else { objectWillChange.send() }   // a Settings checkbox switched off by the click shows "on" again
+    }
+
+    func setShowLock(_ on: Bool) {
+        guard showLock != on else { return }
+        showLock = on
+        syncChrome()
+        UserDefaults.standard.set(on, forKey: Self.showLockKey)
+        AppLog.shared.log("show lock \(on ? "on" : "off")")
+        guard on else { return }
+        // Nothing more installs once the lock is on: stop a batch, and cancel every download in flight (a slot that
+        // has already downloaded is dropped before it installs — see `installPhase`).
+        if batchRunning { stopBatch() }
+        for task in downloadTasks.values { task.cancel() }
+    }
+
+    /// The model-level guard behind every install / update / removal path (the UI hides them too).
+    private func blockedByLock(_ what: String) -> Bool {
+        guard showLock else { return false }
+        AppLog.shared.log("\(what): blocked by show lock")
+        return true
+    }
+
+    // MARK: - After a check: notifications, automatic updates, the scheduler
+
+    /// Opt-in (default OFF): switching it on in Settings is what asks macOS for permission — never a surprise prompt.
+    nonisolated static var notifyUpdates: Bool { UserDefaults.standard.object(forKey: notifyKey) as? Bool ?? false }
+
+    /// Apps with an update on offer (installed, not held), each at the newest version any of its installed editions
+    /// would move to.
+    private func pendingUpdates() -> [UpdatePolicy.Pending] {
+        rows.compactMap { row in
+            var best: String?
+            for vid in slotsToUpdate(row.app) {
+                guard let name = row.app.macAssetName(variantId: vid),
+                      let tag = Self.latest(from: row.releases, for: name)?.tagName else { continue }
+                if best.map({ Self.versionIsNewer(tag, than: $0) }) ?? true { best = tag }
+            }
+            return best.map { UpdatePolicy.Pending(id: row.id, name: row.app.name, version: $0) }
+        }
+    }
+
+    /// After every completed check: announce new updates (once each, and only when the launcher isn't the active
+    /// app), then update automatically when that's switched on.
+    private func afterCheck() {
+        let already = UserDefaults.standard.stringArray(forKey: Self.notifiedKey) ?? []
+        let (toNotify, pendingKeys) = UpdatePolicy.notify(pendingUpdates(), alreadyNotified: already)
+        // An app whose check failed this time keeps what it was announced at.
+        let unchecked = Set(rows.filter { row in
+            if case .error = row.status { return true }
+            return row.status == .noAccess
+        }.map(\.id))
+        let notified = UpdatePolicy.remembered(pendingKeys, alreadyNotified: already, uncheckedIds: unchecked)
+        if notified != already { UserDefaults.standard.set(notified, forKey: Self.notifiedKey) }
+        if !toNotify.isEmpty, Self.notifyUpdates, !showLock, !NSApp.isActive {
+            Notifier.post(title: UpdatePolicy.notificationTitle(toNotify.count), body: UpdatePolicy.notificationBody(toNotify))
+        }
+        Task { await self.autoUpdateIfEnabled() }
+    }
+
+    /// Automatic updates (opt-in): every non-held slot with an update whose app isn't open. Never under show lock or
+    /// alongside other work, never asks anything, and reports once when done.
+    func autoUpdateIfEnabled() async {
+        guard UserDefaults.standard.bool(forKey: Self.autoInstallKey), !showLock, !batchRunning,
+              !rows.contains(where: { $0.busy }), hasCredentials else { return }
+        let work = updateWork().filter { slot in
+            guard let app = rows.first(where: { $0.id == slot.id })?.app else { return false }
+            let open = InstallManager.shared.runningInstance(app.installKey(variantId: slot.variant)) != nil
+            if open { AppLog.shared.log("automatic update: \(app.id) is open — left for later") }
+            return !open
+        }
+        guard !work.isEmpty else { return }
+        AppLog.shared.log("automatic update: \(work.count) slot(s)")
+        let done = await runSlots(work, label: "automatic update", unattended: true)
+        if !done.isEmpty, Self.notifyUpdates, !showLock, !NSApp.isActive {
+            Notifier.post(title: "JB Theatre Tools", body: UpdatePolicy.autoUpdateSummary(done))
+        }
+    }
+
+    /// Starts the once-a-minute scheduler behind "While open, check every…" (idempotent).
+    func startScheduler() {
+        guard scheduler == nil else { return }
+        scheduler = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                await self?.scheduledTick()
+            }
+        }
+    }
+
+    /// Runs a check when one is due — only in "Every launch" mode, and never on top of other work.
+    /// The active credential has already been read this session (so a check can't trigger a Keychain prompt).
+    private var credentialsInMemory: Bool {
+        switch Self.authMode {
+        case .token:  return TokenStore.cachedToken != nil
+        case .server: return ServerAuthStore.cachedPassphrase != nil
+        }
+    }
+
+    private func scheduledTick() async {
+        let mode = UserDefaults.standard.string(forKey: "theatre.updateMode") ?? UpdateCheckMode.everyLaunch.rawValue
+        guard mode == UpdateCheckMode.everyLaunch.rawValue, !isRefreshing, !batchRunning, activeSheet == nil,
+              !showLock,                          // show lock: nothing happens by itself during a show
+              !showKeychainExplainer, credentialsInMemory,   // never raise the Keychain explainer unattended
+              !rows.contains(where: { $0.busy }), hasCredentials,
+              UpdatePolicy.isDue(lastCheck: lastCheck, now: Date(), raw: UserDefaults.standard.string(forKey: Self.autoCheckKey))
+        else { return }
+        lastCheck = Date()   // an attempt counts, so a failing check isn't retried every minute
+        AppLog.shared.log("scheduled update check")
+        await refreshAll(quiet: true)
+        await checkLauncherUpdate()
+    }
+
+    // MARK: - Roll back
+
+    /// The version this row's slot had before its last update, when that release still has this edition's build —
+    /// the one-click roll back target; nil when there's nothing to roll back to.
+    func rollbackTag(_ row: Row) -> String? {
+        let key = installKey(for: row.app)
+        guard let installed = InstallManager.shared.installedVersion(key),
+              let prev = InstallManager.shared.record(key)?.previousVersion,
+              Self.versionIsNewer(installed, than: prev),   // only ever BACK (after a roll back, "previous" is newer)
+              let asset = macAsset(for: row.app) else { return nil }
+        // Roll back installs strictly, so only offer a release that can pass: signed checksums, and never a
+        // development build on a Mac without Development builds switched on.
+        return offeredReleases(row).first {
+            VersionDisplay.equal($0.tagName, prev) && $0.assets.contains { $0.name == asset } && Self.hasSignedManifest($0)
+        }?.tagName
+    }
+
+    /// Roll back to the previous version, then hold the app there so Update All leaves it alone.
+    func rollBack(_ id: String, to tag: String) async {
+        guard !blockedByLock("roll back \(id)"), let row = rows.first(where: { $0.id == id }) else { return }
+        await install(id, tag: tag)
+        if let now = InstallManager.shared.installedVersion(installKey(for: row.app)), VersionDisplay.equal(now, tag) {
+            if !isHeld(id) { toggleHold(id) }
+            AppLog.shared.log("rolled back \(id) to \(tag) (held)")
+        }
+    }
+
+    /// The row menu's "Roll Back to vX…": confirms first (it's a downgrade, and the app is held afterwards).
+    func requestRollBack(_ id: String, to tag: String) {
+        guard !blockedByLock("roll back \(id)"), let row = rows.first(where: { $0.id == id }),
+              let current = row.installed else { return }
+        let alert = NSAlert()
+        alert.messageText = "Roll \(row.displayName) back to \(VersionDisplay.display(tag))?"
+        alert.informativeText = "It goes back from \(VersionDisplay.display(current)) to \(VersionDisplay.display(tag)), then stays "
+            + "held at that version so Update All and automatic updates leave it alone — release the hold from its ⋯ menu "
+            + "when you're ready."
+        alert.addButton(withTitle: "Roll Back")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Task { await self.rollBack(id, to: tag) }
+    }
+
+    // MARK: - Sheets: release notes, details, activity
+
+    private static func newestFirst(_ list: [ReleaseInfo]) -> [ReleaseInfo] {
+        list.sorted { versionIsNewer($0.tagName, than: $1.tagName) }
+    }
+
+    func showReleaseNotes(_ id: String) {
+        guard let row = rows.first(where: { $0.id == id }) else { return }
+        let releases = offeredReleases(row)
+        activeSheet = .notes(NotesModel(title: "\(row.app.name) — Release Notes", installed: row.installed,
+                                        releases: Self.newestFirst(releases), loading: false,
+                                        message: releases.isEmpty ? "No releases yet." : nil))
+    }
+
+    /// The releases a person is shown or offered for a row (release notes, the ⋯ version list, Roll Back):
+    /// development builds only with the Development builds switch on.
+    func offeredReleases(_ row: Row) -> [ReleaseInfo] {
+        Self.devChannel ? row.releases : row.releases.filter { !Self.isDevTag($0.tagName) }
+    }
+
+    /// True when the release carries the signed checksum manifest a strict install needs.
+    nonisolated static func hasSignedManifest(_ rel: ReleaseInfo) -> Bool {
+        rel.assets.contains { $0.name == "SHA256SUMS" } && rel.assets.contains { $0.name == "SHA256SUMS.minisig" }
+    }
+
+    func showDetails(_ id: String) { activeSheet = .details(id) }
+
+    func showActivity() { activeSheet = .activity(HistoryStore.load()) }
+
+    // MARK: - The launcher's own "what's new", once after it has been updated
+
+    private func prepareLauncherWhatsNew() {
+        let last = UserDefaults.standard.string(forKey: Self.lastSeenKey)
+        // Nothing recorded, but the launcher has been used before (it saved settings or installed apps): an update
+        // from a version that predates the record.
+        let d = UserDefaults.standard
+        let usedBefore = last == nil && ([Self.codeIDKey, Self.appOrderKey, "theatre.updateMode", "theatre.appearance"]
+            .contains { d.object(forKey: $0) != nil } || !InstallManager.shared.manifest().isEmpty)
+        if LauncherWhatsNew.shouldShow(lastSeen: last, current: currentVersion, existingInstall: usedBefore) {
+            launcherWhatsNew = currentVersion
+        } else if last.map({ !VersionDisplay.equal($0, currentVersion) }) ?? true {
+            UserDefaults.standard.set(currentVersion, forKey: Self.lastSeenKey)   // a fresh install: nothing to announce
+        }
+    }
+
+    func dismissLauncherWhatsNew() {
+        UserDefaults.standard.set(currentVersion, forKey: Self.lastSeenKey)
+        launcherWhatsNew = nil
+    }
+
+    /// The notes of every launcher release since the one last seen (the launcher's repo is public, so no Keychain
+    /// read), with the catalog's one-line what's-new as the offline fallback.
+    func showLauncherWhatsNew() async {
+        let since = UserDefaults.standard.string(forKey: Self.lastSeenKey)
+        let current = currentVersion
+        dismissLauncherWhatsNew()
+        let title = "JB Theatre Tools — What's New"
+        activeSheet = .notes(NotesModel(title: title, installed: current, releases: [], loading: true, message: nil))
+        var list: [ReleaseInfo] = []
+        if let s = selfInfo {
+            let all = (try? await cachedOnlyClient().releases(owner: s.owner, repo: s.repo)) ?? []
+            list = all.filter { rel in
+                !Self.versionIsNewer(rel.tagName, than: current)
+                    // Nothing seen before (an update from a version that didn't record it): just this version's notes.
+                    && (since.map { old in Self.versionIsNewer(rel.tagName, than: old) } ?? VersionDisplay.equal(rel.tagName, current))
+                    && (Self.devChannel || !Self.isDevTag(rel.tagName))
+            }
+        }
+        var fallback: String? = nil
+        if let line = selfInfo?.whatsNew, !line.isEmpty {
+            fallback = selfInfo?.whatsNewVersion.map { "New in \($0): \(line)" } ?? line
+        }
+        guard case .notes(let open)? = activeSheet, open.title == title else { return }   // closed while loading
+        activeSheet = .notes(NotesModel(title: title, installed: current, releases: Self.newestFirst(list), loading: false,
+                                        message: list.isEmpty ? (fallback ?? ReleaseNotesText.empty) : nil))
+    }
+
+    // MARK: - Setup files (export / import)
+
+    private func inform(_ title: String, _ text: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.addButton(withTitle: "OK")
+        _ = alert.runModal()
+    }
+
+    /// Saves which apps (and editions) are installed, their versions, holds, and the list layout.
+    func exportSetup() {
+        var entries: [SetupProfile.Entry] = []
+        for row in rows {
+            let vids: [String?] = row.app.hasVariants ? (row.app.variants ?? []).map { Optional($0.id) } : [nil]
+            for vid in vids {
+                guard let version = InstallManager.shared.installedVersion(row.app.installKey(variantId: vid)) else { continue }
+                entries.append(.init(id: row.id, variant: row.app.isDefaultVariant(vid) ? nil : vid,
+                                     version: version, held: isHeld(row.id)))
+            }
+        }
+        guard !entries.isEmpty else {
+            inform("Export Setup", "No apps are installed yet, so there's nothing to export.")
+            return
+        }
+        let profile = SetupProfile(
+            createdAt: SetupProfile.timestamp(Date()),
+            createdBy: "JB Theatre Tools \(currentVersion) (macOS)",
+            apps: entries,
+            layout: .init(pinned: Array(pinnedIds).sorted(), hidden: Array(hiddenIds).sorted(), order: rows.map(\.id),
+                          categoryOrder: fullCategoryOrder, collapsed: Array(collapsedGroups).sorted()))
+        let panel = NSSavePanel()
+        panel.title = "Export Setup"
+        panel.nameFieldStringValue = SetupProfile.suggestedFileName(Date())
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try profile.serialize().write(to: url, options: .atomic)
+            AppLog.shared.log("exported setup: \(entries.count) slot(s)")
+            inform("Setup Exported", "Saved \(entries.count) installed app\(entries.count == 1 ? "" : "s") to \(url.lastPathComponent).\n\nOn another machine, choose Import Setup… to install the same apps.")
+        } catch {
+            inform("Export Setup", error.localizedDescription)
+        }
+    }
+
+    /// Reads a setup file and shows what importing it would do (nothing installs until `runImport`).
+    func importSetup() {
+        guard !showLock else {
+            inform("Show Lock Is On", "Unlock it to import a setup.")
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.title = "Import Setup"
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            if size > SetupProfile.maxBytes { throw SetupProfile.FormatError(message: "This file is too large to be a setup file.") }
+            let profile = try SetupProfile.parse(try Data(contentsOf: url))
+            let catalog = rows.map { r in
+                SetupPlanner.CatalogEntry(id: r.id, name: r.app.name, variants: (r.app.variants ?? []).map { (id: $0.id, label: $0.label) })
+            }
+            let installedKeys = Set(InstallManager.shared.manifest().keys.filter { InstallManager.shared.installedVersion($0) != nil })
+            var plan = SetupPlanner.build(profile, catalog: catalog, installedKeys: installedKeys, allowDevTags: Self.devChannel)
+            // An edition with no macOS build for this Mac can't install here.
+            plan.toInstall = plan.toInstall.filter { item in
+                guard let app = rows.first(where: { $0.id == item.appId })?.app else { return false }
+                if app.macAssetName(variantId: item.variantId ?? app.variants?.first?.id) != nil { return true }
+                plan.skipped.append("\(item.label) — no macOS build")
+                return false
+            }
+            activeSheet = .importPreview(ImportPreviewModel(source: url.lastPathComponent, summary: SetupPlanner.summary(plan),
+                                                            plan: plan, layout: profile.layout))
+        } catch {
+            inform("Import Setup", error.localizedDescription)
+        }
+    }
+
+    /// Applies a previewed setup: holds first, then (optionally) the layout, then every missing slot as one batch.
+    func runImport(_ model: ImportPreviewModel, applyLayout: Bool) async {
+        activeSheet = nil
+        guard !blockedByLock("import setup") else { return }
+        // A batch (e.g. an automatic update) started while the preview was open: say so instead of doing nothing.
+        guard !batchRunning else {
+            inform("Import Setup", "Another install is running. Import the setup again when it has finished.")
+            return
+        }
+        // Let the preview sheet finish closing: the first download may need the Keychain explainer sheet.
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        for id in model.plan.holdIds where !isHeld(id) { toggleHold(id) }
+        if applyLayout, let layout = model.layout { self.applyLayout(layout) }
+        AppLog.shared.log("import setup: \(model.plan.toInstall.count) to install, \(model.plan.holdIds.count) held, layout \(applyLayout ? "applied" : "kept")")
+        guard !model.plan.toInstall.isEmpty else { return }
+        guard hasCredentials else {
+            inform("Import Setup", credentialsPrompt + ".")
+            return
+        }
+        // The default edition is passed by its real id: a nil variant would mean "the row's selected edition".
+        // A development build named in the file installs only on a Mac with Development builds switched on.
+        let work: [Slot] = model.plan.toInstall.compactMap { item in
+            if let tag = item.tag, Self.isDevTag(tag), !Self.devChannel {
+                AppLog.shared.log("import setup: skipped \(item.appId) \(tag) — a development build")
+                return nil
+            }
+            guard let app = rows.first(where: { $0.id == item.appId })?.app else { return nil }
+            return Slot(id: item.appId, variant: item.variantId ?? (app.hasVariants ? app.variants?.first?.id : nil), tag: item.tag)
+        }
+        await runSlots(orderedSlots(work), label: "import setup")
+    }
+
+    /// Takes over a setup file's list layout (pins, hidden apps, app order, section order, folded sections).
+    private func applyLayout(_ l: SetupProfile.Layout) {
+        let known = Set(rows.map(\.id))
+        pinnedIds = Set(l.pinned).intersection(known)
+        UserDefaults.standard.set(Array(pinnedIds), forKey: Self.pinnedKey)
+        hiddenIds = Set(l.hidden).intersection(known)
+        UserDefaults.standard.set(Array(hiddenIds), forKey: Self.hiddenKey)
+        var seen = Set<String>()
+        let order = l.order.filter { known.contains($0) && seen.insert($0).inserted }
+        UserDefaults.standard.set(order, forKey: Self.appOrderKey)
+        rows = Self.applyingSavedOrder(rows)
+        setCategoryOrder(l.categoryOrder)
+        collapsedGroups = Set(l.collapsed)
+        UserDefaults.standard.set(Array(collapsedGroups), forKey: Self.collapsedKey)
+    }
+
+    // MARK: - Storage, diagnostics
+
+    /// The installed apps' size and the download cache's size, measured off the main actor.
+    func storageSizes() async -> (installed: Int64, cache: Int64) {
+        await Task.detached(priority: .utility) {
+            (InstallManager.shared.installedSize(), InstallManager.shared.cacheSize())
+        }.value
+    }
+
+    /// Clearing the cache is off during show lock and while anything downloads or installs (installs extract there).
+    var canClearCache: Bool { !showLock && !batchRunning && !rows.contains { $0.busy } }
+
+    func clearCache() async {
+        guard canClearCache else { return }
+        await Task.detached(priority: .utility) { InstallManager.shared.clearCache() }.value
+        AppLog.shared.log("download cache cleared")
+    }
+
+    /// The support report — versions, settings, every app's state and recent log lines; never a secret.
+    func diagnostics() -> String {
+        let host: String? = Self.authMode == .server ? serverBase.flatMap { URL(string: $0)?.host } : nil
+        let apps = rows.map { row -> Diagnostics.AppLine in
+            let status: String
+            switch row.status {
+            case .upToDate: status = "up to date"
+            case .updateAvailable: status = "update available"
+            case .notInstalled: status = "not installed"
+            case .installed: status = "installed (not checked)"
+            case .noRelease: status = "no release"
+            case .missingAsset: status = "no macOS build"
+            case .error: status = "error"
+            case .checking: status = "checking"
+            case .noAccess: status = "no access"
+            case .unknown: status = "unknown"
+            }
+            return .init(name: row.displayName, installed: row.installed, latest: row.latest, status: status,
+                         held: row.installed != nil && isHeld(row.id))
+        }
+        return Diagnostics.build(.init(
+            launcherVersion: currentVersion,
+            os: "macOS \(ProcessInfo.processInfo.operatingSystemVersionString)",
+            arch: MacArch.isAppleSilicon ? "Apple silicon" : "Intel",
+            authMode: Self.authMode.label, relayHost: host, devChannel: Self.devChannel, showLock: showLock,
+            installLocation: UserDefaults.standard.bool(forKey: "theatre.installToApplications") ? "Applications folder" : "Launcher",
+            apps: apps, logTail: AppLog.shared.tail(Diagnostics.logLines), now: Date()))
+    }
+
+    func copyDiagnostics() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(diagnostics(), forType: .string)
+        AppLog.shared.log("diagnostics copied")
+    }
+
+    // MARK: - Quick launch (the menu-bar extra)
+
+    /// Every installed slot as (install key, name) — pinned apps first, then the list order.
+    var installedSlotsForLaunch: [(key: String, name: String)] {
+        let ordered = rows.filter { pinnedIds.contains($0.id) } + rows.filter { !pinnedIds.contains($0.id) }
+        return ordered.flatMap { row -> [(key: String, name: String)] in
+            let vids: [String?] = row.app.hasVariants ? (row.app.variants ?? []).map { Optional($0.id) } : [nil]
+            return vids.compactMap { vid in
+                let key = row.app.installKey(variantId: vid)
+                guard InstallManager.shared.installedVersion(key) != nil else { return nil }
+                return (key: key, name: row.app.name + row.app.variantSuffix(vid))
+            }
+        }
+    }
+
+    func launchSlot(_ key: String) {
+        // Never start an app while it's being installed / replaced (the menu-bar item has no busy state of its own).
+        let appId = String(key.split(separator: "@").first ?? Substring(key))   // slot keys are "<id>" or "<id>@<variant>"
+        if let row = rows.first(where: { $0.app.id == appId }), row.installing {
+            inform("Couldn't Open", "\(row.displayName) is being installed. Open it when that has finished.")
+            return
+        }
+        do {
+            try InstallManager.shared.launch(installKey: key)
+            AppLog.shared.log("launched \(key) (menu bar)")
+        } catch {
+            inform("Couldn't Open", error.localizedDescription)
+        }
+    }
 
     // MARK: - Launcher self-update
 
@@ -1561,4 +2465,13 @@ final class AppState: ObservableObject {
             launcherDownloadMessage = "Download failed: \(error.localizedDescription)"
         }
     }
+}
+
+/// The little slice of state the app's menus need (see `AppState.chrome`).
+@MainActor
+final class ChromeState: ObservableObject {
+    struct LaunchSlot: Equatable { let key: String; let name: String }
+    @Published var showLock = false
+    @Published var canUpdateAll = false
+    @Published var launchSlots: [LaunchSlot] = []
 }

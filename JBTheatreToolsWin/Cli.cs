@@ -43,6 +43,14 @@ public static class Cli
 
     public static async Task<int> Run(string[] args)
     {
+        // History.Add queues its write on the thread pool; the process exits as soon as this returns, so wait for
+        // every queued line (bounded) before any command hands back its exit code.
+        try { return await RunCommandAsync(args); }
+        finally { History.Flush(); }
+    }
+
+    private static async Task<int> RunCommandAsync(string[] args)
+    {
         // The verb may appear anywhere (e.g. `--token X --install helo`); find the first recognised one
         // rather than assuming args[0]. Args present but no verb → usage error (don't open the GUI).
         var cmd = args.FirstOrDefault(a => Commands.Contains(a));
@@ -100,6 +108,13 @@ public static class Cli
         {
             var pass = SafeLoadServerPass();
             if (pass != null) { _serverBase = builtInServer; _serverPass = pass; }
+        }
+
+        // Show lock (set in the app) pauses installs, updates and removals — the command line honours it too.
+        if (settings.ShowLock && cmd is "--install" or "--uninstall")
+        {
+            Console.Error.WriteLine("error: show lock is on — installs, updates and uninstalls are paused. Turn it off in JB Theatre Tools (More ▾ → Show lock) first.");
+            return 1;
         }
 
         return cmd switch
@@ -209,7 +224,7 @@ public static class Cli
         {
             var all = await client.ReleasesAsync(app.Owner, app.Repo);
             var rel = tag != null
-                ? all.FirstOrDefault(r => r.TagName == tag)
+                ? all.FirstOrDefault(r => VersionCompare.Equal(r.TagName, tag))   // "1.2.0" finds "v1.2.0"
                 : Versions.Latest(all);
             if (rel == null) { Console.Error.WriteLine($"error: version {tag ?? "latest"} not found."); return 1; }
             var asset = rel.Assets.FirstOrDefault(a => a.Name == app.WindowsAssetName);
@@ -242,8 +257,10 @@ public static class Cli
                 VerifyResult.NoManifest => $"⚠ {asset.Name} installed unverified (older tag; no SHA256SUMS).",
                 _ => $"⚠ {asset.Name} installed unverified (older tag; not in SHA256SUMS).",
             });
+            var before = InstallManager.Shared.InstalledVersion(app.Id);
             var dest = InstallManager.Shared.Install(app, rel.TagName, cache, asset.Name, toApplications);
             InstallManager.TryDelete(cache);
+            History.Add(app.Id, app.Name, ActivityHistory.ActionFor(before, rel.TagName), before, rel.TagName);
             Log.Write($"cli: installed {app.Id} {rel.TagName}{(toApplications ? " (+shortcuts)" : "")}{(verification == VerifyResult.Verified ? " (sha256 ok)" : " (unverified)")}");
             Console.WriteLine($"Installed {app.Name} {rel.TagName} → {dest}");
             return 0;
@@ -255,7 +272,13 @@ public static class Cli
     {
         var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
         if (app == null) { Console.Error.WriteLine("error: pass an app id."); return 1; }
-        try { InstallManager.Shared.Uninstall(app.Id); Log.Write($"cli: uninstalled {app.Id}"); Console.WriteLine($"Uninstalled {app.Name}."); return 0; }
+        try
+        {
+            var before = InstallManager.Shared.InstalledVersion(app.Id);
+            InstallManager.Shared.Uninstall(app.Id);
+            if (before != null) History.Add(app.Id, app.Name, "uninstall", before);
+            Log.Write($"cli: uninstalled {app.Id}"); Console.WriteLine($"Uninstalled {app.Name}."); return 0;
+        }
         catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
     }
 

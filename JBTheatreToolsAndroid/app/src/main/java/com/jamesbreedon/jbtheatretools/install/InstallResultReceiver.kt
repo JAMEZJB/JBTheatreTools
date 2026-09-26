@@ -35,20 +35,25 @@ class InstallResultReceiver : BroadcastReceiver() {
                 emit(Event(sessionKey, State.SUCCEEDED, packageName, null))
 
             else -> {
-                val message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
+                val detail = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
                     ?: "install failed (status $status)"
-                emit(Event(sessionKey, State.FAILED, packageName, message))
+                // The user cancelled the system's install dialog (or backed out of it): not a failure.
+                if (isUserCancel(status, detail)) emit(Event(sessionKey, State.CANCELLED, packageName, null, detail))
+                else emit(Event(sessionKey, State.FAILED, packageName, messageFor(status), detail))
             }
         }
     }
 
-    enum class State { NEEDS_CONFIRMATION, SUCCEEDED, FAILED }
+    enum class State { NEEDS_CONFIRMATION, SUCCEEDED, FAILED, CANCELLED }
 
     data class Event(
         val sessionKey: String,
         val state: State,
         val packageName: String?,
+        /** A short line for the user (the row, the history). */
         val message: String?,
+        /** The system's own status text, for the log only. */
+        val detail: String? = message,
     )
 
     companion object {
@@ -59,6 +64,19 @@ class InstallResultReceiver : BroadcastReceiver() {
 
         private fun emit(event: Event) {
             _events.tryEmit(event)
+        }
+
+        fun isUserCancel(status: Int, detail: String?): Boolean =
+            status == PackageInstaller.STATUS_FAILURE_ABORTED || detail?.contains("INSTALL_FAILED_ABORTED") == true
+
+        /** A plain line for a failed session; the raw status text stays in the log. */
+        fun messageFor(status: Int): String = when (status) {
+            PackageInstaller.STATUS_FAILURE_BLOCKED -> "Android blocked the install"
+            PackageInstaller.STATUS_FAILURE_CONFLICT -> "it conflicts with the version already on this device"
+            PackageInstaller.STATUS_FAILURE_INCOMPATIBLE -> "this build isn't compatible with this device"
+            PackageInstaller.STATUS_FAILURE_INVALID -> "Android rejected the app file"
+            PackageInstaller.STATUS_FAILURE_STORAGE -> "not enough storage on this device"
+            else -> "Android couldn't install it"
         }
     }
 }

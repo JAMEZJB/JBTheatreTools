@@ -45,6 +45,14 @@ public static class VersionCompare
         return pa.Length.CompareTo(pb.Length);
     }
 
+    /// <summary>A tag as the launchers print it: "v" + the normalised version for a numeric tag ("1.2.0" and
+    /// "v1.2.0" both → "v1.2.0"), the tag itself otherwise (Convert's "build-20260912").</summary>
+    public static string Display(string tag)
+    {
+        var n = Norm(tag);
+        return n.Length > 0 && char.IsDigit(n[0]) ? "v" + n : tag.Trim();
+    }
+
     /// <summary>True for development pre-releases (<c>vX.Y.Z-dev.N</c>).</summary>
     public static bool IsDev(string tag) => Norm(tag).Contains("-dev.", StringComparison.OrdinalIgnoreCase);
 

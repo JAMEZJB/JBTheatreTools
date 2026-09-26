@@ -104,17 +104,24 @@ struct ContentView: View {
     @State private var refreshing = false
     @State private var updatingAll = false
     @State private var downloadingAll = false
+    @FocusState private var findFocused: Bool
 
     var body: some View {
         LoopWatch.mark("ContentView.body")
         return VStack(spacing: 0) {
             header
             Hairline()
+            // Banners sit above the find bar, so the bar stays next to the list it filters.
+            if state.globalError == nil { banners }
+            if state.globalError == nil, state.hasVisibleRows {
+                filterBar
+                Hairline()
+            }
             content
             Hairline()
             credit
         }
-        .frame(minWidth: 600, minHeight: 440)
+        .frame(minWidth: 640, minHeight: 460)
         .background(Color.jbGround)
         .tint(.jbAccent)
         // Intercept the window's close button so "keep running" can hide instead of quit.
@@ -131,18 +138,72 @@ struct ContentView: View {
         .sheet(isPresented: $state.showKeychainExplainer, onDismiss: { state.acknowledgeKeychainExplainer() }) {
             KeychainExplainerView { state.acknowledgeKeychainExplainer() }
         }
-        .task { await firstRefresh() }
+        .sheet(item: $state.activeSheet) { sheet in
+            LauncherSheetView(sheet: sheet)
+                .environmentObject(state)
+                .environment(\.appState, state)
+        }
+        // The keyboard commands and the menu-bar extra post these; the matching UI state lives here.
+        .onReceive(NotificationCenter.default.publisher(for: .jbttRefresh)) { _ in
+            // Not under an open sheet: the check may need to show the Keychain explainer sheet.
+            guard !refreshing, !sheetOpen, !state.batchRunning, state.hasCredentials else { return }
+            Task { await refreshAll() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jbttFind)) { _ in
+            if state.hasVisibleRows { findFocused = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jbttSettings)) { _ in
+            if !sheetOpen { showSettings = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jbttActivity)) { _ in
+            if !sheetOpen { state.showActivity() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jbttUpdateAll)) { _ in
+            guard canUpdateAll, !sheetOpen else { return }
+            Task { await updateAllAction() }
+        }
+        .onAppear {
+            // AppKit gives the first text field (Find apps) the keyboard at launch; the launcher opens with nothing
+            // focused, as it did before it had a find field (⌘F focuses it).
+            DispatchQueue.main.async {
+                for w in NSApp.windows where w.firstResponder is NSText { w.makeFirstResponder(nil) }
+            }
+        }
+        .task {
+            state.startScheduler()
+            // Dev harness (see main.swift): `JBTT_OPEN_SETTINGS=1` opens Settings at launch so JBTT_SNAPSHOT can capture it.
+            if ProcessInfo.processInfo.environment["JBTT_OPEN_SETTINGS"] == "1" { showSettings = true }
+            await firstRefresh()
+        }
     }
+
+    /// A sheet is already up — a second one can't be presented over it.
+    private var sheetOpen: Bool { showSettings || state.showKeychainExplainer || state.activeSheet != nil }
+
+    /// Update All is on offer: something to update, nothing else running, not under show lock.
+    private var canUpdateAll: Bool {
+        state.hasCredentials && !state.showLock && !state.batchRunning && !refreshing && state.updatesAvailable > 0
+    }
+
+    /// " (120 MB)" after a batch label, when the size is known.
+    private func sizeSuffix(_ bytes: Int64) -> String { bytes > 0 ? " (\(ByteSize.format(bytes)))" : "" }
 
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
             Image(systemName: "theatermasks.fill")
                 .font(.system(size: 26))
                 .foregroundStyle(.tint)
+            // One line each, always: the header's height never changes with the window width (the subtitle drops
+            // out when there's no room for it rather than wrapping every control onto two lines).
             VStack(alignment: .leading, spacing: 1) {
                 Text("JB Theatre Tools").font(JBFont.title).foregroundStyle(Color.jbText)
-                Text("Install, update & launch the JB tool suite")
-                    .font(JBFont.small).foregroundStyle(Color.jbText2)
+                    .lineLimit(1)
+                ViewThatFits(in: .horizontal) {
+                    Text("Install, update & launch the JB tool suite")
+                        .font(JBFont.small).foregroundStyle(Color.jbText2)
+                        .lineLimit(1).fixedSize()
+                    Color.clear.frame(width: 0, height: 0)
+                }
             }
             Spacer()
             if state.hasVisibleRows {
@@ -152,23 +213,31 @@ struct ContentView: View {
                     .fixedSize()
                     .help("Switch between list and grid view")
             }
-            if state.hasVisibleRows, state.hasCredentials,
+            if state.batchRunning {
+                // Stop: the download in flight is cancelled and nothing more starts.
+                Button {
+                    state.stopBatch()
+                } label: { Label(state.batchStopRequested ? "Stopping…" : "Stop", systemImage: "stop.circle") }
+                .buttonStyle(.jbSecondary)
+                .disabled(state.batchStopRequested)
+                .help("Stop after the app that's installing now — the download in progress is cancelled")
+            } else if state.hasVisibleRows, state.hasCredentials, !state.showLock,
                state.updatesAvailable > 0 || state.hasAnyToDownload(includeFull: false) {
                 let updates = state.updatesAvailable
                 Menu {
                     if updates > 0 {
                         Button {
                             Task { await updateAllAction() }
-                        } label: { Label("Update \(updates) installed app\(updates == 1 ? "" : "s") — incl. Full editions", systemImage: "arrow.up.circle") }
+                        } label: { Label("Update \(updates) installed app\(updates == 1 ? "" : "s") — incl. Full editions\(sizeSuffix(state.updateAllBytes))", systemImage: "arrow.up.circle") }
                         Divider()
                     }
                     Button {
                         Task { await downloadAllAction(includeFull: false) }
-                    } label: { Label("Install every app", systemImage: "square.and.arrow.down") }
+                    } label: { Label("Install every app\(sizeSuffix(state.downloadAllBytes(includeFull: false)))", systemImage: "square.and.arrow.down") }
                     if state.hasFullVariants {
                         Button {
                             Task { await downloadAllAction(includeFull: true) }
-                        } label: { Label("Install every app — plus the Full editions", systemImage: "square.and.arrow.down.on.square") }
+                        } label: { Label("Install every app — plus the Full editions\(sizeSuffix(state.downloadAllBytes(includeFull: true)))", systemImage: "square.and.arrow.down.on.square") }
                     }
                 } label: {
                     // A plain HStack, not `Label`/`ProgressView`: the borderless popup renders those blank.
@@ -192,7 +261,9 @@ struct ContentView: View {
                 else { Label("Refresh", systemImage: "arrow.clockwise") }
             }
             .buttonStyle(.jbSecondary)
-            .disabled(refreshing || updatingAll || !state.hasCredentials)
+            .disabled(refreshing || updatingAll || state.batchRunning || !state.hasCredentials)
+            .help("Check every app for updates (⌘R)")
+            moreMenu
             Button { showSettings = true } label: {
                 Label("Settings", systemImage: "gearshape")
             }
@@ -202,18 +273,87 @@ struct ContentView: View {
         .padding(.vertical, 12)
     }
 
+    /// Show lock, the activity history, setup files and the support report.
+    private var moreMenu: some View {
+        Menu {
+            Button { state.requestShowLock(!state.showLock) } label: {
+                Label(state.showLock ? "Turn Off Show Lock" : "Turn On Show Lock",
+                      systemImage: state.showLock ? "lock.open" : "lock")
+            }
+            Divider()
+            Button { state.showActivity() } label: { Label("Activity…", systemImage: "clock.arrow.circlepath") }
+            Button { state.exportSetup() } label: { Label("Export Setup…", systemImage: "square.and.arrow.up") }
+            Button { state.importSetup() } label: { Label("Import Setup…", systemImage: "square.and.arrow.down") }
+                .disabled(state.showLock || state.batchRunning)
+            Divider()
+            Button { state.copyDiagnostics() } label: { Label("Copy Diagnostics", systemImage: "doc.on.clipboard") }
+            Button { AppLog.shared.open() } label: { Label("Open Log", systemImage: "doc.text") }
+        } label: {
+            // An HStack, not `Label`: the borderless popup renders a Label blank. Worded, like every header button
+            // (house rule: no icon-only buttons); the lock shows here while on.
+            HStack(spacing: 5) {
+                Image(systemName: state.showLock ? "lock.fill" : "ellipsis.circle")
+                Text("More")
+            }
+        }
+        .jbMenuPill(.secondary)
+        .fixedSize()
+        .help("Show lock, activity, setup files and diagnostics")
+    }
+
+    /// Find & filter: a search field (⌘F, Esc clears), the status filter and the match count.
+    private var filterBar: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(Color.jbText3)
+                TextField("Find apps", text: $state.searchText)
+                    .textFieldStyle(.plain)
+                    .font(JBFont.body)
+                    .focused($findFocused)
+                    .onExitCommand { state.searchText = ""; findFocused = false }
+                if !state.searchText.isEmpty {
+                    Button { state.searchText = "" } label: {
+                        Image(systemName: "xmark.circle.fill").font(.system(size: 11))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.jbText3)
+                    .help("Clear")
+                    .accessibilityLabel("Clear search")
+                }
+            }
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: JBRadius.ctl, style: .continuous).fill(Color.jbSunken))
+            .overlay(RoundedRectangle(cornerRadius: JBRadius.ctl, style: .continuous)
+                .strokeBorder(findFocused ? Color.jbAccent.opacity(0.6) : Color.jbLine))
+            .frame(maxWidth: 260)
+            JBSegmented(segments: StatusFilter.allCases.map { JBSegmented.Segment(id: $0, label: $0.label) },
+                        selection: $state.statusFilter)
+                .fixedSize()
+            Spacer(minLength: 8)
+            Text(state.filterCountText).font(JBFont.small).foregroundStyle(Color.jbText3)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+
+    @ViewBuilder
+    private var banners: some View {
+        if let v = state.launcherUpdateAvailable { launcherBanner(v) }
+        if let v = state.launcherWhatsNew { whatsNewBanner(v) }
+        if state.showLock { lockBanner }
+        if !state.hasCredentials { credentialsBanner }
+    }
+
     @ViewBuilder
     private var content: some View {
         if let err = state.globalError {
             banner(err, systemImage: "exclamationmark.triangle.fill", tint: .jbDanger)
             Spacer()
         } else {
-            if let v = state.launcherUpdateAvailable { launcherBanner(v) }
-            if !state.hasCredentials { credentialsBanner }
             if state.hasCredentials, state.noAppsAccessible {
                 banner(authMode == .token
-                        ? "This token can’t access any apps. Check the token’s repository access in Settings, or ask James."
-                        : "No apps are reachable right now. Check the passphrase in Settings, or ask James.",
+                        ? "This token can’t access any apps. Check the token’s repository access in Settings, or ask whoever set up your access."
+                        : "No apps are reachable right now. Check the passphrase in Settings, or ask whoever set up your access.",
                        systemImage: "lock.fill", tint: .jbWarn)
                 Spacer()
             } else if !state.hasVisibleRows {
@@ -222,12 +362,66 @@ struct ContentView: View {
                         : "No apps to show yet. Press Refresh, or check your access in Settings.",
                        systemImage: "eye.slash", tint: .jbText3)
                 Spacer()
+            } else if state.isFiltering, state.displayGroups.isEmpty {
+                noMatches
+                Spacer()
             } else if viewMode == .grid {
                 gridView
             } else {
                 listView
             }
         }
+    }
+
+    /// The find bar matched nothing.
+    private var noMatches: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass").foregroundStyle(Color.jbText3)
+            Text(state.searchText.trimmingCharacters(in: .whitespaces).isEmpty
+                 ? "No apps match this filter."
+                 : "No apps match “\(state.searchText.trimmingCharacters(in: .whitespaces))”.")
+                .font(JBFont.body).foregroundStyle(Color.jbText)
+            Spacer()
+            Button("Clear Filter") { state.clearFilter() }
+                .buttonStyle(.jbSecondary)
+        }
+        .padding(12)
+        .bannerTint(.jbText3)
+    }
+
+    /// Show lock is on: nothing installs, updates or uninstalls until it's turned off.
+    private var lockBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "lock.fill").foregroundStyle(Color.jbInfo)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Show lock is on").font(JBFont.status).foregroundStyle(Color.jbInfo)
+                Text("Installs, updates and uninstalls are paused. Launching still works.")
+                    .font(JBFont.small).foregroundStyle(Color.jbText2)
+            }
+            Spacer()
+            Button("Turn Off") { state.requestShowLock(false) }
+                .buttonStyle(.jbSecondary)
+        }
+        .padding(12)
+        .bannerTint(.jbInfo)
+    }
+
+    /// Once, after the launcher itself has been updated.
+    private func whatsNewBanner(_ version: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles").foregroundStyle(Color.jbAccent)
+            Text("JB Theatre Tools was updated to v\(VersionDisplay.norm(version))")
+                .font(JBFont.status).foregroundStyle(Color.jbAccent)
+            Spacer()
+            Button("See What's New") { Task { await state.showLauncherWhatsNew() } }
+                .buttonStyle(.jbSecondary)
+            Button { state.dismissLauncherWhatsNew() } label: { Image(systemName: "xmark") }
+                .buttonStyle(.jbIcon)
+                .help("Dismiss")
+                .accessibilityLabel("Dismiss")
+        }
+        .padding(12)
+        .bannerTint(.jbAccent)
     }
 
     /// Detailed list layout — a custom gesture-driven reorderable list (see `ReorderableList`). Uses a
@@ -252,7 +446,9 @@ struct ContentView: View {
                                       alignment: .leading, spacing: 12) {
                                 ForEach(group.rows) { row in
                                     AppGridTile(row: row, isPinned: state.isPinned(row.id),
-                                                selectedVariantId: state.selectedVariantId(row.app))
+                                                selectedVariantId: state.selectedVariantId(row.app),
+                                                isHeld: state.isHeld(row.id), locked: state.showLock,
+                                                filtering: state.isFiltering)
                                         .equatable()
                                 }
                             }
@@ -297,7 +493,7 @@ struct ContentView: View {
                 Text(state.credentialsPrompt).font(JBFont.status).foregroundStyle(Color.jbWarn)
                 Text(authMode == .token
                      ? "Settings → paste a fine-grained PAT (Contents: read)."
-                     : "Settings → enter the suite passphrase (ask James).")
+                     : "Settings → enter the suite passphrase (ask whoever set up your access).")
                     .font(JBFont.small).foregroundStyle(Color.jbText2)
             }
             Spacer()
@@ -546,7 +742,8 @@ struct ReorderableList: View {
     private func rowView(_ id: String) -> some View {
         if let row = state.rows.first(where: { $0.id == id }) {
             AppRowView(row: row, cursor: cursor, draggingId: $draggingId, order: $order,
-                       isPinned: state.isPinned(id), selectedVariantId: state.selectedVariantId(row.app))
+                       isPinned: state.isPinned(id), selectedVariantId: state.selectedVariantId(row.app),
+                       isHeld: state.isHeld(id), locked: state.showLock, filtering: state.isFiltering)
                 .equatable()   // body runs only when `row` publishes or these inputs change
                 .background(
                     GeometryReader { geo in
@@ -581,9 +778,10 @@ struct SectionCollapseLabel: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
+            guard !state.isFiltering else { return }   // a filtered list shows every section open
             withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { state.toggleCollapsed(group.key) }
         }
-        .help(collapsed ? "Show \(group.title)" : "Hide \(group.title)")
+        .help(state.isFiltering ? "" : (collapsed ? "Show \(group.title)" : "Hide \(group.title)"))
     }
 }
 
@@ -618,7 +816,7 @@ struct CategorySectionHeader: View {
         let bar = HStack(spacing: 6) {
             SectionCollapseLabel(group: group)
             Spacer(minLength: 8)
-            if !isPinned {
+            if !isPinned && !state.isFiltering {
                 ReorderPill(hovering: hovering)
                     .draggable(CategoryDrag.token(group.key)) {
                         CategoryDragChip(title: group.title, count: group.rows.count)
@@ -636,7 +834,7 @@ struct CategorySectionHeader: View {
             bar
         } else {
             bar.dropDestination(for: String.self) { dropped, _ in
-                guard let src = dropped.first.flatMap(CategoryDrag.key) else { return false }
+                guard !state.isFiltering, let src = dropped.first.flatMap(CategoryDrag.key) else { return false }
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     state.moveCategory(src, onto: group.key)
                 }
@@ -664,7 +862,7 @@ struct ListSectionHeader: View {
         HStack(spacing: 6) {
             SectionCollapseLabel(group: group)
             Spacer(minLength: 8)
-            if !isPinned {
+            if !isPinned && !state.isFiltering {
                 ReorderPill(hovering: hovering)
                     .gesture(reorderGesture)
                     .help("Drag to move the “\(group.title)” section")
@@ -782,11 +980,16 @@ struct AppRowView: View, Equatable {
     /// (via `==`) while unrelated publishes don't.
     let isPinned: Bool
     let selectedVariantId: String?
+    /// Held at its installed version (no Update offered), show lock on (nothing installs), list filtered (no reorder).
+    let isHeld: Bool
+    let locked: Bool
+    let filtering: Bool
 
     /// Only these decide whether a PARENT re-render needs this row's body; the row's own `@ObservedObject`
     /// publishes (busy/status/installed…) still re-render it regardless.
     static func == (a: AppRowView, b: AppRowView) -> Bool {
         a.row === b.row && a.cursor === b.cursor && a.isPinned == b.isPinned && a.selectedVariantId == b.selectedVariantId
+            && a.isHeld == b.isHeld && a.locked == b.locked && a.filtering == b.filtering
     }
     @State private var hovering = false
     @State private var confirmingUninstall = false
@@ -854,7 +1057,7 @@ struct AppRowView: View, Equatable {
         .overlay { if isDragging { dropSlot } }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .modifier(ErrorHelp(message: row.errorMessage))   // tooltips don't reach into the drawing group
+        .modifier(ErrorHelp(message: row.errorMessage ?? heldHelp))   // tooltips don't reach into the drawing group
         .confirmationDialog("Uninstall \(row.displayName)?",
                             isPresented: $confirmingUninstall, titleVisibility: .visible) {
             Button("Uninstall", role: .destructive) { Task { await state.uninstallAsync(row.id) } }
@@ -907,9 +1110,10 @@ struct AppRowView: View, Equatable {
         Color.clear
             .frame(width: 16)
             .frame(maxHeight: .infinity)
-            .overlay { if hovering || isDragging { DragGrip().opacity(0.85) } }
+            .overlay { if (hovering && !filtering) || isDragging { DragGrip().opacity(0.85) } }
             .contentShape(Rectangle())
             .gesture(reorderGesture)
+            .allowsHitTesting(!filtering)   // a filtered list hides rows, so reordering is off until it's cleared
             .padding(.leading, 10)
             .help("Drag to reorder")
     }
@@ -977,6 +1181,12 @@ struct AppRowView: View, Equatable {
                 if isPinned {
                     Image(systemName: "pin.fill").font(.system(size: 9)).foregroundStyle(Color.selectorBlue)
                 }
+                if held {
+                    Text("HELD").font(JBFont.label).tracking(JBFont.labelTracking)
+                        .foregroundStyle(Color.selectorBlue)
+                        .padding(.horizontal, 5).padding(.vertical, 0.5)
+                        .background(Capsule().fill(Color.selectorBlue.opacity(0.12)))
+                }
             }
             Text(row.app.blurb).font(JBFont.small).foregroundStyle(Color.jbText2).lineLimit(1)
             versionLine
@@ -998,7 +1208,11 @@ struct AppRowView: View, Equatable {
         HStack(spacing: 6) {
             Text("Installed: \(installedText)")
             Text("·")
-            Text("Latest: \(row.latest ?? "—")")
+            Text("Latest: \(latestText)")
+            if let size = latestSize {
+                Text("·")
+                Text(size)
+            }
             if isDevBuild {
                 Text("·")
                 Text("dev build").foregroundStyle(Color.jbWarn)
@@ -1006,6 +1220,31 @@ struct AppRowView: View, Equatable {
         }
         .font(JBFont.labelRegular)
         .foregroundStyle(Color.jbText3)
+        .lineLimit(1)   // never wraps: a row's height must not depend on the window width or a download starting
+        .truncationMode(.tail)
+    }
+
+    /// Held at the installed version (only meaningful once something is installed).
+    private var held: Bool { isHeld && row.installed != nil }
+
+    /// The row's tooltip when an update is being held back.
+    private var heldHelp: String? {
+        guard held, row.status == .updateAvailable, let latest = row.latest, let installed = row.installed else { return nil }
+        return "\(VersionDisplay.display(latest)) is available — held at \(VersionDisplay.display(installed))"
+    }
+
+    /// "v1.2.0 (3 days ago)" — the latest release and how long it has been out.
+    private var latestText: String {
+        guard let latest = row.latest else { return "—" }
+        guard let published = row.latestRelease?.published else { return latest }
+        return "\(latest) (\(RelativeAge.describe(published, now: Date())))"
+    }
+
+    /// The selected edition's download size for the latest release.
+    private var latestSize: String? {
+        guard let id = row.latestAssetId, let asset = row.latestRelease?.assets.first(where: { $0.id == id }),
+              asset.size > 0 else { return nil }
+        return ByteSize.format(Int64(asset.size))
     }
 
     /// A development pre-release is installed or on offer (Dev channel).
@@ -1064,7 +1303,7 @@ struct AppRowView: View, Equatable {
         case .upToDate:
             badge("Up to date", color: .jbOk)
         case .updateAvailable:
-            badge("Update", color: .jbAccent)
+            if held { badge("Held", color: .selectorBlue) } else { badge("Update", color: .jbAccent) }
         case .notInstalled:
             badge("Not installed", color: .jbText2)
         case .installed:
@@ -1095,20 +1334,31 @@ struct AppRowView: View, Equatable {
     @ViewBuilder
     private var actions: some View {
         HStack(spacing: 8) {
-            // Install / Update / Retry — depends on the checked status.
-            switch row.status {
-            case .notInstalled:
-                installButton(title: "Install")
-            case .updateAvailable:
-                installButton(title: "Update")
-            case .error:
-                installButton(title: row.installed == nil ? "Install" : "Retry")
-            default:
-                EmptyView()
+            // A download in flight can be cancelled; the row then goes back to how it was. Cancel takes the place of
+            // Install / Update / Retry, so the row keeps its width (a width change re-wraps the text and re-lays-out
+            // every row below it).
+            if row.busy && row.cancellable {
+                Button("Cancel") { state.cancelDownload(row.id) }
+                    .buttonStyle(.jbSecondary)
+                    .help("Stop this download")
+                    .accessibilityLabel("Cancel downloading \(row.displayName)")
+            } else if !locked {
+                // Install / Update / Retry — depends on the checked status. Show lock offers none of them, and a
+                // held app offers no Update / Retry (that would move it off its version).
+                switch row.status {
+                case .notInstalled:
+                    installButton(title: "Install")
+                case .updateAvailable where !held:
+                    installButton(title: "Update")
+                case .error where !held:
+                    installButton(title: row.installed == nil ? "Install" : "Retry")
+                default:
+                    EmptyView()
+                }
             }
             // Dev channel switched off but a dev build is still here: one click back to the release (a downgrade
             // — the version picker in ⋯ does the same, this just makes it obvious).
-            if let tag = state.backToReleaseTag(row) {
+            if !locked, let tag = state.backToReleaseTag(row) {
                 Button("Back to release") { Task { await state.install(row.id, tag: tag) } }
                     .buttonStyle(.jbSecondary)
                     .disabled(row.busy)
@@ -1161,7 +1411,7 @@ struct AppRowView: View, Equatable {
     private var launchButton: some View {
         Button("Launch") { state.launch(row.id) }
             .buttonStyle(.jbSecondary)
-            .disabled(row.busy)
+            .disabled(row.installing)   // a download alone doesn't stop the app being opened
     }
 }
 
@@ -1283,51 +1533,89 @@ struct AppMenuButtons: View {
     /// Called when the user picks Uninstall — the host view shows its own confirmation dialog.
     var requestUninstall: () -> Void
 
+    // Split into sections: as one Group the body outgrew Swift's type-checker ("unable to type-check this
+    // expression in reasonable time").
     var body: some View {
         Group {
-            Button(state.isPinned(row.id) ? "Unpin from Top" : "Pin to Top") {
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { state.togglePin(row.id) }
+            arrangeSection
+            infoSection
+            variantSection
+            versionsSection
+            installedSection
+        }
+    }
+
+    @ViewBuilder private var arrangeSection: some View {
+        Button(state.isPinned(row.id) ? "Unpin from Top" : "Pin to Top") {
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { state.togglePin(row.id) }
+        }
+        Button("Move Up") {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { state.moveRow(row.id, up: true) }
+        }
+        .disabled(!state.canMove(row.id, up: true))
+        Button("Move Down") {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { state.moveRow(row.id, up: false) }
+        }
+        .disabled(!state.canMove(row.id, up: false))
+        Button("Hide from List") {
+            withAnimation(.easeInOut(duration: 0.22)) { state.setHidden(row.id, true) }
+        }
+    }
+
+    @ViewBuilder private var infoSection: some View {
+        Divider()
+        Button("Details…") { state.showDetails(row.id) }
+        if !row.releases.isEmpty {
+            Button("Release Notes…") { state.showReleaseNotes(row.id) }
+        }
+        if row.installed != nil {
+            // Held: Update All and automatic updates leave the app at its version.
+            Button(state.isHeld(row.id) ? "Release Hold" : "Hold at This Version") { state.toggleHold(row.id) }
+        }
+    }
+
+    @ViewBuilder private var variantSection: some View {
+        if row.app.hasVariants, let vs = row.app.variants {
+            Divider()
+            Picker("Variant", selection: Binding(
+                get: { state.selectedVariantId(row.app) ?? vs.first?.id ?? "" },
+                set: { state.setVariant(row.id, $0) }
+            )) {
+                ForEach(vs) { Text($0.label).tag($0.id) }
             }
-            Button("Move Up") {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { state.moveRow(row.id, up: true) }
-            }
-            .disabled(!state.canMove(row.id, up: true))
-            Button("Move Down") {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { state.moveRow(row.id, up: false) }
-            }
-            .disabled(!state.canMove(row.id, up: false))
-            Button("Hide from List") {
-                withAnimation(.easeInOut(duration: 0.22)) { state.setHidden(row.id, true) }
-            }
-            if row.app.hasVariants, let vs = row.app.variants {
-                Divider()
-                Picker("Variant", selection: Binding(
-                    get: { state.selectedVariantId(row.app) ?? vs.first?.id ?? "" },
-                    set: { state.setVariant(row.id, $0) }
-                )) {
-                    ForEach(vs) { Text($0.label).tag($0.id) }
+        }
+    }
+
+    @ViewBuilder private var versionsSection: some View {
+        let offered = state.offeredReleases(row)
+        if !offered.isEmpty {
+            Divider()
+            Section("Install version") {
+                ForEach(offered) { rel in
+                    Button { Task { await state.install(row.id, tag: rel.tagName, lenient: true) } }
+                        label: { Text(versionLabel(rel)) }
+                        .disabled(state.showLock || row.busy)
                 }
             }
-            if !row.releases.isEmpty {
-                Divider()
-                Section("Install version") {
-                    ForEach(row.releases) { rel in
-                        Button { Task { await state.install(row.id, tag: rel.tagName) } }
-                            label: { Text(versionLabel(rel)) }
-                    }
-                }
+        }
+        if let tag = state.rollbackTag(row) {
+            Button("Roll Back to \(VersionDisplay.display(tag))…") { state.requestRollBack(row.id, to: tag) }
+                .disabled(state.showLock || row.busy)
+        }
+    }
+
+    @ViewBuilder private var installedSection: some View {
+        if row.installed != nil {
+            Divider()
+            Button(state.isDockPinned(row.id) ? "Remove from Dock" : "Add to Dock") {
+                state.toggleDockPin(row.id)
             }
-            if row.installed != nil {
-                Divider()
-                Button(state.isDockPinned(row.id) ? "Remove from Dock" : "Add to Dock") {
-                    state.toggleDockPin(row.id)
-                }
-                Button(state.hasDesktopAlias(row.id) ? "Remove Desktop Alias" : "Add Desktop Alias") {
-                    state.toggleDesktopAlias(row.id)
-                }
-                Divider()
-                Button("Uninstall \(row.displayName)", role: .destructive) { requestUninstall() }
+            Button(state.hasDesktopAlias(row.id) ? "Remove Desktop Alias" : "Add Desktop Alias") {
+                state.toggleDesktopAlias(row.id)
             }
+            Divider()
+            Button("Uninstall \(row.displayName)", role: .destructive) { requestUninstall() }
+                .disabled(state.showLock || row.busy)
         }
     }
 
@@ -1348,10 +1636,16 @@ struct AppGridTile: View, Equatable {
     @ObservedObject var row: AppState.Row
     let isPinned: Bool
     let selectedVariantId: String?
+    let isHeld: Bool
+    let locked: Bool
+    let filtering: Bool
 
     static func == (a: AppGridTile, b: AppGridTile) -> Bool {
         a.row === b.row && a.isPinned == b.isPinned && a.selectedVariantId == b.selectedVariantId
+            && a.isHeld == b.isHeld && a.locked == b.locked && a.filtering == b.filtering
     }
+
+    private var held: Bool { isHeld && row.installed != nil }
     @State private var hovering = false
     @State private var isDropTarget = false
     @State private var confirmingUninstall = false
@@ -1409,6 +1703,18 @@ struct AppGridTile: View, Equatable {
                     .padding(.horizontal, 12).padding(.bottom, 8)
             }
         }
+        .overlay(alignment: .topLeading) {
+            // A download in flight can be cancelled from the tile too.
+            if row.busy && row.cancellable {
+                Button { state.cancelDownload(row.id) } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 13))
+                }
+                .buttonStyle(.jbIcon)
+                .padding(5)
+                .help("Stop this download")
+                .accessibilityLabel("Cancel downloading \(row.displayName)")
+            }
+        }
         .overlay {
             if isDropTarget {
                 RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous)
@@ -1424,8 +1730,9 @@ struct AppGridTile: View, Equatable {
             DragPreviewCard(id: row.id, displayName: row.displayName)
         }
         .dropDestination(for: String.self) { items, _ in
-            // Only a tile drag (a bare app id) reorders here — ignore a section-header drag (category token).
-            guard let dragged = items.first, CategoryDrag.key(dragged) == nil else { return false }
+            // Only a tile drag (a bare app id) reorders here — ignore a section-header drag (category token), and
+            // any drop while the list is filtered (hidden tiles would make the order ambiguous).
+            guard !filtering, let dragged = items.first, CategoryDrag.key(dragged) == nil else { return false }
             var moved = false
             withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
                 moved = state.moveRow(dragged, onto: row.id)
@@ -1444,10 +1751,11 @@ struct AppGridTile: View, Equatable {
         .help(tooltip)
     }
 
-    /// Click behaviour: launch when installed, otherwise install (when the status allows it).
+    /// Click behaviour: launch when installed, otherwise install (when the status allows it and show lock is off).
     private func primaryAction() {
+        if row.installed != nil { state.launch(row.id); return }   // launch() waits only for an install in progress
         if row.busy { return }
-        if row.installed != nil { state.launch(row.id); return }
+        guard !locked else { return }
         switch row.status {
         case .notInstalled, .updateAvailable, .error: Task { await state.install(row.id) }
         default: break
@@ -1466,7 +1774,7 @@ struct AppGridTile: View, Equatable {
     private var captionText: String {
         let base: String
         switch row.status {
-        case .updateAvailable: base = "Update"
+        case .updateAvailable: base = held ? "Held" : "Update"
         case .upToDate:        base = row.installed ?? "Installed"
         case .installed:       base = row.installed ?? "Installed"
         case .notInstalled:    base = "Install"
@@ -1483,7 +1791,7 @@ struct AppGridTile: View, Equatable {
 
     private var captionColor: Color {
         switch row.status {
-        case .updateAvailable:      return .jbAccent
+        case .updateAvailable:      return held ? .selectorBlue : .jbAccent
         case .upToDate:             return .jbOk
         case .missingAsset:         return .jbWarn
         case .error:                return .jbDanger
@@ -1496,7 +1804,10 @@ struct AppGridTile: View, Equatable {
         if let v = row.installed {
             t += " — installed \(v)"
             if row.app.hasVariants, let vl = row.app.variantLabel(selectedVariantId) { t += " (\(vl))" }
-        } else if row.status == .notInstalled {
+            if held, row.status == .updateAvailable, let latest = row.latest {
+                t += " — held (\(VersionDisplay.display(latest)) is available)"
+            }
+        } else if row.status == .notInstalled, !locked {
             t += " — click to install"
         }
         return t

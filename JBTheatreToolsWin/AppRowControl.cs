@@ -113,7 +113,7 @@ public sealed class AppRowControl : UserControl
     private string? CurrentVariantId =>
         App.HasVariants && App.Variants != null && _variant.SelectedIndex >= 0 && _variant.SelectedIndex < App.Variants.Count
             ? App.Variants[_variant.SelectedIndex].Id : null;
-    /// <summary>Name to show: the launcher's CURATED catalog name (James's naming) + the selected variant's
+    /// <summary>Name to show: the launcher's CURATED catalog name (the suite's curated naming) + the selected variant's
     /// suffix. We do NOT use the installed exe's self-name — several diverge from the curated name (e.g. the
     /// Convert app calls itself "Convert to it!", Network Port Map's exe is "Build Port Map").</summary>
     public string DisplayName => App.Name + App.VariantSuffix(CurrentVariantId);
@@ -134,7 +134,15 @@ public sealed class AppRowControl : UserControl
     private readonly Button _install = new();
     private readonly Button _launch = new();
     private readonly Button _more = new();
+    private readonly Button _cancel = new();
+    private readonly ToolTip _tip = new();
     private readonly ProgressBar _progress = new();
+    /// <summary>A download is in flight and can be cancelled (the Cancel button / menu item show).</summary>
+    private bool _cancellable;
+    /// <summary>Show lock is on: install / update / remove are hidden or disabled; Launch still works.</summary>
+    private bool _locked;
+    /// <summary>True while an install / update / removal of this row is running.</summary>
+    public bool IsBusy { get; private set; }
     // Custom grip drag (web-style reorder): a floating card follows the cursor, rows rearrange live, commit
     // on mouse-up. Started only from the grip zone (left edge), driven by mouse capture on this row.
     private Point _downScreen;
@@ -159,6 +167,9 @@ public sealed class AppRowControl : UserControl
     public event Action<Point>? ReorderMove;   // carries the current screen point
     public event Action? ReorderEnd;
     public event Func<AppRowControl, string, Task>? InstallVersionRequested;
+    /// <summary>A version hand-picked from the ⋯ list — the only install allowed without a signed checksum manifest
+    /// (very old releases predate it). Back to release, roll back and setup files use the strict path above.</summary>
+    public event Func<AppRowControl, string, Task>? InstallPickedVersionRequested;
     public event Action<AppRowControl>? UninstallRequested;
     public event Action<AppRowControl>? LaunchRequested;
     /// <summary>Reorder request from the ⋯ menu: true = move up, false = move down.</summary>
@@ -179,6 +190,21 @@ public sealed class AppRowControl : UserControl
     public event Action<AppRowControl, string>? VariantChangeRequested;
     /// <summary>Set by MainForm: the currently-selected variant id for this app.</summary>
     public Func<AppRowControl, string?>? SelectedVariantQuery;
+    /// <summary>Cancel the in-flight download (row button or menu).</summary>
+    public event Action<AppRowControl>? CancelRequested;
+    /// <summary>Hold / release the app at its installed version, and whether it's held now.</summary>
+    public event Action<AppRowControl>? HoldToggleRequested;
+    public Func<AppRowControl, bool>? IsHeldQuery;
+    public event Action<AppRowControl>? DetailsRequested;
+    public event Action<AppRowControl>? ReleaseNotesRequested;
+    /// <summary>One-click roll back: the tag to go back to (null = nothing to roll back to), and the request.</summary>
+    public Func<AppRowControl, string?>? RollbackTagQuery;
+    public event Action<AppRowControl, string>? RollbackRequested;
+    /// <summary>Set by MainForm: true while the row's install slot is being verified, installed or removed — the only
+    /// time Launch is off. While it is only DOWNLOADING the app can still be opened (the install step then asks to
+    /// quit it, or an automatic update leaves it for later).</summary>
+    public Func<AppRowControl, bool>? LaunchBlockedQuery;
+    private bool IsHeld => IsHeldQuery?.Invoke(this) ?? false;
 
     public AppRowControl(CatalogApp app)
     {
@@ -245,6 +271,12 @@ public sealed class AppRowControl : UserControl
         _more.Text = "⋯";
         _more.Click += (_, _) => ShowMoreMenu();
 
+        _cancel.Text = "Cancel";
+        _cancel.AutoSize = true;
+        _cancel.Visible = false;
+        _cancel.Click += (_, _) => CancelRequested?.Invoke(this);
+        _tip.SetToolTip(_cancel, "Stop this download");
+
         _progress.Style = ProgressBarStyle.Continuous;
         _progress.Maximum = 100;
         _progress.Visible = false;
@@ -257,7 +289,7 @@ public sealed class AppRowControl : UserControl
         _placeholder.Paint += PaintPlaceholder;
         Controls.Add(_placeholder);   // added last → top of the z-order, so it covers the row content
 
-        Controls.AddRange(new Control[] { _icon, _name, _pin, _blurb, _version, _whatsNew, _variant, _badge, _install, _launch, _more, _progress });
+        Controls.AddRange(new Control[] { _icon, _name, _pin, _blurb, _version, _whatsNew, _variant, _badge, _install, _launch, _more, _cancel, _progress });
         Resize += (_, _) => LayoutControls();
         // Drag-to-reorder: press-and-drag on the GRIP zone (left edge) starts a custom reorder (MainForm
         // drives a floating card + live reorder). Right-click opens the action menu; double-click launches.
@@ -270,7 +302,7 @@ public sealed class AppRowControl : UserControl
         }
         // Hover highlight (parity with the macOS row hover): recompute from the real cursor position on
         // every enter/leave of the row or any child, so moving across children doesn't flicker it off.
-        foreach (Control c in new Control[] { this, _icon, _name, _pin, _blurb, _version, _whatsNew, _variant, _badge, _install, _launch, _more, _progress })
+        foreach (Control c in new Control[] { this, _icon, _name, _pin, _blurb, _version, _whatsNew, _variant, _badge, _install, _launch, _more, _cancel, _progress })
         {
             c.MouseEnter += (_, _) => RecomputeHover();
             c.MouseLeave += (_, _) => RecomputeHover();
@@ -473,7 +505,9 @@ public sealed class AppRowControl : UserControl
     private void PrimaryAction()
     {
         if (!Enabled) return;
-        if (Installed != null) { LaunchRequested?.Invoke(this); return; }
+        if (Installed != null) { if (CanLaunch) LaunchRequested?.Invoke(this); return; }   // also mid-download
+        if (IsBusy) return;
+        if (_locked) return;   // show lock: nothing installs
         if (Status is RowStatus.NotInstalled or RowStatus.UpdateAvailable or RowStatus.Error && InstallRequested != null)
             _ = InstallRequested(this);
     }
@@ -495,6 +529,27 @@ public sealed class AppRowControl : UserControl
     private void ShowMoreMenu()
     {
         var menu = new ContextMenuStrip();
+        DialogKit.DisposeWhenClosed(menu, this);
+        // While busy (reached by right-click; the ⋯ button is off) the only actions are opening the app while it's
+        // still just downloading, and stopping the download — the grid tile has no Launch or Cancel button of its own.
+        if (IsBusy)
+        {
+            if (Installed != null && CanLaunch)
+            {
+                var open = new ToolStripMenuItem($"Launch {DisplayName}");
+                open.Click += (_, _) => LaunchRequested?.Invoke(this);
+                menu.Items.Add(open);
+            }
+            if (_cancellable)
+            {
+                var stop = new ToolStripMenuItem("Cancel download") { ToolTipText = "Stop this download" };
+                stop.Click += (_, _) => CancelRequested?.Invoke(this);
+                menu.Items.Add(stop);
+            }
+            if (menu.Items.Count > 0) menu.Show(Cursor.Position);
+            else menu.Dispose();   // never shown, so never closed
+            return;
+        }
         bool pinned = IsPinnedQuery?.Invoke(this) ?? false;
         var pin = new ToolStripMenuItem(pinned ? "Unpin from top" : "Pin to top");
         pin.Click += (_, _) => PinToggleRequested?.Invoke(this);
@@ -508,6 +563,29 @@ public sealed class AppRowControl : UserControl
         var hide = new ToolStripMenuItem("Hide from list");
         hide.Click += (_, _) => HideRequested?.Invoke(this);
         menu.Items.Add(hide);
+
+        menu.Items.Add(new ToolStripSeparator());
+        var details = new ToolStripMenuItem("Details…");
+        details.Click += (_, _) => DetailsRequested?.Invoke(this);
+        menu.Items.Add(details);
+        // Development builds are listed (notes, versions) only with the Development builds switch on.
+        var offered = Versions.Offered(Releases);
+        if (offered.Count > 0)
+        {
+            var notes = new ToolStripMenuItem("Release notes…");
+            notes.Click += (_, _) => ReleaseNotesRequested?.Invoke(this);
+            menu.Items.Add(notes);
+        }
+        if (Installed != null)
+        {
+            var hold = new ToolStripMenuItem(IsHeld ? "Release hold" : "Hold at this version")
+            {
+                ToolTipText = IsHeld ? "Let Update All and automatic updates update this app again"
+                                     : "Keep this version: Update All and automatic updates leave it alone",
+            };
+            hold.Click += (_, _) => HoldToggleRequested?.Invoke(this);
+            menu.Items.Add(hold);
+        }
         if (App.HasVariants && App.Variants != null)
         {
             menu.Items.Add(new ToolStripSeparator());
@@ -522,24 +600,34 @@ public sealed class AppRowControl : UserControl
             }
             menu.Items.Add(variant);
         }
-        if (Releases.Count > 0)
+        var rollback = RollbackTagQuery?.Invoke(this);
+        if (offered.Count > 0 || rollback != null)
         {
             menu.Items.Add(new ToolStripSeparator());
-            var versions = new ToolStripMenuItem("Install version");
-            foreach (var rel in Releases)
+            if (offered.Count > 0)
             {
-                var label = rel.TagName
-                    + (rel.Prerelease ? " (pre-release)" : "")
-                    + (rel.TagName == Installed ? "  ✓ installed" : "");
-                var tag = rel.TagName;
-                var item = new ToolStripMenuItem(label);
-                item.Click += async (_, _) =>
+                var versions = new ToolStripMenuItem("Install version") { Enabled = !_locked };
+                foreach (var rel in offered)
                 {
-                    if (InstallVersionRequested != null) await InstallVersionRequested(this, tag);
-                };
-                versions.DropDownItems.Add(item);
+                    var label = rel.TagName
+                        + (rel.Prerelease ? " (pre-release)" : "")
+                        + (Installed != null && VersionCompare.Equal(rel.TagName, Installed) ? "  ✓ installed" : "");
+                    var tag = rel.TagName;
+                    var item = new ToolStripMenuItem(label);
+                    item.Click += async (_, _) =>
+                    {
+                        if (InstallPickedVersionRequested != null) await InstallPickedVersionRequested(this, tag);
+                    };
+                    versions.DropDownItems.Add(item);
+                }
+                menu.Items.Add(versions);
             }
-            menu.Items.Add(versions);
+            if (rollback != null)
+            {
+                var back = new ToolStripMenuItem($"Roll back to {VersionCompare.Display(rollback)}…") { Enabled = !_locked };
+                back.Click += (_, _) => RollbackRequested?.Invoke(this, rollback);
+                menu.Items.Add(back);
+            }
         }
         if (Installed != null)
         {
@@ -554,12 +642,23 @@ public sealed class AppRowControl : UserControl
             menu.Items.Add(start);
 
             menu.Items.Add(new ToolStripSeparator());
-            var uninstall = new ToolStripMenuItem($"Uninstall {DisplayName}");
+            var uninstall = new ToolStripMenuItem($"Uninstall {DisplayName}") { Enabled = !_locked };
             uninstall.Click += (_, _) => UninstallRequested?.Invoke(this);
             menu.Items.Add(uninstall);
         }
-        if (menu.Items.Count > 0) menu.Show(Cursor.Position);
+        menu.Show(Cursor.Position);
     }
+
+    /// <summary>Show lock on/off for this row (MainForm drives it for every row).</summary>
+    public void SetLocked(bool locked)
+    {
+        if (_locked == locked) return;
+        _locked = locked;
+        UpdateVisual();
+    }
+
+    /// <summary>Re-reads the held state (after a hold toggle) and redraws.</summary>
+    public void RefreshHeld() => UpdateVisual();
 
     /// <summary>List-row layout. The text column keeps the 96-DPI design offsets (name 10 / blurb 31 /
     /// version 52 / what's-new 68 / variant 68|86, row 82 / 96 / 100 / 114 — parity with the macOS row),
@@ -592,6 +691,8 @@ public sealed class AppRowControl : UserControl
 
         int y = S(28), rx = Width - S(14);
         _more.Location = new Point(rx - _more.Width, y); rx = _more.Left - S(8);
+        _cancel.Visible = _cancellable;
+        if (_cancel.Visible) { _cancel.Location = new Point(rx - _cancel.Width, y); rx = _cancel.Left - S(8); }
         if (_launch.Visible) { _launch.Location = new Point(rx - _launch.Width, y); rx = _launch.Left - S(8); }
         if (_install.Visible) { _install.Location = new Point(rx - _install.Width, y); rx = _install.Left - S(8); }
         _badge.Location = new Point(rx - _badge.Width - S(4), S(32));
@@ -615,7 +716,7 @@ public sealed class AppRowControl : UserControl
         _progress.Location = new Point(S(10), Height - S(12));
         _progress.Width = w - S(20);
         _blurb.Visible = _version.Visible = _whatsNew.Visible = false;
-        _install.Visible = _launch.Visible = _more.Visible = false;
+        _install.Visible = _launch.Visible = _more.Visible = _cancel.Visible = false;   // tile: right-click menu
         // The Light/Full picker, as on the list row (it was hidden in grid view, leaving only the ⋯ menu).
         _variant.Visible = App.HasVariants;
         if (App.HasVariants)
@@ -802,6 +903,8 @@ public sealed class AppRowControl : UserControl
 
     public void SetProgress(double p)
     {
+        // A report that lands after the slot ended (a cancel, or a late 100%) must not re-show the bar.
+        if (!IsBusy) return;
         // Stay visible at 100%: the bar used to vanish the instant the download finished, leaving the row
         // motionless for the 5-30 s of verify + extract that follow (the "has it crashed?" moment).
         _progress.Visible = p > 0;
@@ -814,8 +917,9 @@ public sealed class AppRowControl : UserControl
     /// <summary>Shows a transient phase in the badge ("Downloading…" / "Verifying…" / "Installing…") without
     /// touching Status, and switches the bar to a marquee for the indeterminate phases. null restores the
     /// Status badge and a determinate bar.</summary>
-    public void SetPhase(string? text, bool indeterminate = false)
+    public void SetPhase(string? text, bool indeterminate = false, bool cancellable = false)
     {
+        _cancellable = text != null && cancellable;
         if (text == null)
         {
             _phase = null;
@@ -856,10 +960,18 @@ public sealed class AppRowControl : UserControl
         _badge.PillBack = string.IsNullOrEmpty(text) ? Color.Transparent : Color.FromArgb(38, color);   // ~15% tint
     }
 
-    public void SetBusy(bool busy)
+    /// <summary>Slots of this row in flight: a pipelined batch can be downloading the Full edition while the Light
+    /// edition is still installing, so busy is a count (parity with the macOS row's busyCount).</summary>
+    private int _busyCount;
+
+    public void SetBusy(bool on)
     {
+        _busyCount = on ? _busyCount + 1 : Math.Max(0, _busyCount - 1);
+        bool busy = _busyCount > 0;
+        IsBusy = busy;
+        if (!busy) _cancellable = false;
         _install.Enabled = !busy;
-        _launch.Enabled = !busy;
+        RefreshLaunch();
         _more.Enabled = !busy;
         _progress.Visible = busy;
         if (!busy)
@@ -876,8 +988,16 @@ public sealed class AppRowControl : UserControl
         // The row shows the SELECTED variant's slot, so the version line is annotated with that label.
         var selVar = App.HasVariants ? SelectedVariantLabel() : null;
         string instText = Installed == null ? "—" : (selVar != null ? $"{Installed} ({selVar})" : Installed);
-        _version.Text = $"Installed: {instText}    ·    Latest: {Latest ?? "—"}"
+        // The latest release's age and the selected edition's download size ride on the version line.
+        var latestRel = Latest == null ? null : Releases.FirstOrDefault(r => r.TagName == Latest);
+        string latestText = Latest ?? "—";
+        if (latestRel?.Published is { } published) latestText += $" ({RelativeAge.Describe(published, DateTimeOffset.UtcNow)})";
+        long size = LatestAssetId == null ? 0 : latestRel?.Assets.FirstOrDefault(a => a.Id == LatestAssetId)?.Size ?? 0;
+        _version.Text = $"Installed: {instText}    ·    Latest: {latestText}"
+            + (size > 0 ? $"    ·    {ByteSize.Format(size)}" : "")
             + ((Installed != null && VersionCompare.IsDev(Installed)) || (Latest != null && VersionCompare.IsDev(Latest)) ? "    ·    dev build" : "");
+        bool held = IsHeld && Installed != null;
+        bool heldUpdate = held && Status == RowStatus.UpdateAvailable;
 
         (string text, Color color) = Status switch
         {
@@ -893,20 +1013,35 @@ public sealed class AppRowControl : UserControl
             RowStatus.Checking => ("Checking…", Theme.Sub(_dark)),
             _ => ("", Theme.Sub(_dark)),
         };
+        if (heldUpdate) (text, color) = ("Held", Theme.Selector);
         if (_phase != null) ApplyBadge(_phase, Theme.Sub(_dark)); else ApplyBadge(text, color);   // a live phase wins
+        _tip.SetToolTip(_badge, heldUpdate && Latest != null
+            ? $"{VersionCompare.Display(Latest)} is available — held at {VersionCompare.Display(Installed!)}" : null);
 
         bool installed = Installed != null;
         BackToReleaseTag = ComputeBackToRelease();
-        _install.Visible = BackToReleaseTag != null || Status is RowStatus.NotInstalled or RowStatus.UpdateAvailable or RowStatus.Error;
+        // A held app offers no Update / Retry (that would move it off its version); show lock offers nothing.
+        bool offerInstall = Status is RowStatus.NotInstalled or RowStatus.UpdateAvailable or RowStatus.Error && !held;
+        _install.Visible = !_locked && (BackToReleaseTag != null || offerInstall);
         _install.Text = BackToReleaseTag != null ? "Back to release"
             : Status == RowStatus.UpdateAvailable ? "Update" : (installed ? "Retry" : "Install");
-        _install.Enabled = BackToReleaseTag != null || LatestAssetId != null;
+        // Never while this row is installing: a Refresh / unlock re-running this used to re-enable Install mid-download,
+        // and a click started a second download of the same slot to the same cache file.
+        _install.Enabled = !IsBusy && (BackToReleaseTag != null || LatestAssetId != null);
         // Launch is available whenever something is installed, even before a refresh has run.
         _launch.Visible = installed;
+        RefreshLaunch();
         _more.Visible = true;   // reordering lives here, so every row keeps its ⋯ menu
 
         LayoutControls();
     }
+
+    /// <summary>Launch works whenever the slot isn't being verified / installed / removed (see LaunchBlockedQuery);
+    /// without MainForm's answer, only while the row is idle.</summary>
+    private bool CanLaunch => Installed != null && !(LaunchBlockedQuery?.Invoke(this) ?? IsBusy);
+
+    /// <summary>Re-evaluates the Launch button (MainForm calls it when a slot enters or leaves verify / install).</summary>
+    public void RefreshLaunch() => _launch.Enabled = CanLaunch;
 
     /// <summary>The control's own background — which its child labels inherit. A list row is a surface
     /// that lifts on hover; a GRID TILE is the panel fill (raised on hover), with OnPaint rounding the

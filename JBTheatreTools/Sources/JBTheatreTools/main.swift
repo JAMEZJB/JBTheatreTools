@@ -58,9 +58,18 @@ enum LoopWatch {
         // `JBTT_SNAPSHOT=/path/base`: writes PNGs of the main window at +4 s and +9 s (own-window capture
         // needs no screen-recording permission) — a look at the real rendering without a human present.
         if let base = ProcessInfo.processInfo.environment["JBTT_SNAPSHOT"] {
+            // `JBTT_WINDOW_WIDTH=640`: size the main window first (layout checks at the narrow end).
+            if let w = ProcessInfo.processInfo.environment["JBTT_WINDOW_WIDTH"].flatMap(Double.init) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    guard let win = NSApp.windows.max(by: { $0.frame.width < $1.frame.width }) else { return }
+                    var f = win.frame; f.size.width = w; win.setFrame(f, display: true)
+                }
+            }
             for delay in [4.0, 12.0] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                    guard let win = NSApp.windows.max(by: { $0.frame.width < $1.frame.width }) else {
+                    // With JBTT_OPEN_SETTINGS=1 the Settings sheet (its own window) is what gets captured.
+                    let widest = NSApp.windows.max(by: { $0.frame.width < $1.frame.width })
+                    guard let win = widest?.attachedSheet ?? widest else {
                         fputs("[snapshot] failed: no window\n", stderr); return
                     }
                     // Window-server capture first; when that's refused (screen locked / display asleep), draw the

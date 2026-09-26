@@ -34,6 +34,14 @@ final class AppLog {
         }
     }
 
+    /// The last `count` lines of the log (for Copy Diagnostics); empty if it can't be read. Waits for pending writes.
+    func tail(_ count: Int) -> [String] {
+        queue.sync {}
+        guard let data = try? Data(contentsOf: fileURL) else { return [] }
+        let lines = String(decoding: data.suffix(200_000), as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: true)
+        return lines.suffix(count).map(String.init)
+    }
+
     /// Opens the log in the user's default text viewer (creating it if it doesn't exist yet).
     func open() {
         if !fm.fileExists(atPath: fileURL.path) { try? Data().write(to: fileURL) }

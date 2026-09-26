@@ -45,6 +45,12 @@ enum CLI {
         // would fall through and (in main.swift) launch the GUI instead of installing.
         guard let cmd = args.first(where: { commands.contains($0) }) else { printHelp(); return }
         if cmd == "--help" || cmd == "-h" { printHelp(); return }
+        // Show lock (set in the app) pauses installs, updates and uninstalls — the command line honours it too, and
+        // refuses before touching the Keychain.
+        if UserDefaults.standard.bool(forKey: AppState.showLockKey), cmd == "--install" || cmd == "--uninstall" {
+            fputs("error: show lock is on — installs, updates and uninstalls are paused. Turn it off in JB Theatre Tools (⌘L) first.\n", stderr)
+            exit(1)
+        }
 
         var token = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]
         var catalogPath: String?
@@ -206,7 +212,7 @@ enum CLI {
             do {
                 let all = try await client.releases(owner: app.owner, repo: app.repo)
                 let release = tag != nil
-                    ? all.first { $0.tagName == tag }
+                    ? all.first { VersionDisplay.equal($0.tagName, tag!) }
                     : AppState.latest(from: all)
                 guard let rel = release else { fputs("error: version \(tag ?? "latest") not found.\n", stderr); exit(1) }
                 guard let asset = rel.assets.first(where: { $0.name == app.macAssetName }) else {
@@ -236,8 +242,12 @@ enum CLI {
                 case .noManifest:     print("⚠︎ \(asset.name) installed unverified (older tag; no SHA256SUMS).")
                 case .assetNotListed: print("⚠︎ \(asset.name) installed unverified (older tag; not in SHA256SUMS).")
                 }
+                let before = im.installedVersion(app.id)
                 let dest = try im.install(app: app, version: rel.tagName, downloadedZip: zip, toApplications: toApplications)
                 try? FileManager.default.removeItem(at: zip)
+                HistoryStore.add(app: app.id, name: app.name, action: ActivityHistory.action(from: before, to: rel.tagName),
+                                 from: before, to: rel.tagName)
+                HistoryStore.flush()   // written before the process exits
                 AppLog.shared.log("cli: installed \(app.id) \(rel.tagName)\(toApplications ? " (Applications)" : "")\(verification == .verified ? " (sha256 ok)" : " (unverified)")")
                 print("Installed \(app.name) \(rel.tagName) → \(dest.path)")
             } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
@@ -247,7 +257,12 @@ enum CLI {
     private static func uninstall(catalog: Catalog, id: String?) {
         guard let app = appFor(id, catalog) else { fputs("error: pass an app id.\n", stderr); exit(1) }
         do {
+            let before = InstallManager.shared.installedVersion(app.id)
             try InstallManager.shared.uninstall(app.id)
+            if let before {
+                HistoryStore.add(app: app.id, name: app.name, action: "uninstall", from: before)
+                HistoryStore.flush()   // written before the process exits
+            }
             AppLog.shared.log("cli: uninstalled \(app.id)")
             print("Uninstalled \(app.name).")
         } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
