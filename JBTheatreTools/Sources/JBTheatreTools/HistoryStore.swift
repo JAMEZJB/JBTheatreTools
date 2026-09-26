@@ -5,7 +5,7 @@ import Foundation
 /// atomically so a crash mid-write can't corrupt the history. Best effort: history never gets in the way of an install.
 enum HistoryStore {
     /// One serial queue owns the file: `add` never blocks the caller (it was a read + parse + atomic rewrite of up to
-    /// 500 entries on the main actor for every install), and `load` waits for queued writes so it sees them.
+    /// 300 entries on the main actor for every install), and `load` waits for queued writes so it sees them.
     private static let queue = DispatchQueue(label: "theatre.history", qos: .utility)
     private static var fileURL: URL { InstallManager.shared.supportDir.appendingPathComponent("history.json") }
 

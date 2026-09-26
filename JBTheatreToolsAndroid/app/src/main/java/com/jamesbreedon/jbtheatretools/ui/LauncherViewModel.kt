@@ -155,7 +155,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             while (true) {
                 delay(60_000)
                 val s = _state.value
-                if (AppVisibility.foreground && s.signedIn && !s.loading && !s.anyInstallRunning &&
+                if (AppVisibility.foreground && s.signedIn && !s.showLock && !s.loading && !s.anyInstallRunning &&
                     UpdatePolicy.isDue(lastCheck, Instant.now(), repo.settings.autoCheckInterval)
                 ) runRefresh(scheduled = true)
             }

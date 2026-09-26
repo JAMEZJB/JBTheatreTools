@@ -2022,7 +2022,7 @@ final class AppState: ObservableObject {
         guard !work.isEmpty else { return }
         AppLog.shared.log("automatic update: \(work.count) slot(s)")
         let done = await runSlots(work, label: "automatic update", unattended: true)
-        if !done.isEmpty, Self.notifyUpdates, !NSApp.isActive {
+        if !done.isEmpty, Self.notifyUpdates, !showLock, !NSApp.isActive {
             Notifier.post(title: "JB Theatre Tools", body: UpdatePolicy.autoUpdateSummary(done))
         }
     }

@@ -1719,6 +1719,7 @@ public sealed class MainForm : Form
             if (running.Length > 0 && d.Unattended)
             {
                 // An automatic update never interrupts an open app: leave it for the next check.
+                foreach (var p in running) p.Dispose();
                 row.SetPhase(null);
                 _ = Task.Run(() => InstallManager.TryDelete(cache));
                 Log.Write($"install {row.App.Id} {rel.TagName}: left for later — it's open (automatic update)");
@@ -2154,7 +2155,7 @@ public sealed class MainForm : Form
             if (work.Count == 0 || Locked || _batchRunning || _rows.Any(r => r.IsBusy)) return;
             Log.Write($"automatic update: {work.Count} slot(s)");
             var done = await RunSlotsAsync(work, "Automatic update", unattended: true);
-            if (done.Count > 0 && _settings.NotifyUpdates && !IsForeground())
+            if (done.Count > 0 && _settings.NotifyUpdates && !Locked && !IsForeground())
                 ShowBalloon("JB Theatre Tools", UpdatePolicy.AutoUpdateSummary(done));
         }
         catch (Exception ex) { Log.Write($"automatic update failed: {ex.Message}"); }
