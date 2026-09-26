@@ -9,8 +9,12 @@ namespace JBTheatreTools;
 /// Cancel / OK) — a stray keystroke never confirms.</summary>
 internal static class HouseMessage
 {
+    /// <param name="destructive">The action removes something (an uninstall, a saved passphrase): drawn in Danger.</param>
+    /// <remarks>House confirm rule (design, 2026-09-26): the action is the filled button (Danger when destructive); the
+    /// safe answer (No / Cancel) is the plain one and has the focus, so Enter never does the risky thing.</remarks>
     public static DialogResult Show(IWin32Window? owner, string text, string caption,
-                                    MessageBoxButtons buttons = MessageBoxButtons.OK, MessageBoxIcon icon = MessageBoxIcon.None)
+                                    MessageBoxButtons buttons = MessageBoxButtons.OK, MessageBoxIcon icon = MessageBoxIcon.None,
+                                    bool destructive = false)
     {
         (string, DialogResult)[] set = buttons switch
         {
@@ -26,18 +30,25 @@ internal static class HouseMessage
             MessageBoxButtons.OK => DialogResult.OK,
             _ => DialogResult.Cancel,
         };
-        return Ask(owner, caption, text, set, set[0].Item2, cancel, icon);
+        // A question's safe answer is the default; a plain notice (OK / Retry…) keeps its first button.
+        var focus = buttons is MessageBoxButtons.YesNo or MessageBoxButtons.OKCancel or MessageBoxButtons.YesNoCancel
+            ? cancel : set[0].Item2;
+        return Ask(owner, caption, text, set, focus, cancel, icon, primaryResult: set[0].Item2, destructive: destructive);
     }
 
     /// <param name="choices">Label + result, in left-to-right order.</param>
     /// <param name="defaultResult">The button Enter presses — drawn as the accent-filled primary.</param>
     /// <param name="cancelResult">What Esc and the close box answer.</param>
+    /// <param name="primaryResult">The button drawn filled — the action (defaults to <paramref name="defaultResult"/>).</param>
+    /// <param name="destructive">Draw the action in Danger instead of the accent.</param>
     public static DialogResult Ask(IWin32Window? owner, string caption, string text, (string Label, DialogResult Result)[] choices,
-                                   DialogResult defaultResult, DialogResult cancelResult, MessageBoxIcon icon = MessageBoxIcon.None)
+                                   DialogResult defaultResult, DialogResult cancelResult, MessageBoxIcon icon = MessageBoxIcon.None,
+                                   DialogResult? primaryResult = null, bool destructive = false)
     {
         var ownerControl = owner as Control ?? (owner != null ? Control.FromHandle(owner.Handle) : null);
         int dpi = ownerControl?.DeviceDpi ?? 96;
-        using var form = new MessageForm(caption, text, choices, defaultResult, cancelResult, icon, dpi, Theme.CurrentDark);
+        using var form = new MessageForm(caption, text, choices, defaultResult, cancelResult, icon, dpi, Theme.CurrentDark,
+                                         primaryResult ?? defaultResult, destructive);
         // An owner that isn't on screen (the window hidden to the notification area, or not shown yet) can't host it.
         if (ownerControl is { IsHandleCreated: true, Visible: true })
             return form.ShowDialog(owner);
@@ -60,7 +71,8 @@ internal static class HouseMessage
         private int S(int v) => Theme.Px(v, _dpi);
 
         public MessageForm(string caption, string text, (string Label, DialogResult Result)[] choices,
-                           DialogResult defaultResult, DialogResult cancelResult, MessageBoxIcon icon, int dpi, bool dark)
+                           DialogResult defaultResult, DialogResult cancelResult, MessageBoxIcon icon, int dpi, bool dark,
+                           DialogResult primaryResult, bool destructive)
         {
             _dpi = dpi;
             _cancelResult = cancelResult;
@@ -135,7 +147,7 @@ internal static class HouseMessage
             var buttons = new List<HouseButton>();
             foreach (var (label, result) in choices)
             {
-                var b = new HouseButton(result == defaultResult ? HouseRole.Primary : HouseRole.Secondary)
+                var b = new HouseButton(result != primaryResult ? HouseRole.Secondary : destructive ? HouseRole.Danger : HouseRole.Primary)
                     { Text = label, AutoSize = true, DialogResult = result };
                 // Measured now (an AutoSize button only sizes itself on its first layout); short labels ("OK", "No")
                 // get a comfortable 76 px target.
@@ -258,14 +270,16 @@ internal static class DialogKit
         HouseMessage.Ask(owner, "Turn Off Show Lock?",
             "Installs, updates and uninstalls can run again, including automatic updates if they're switched on.",
             new[] { ("Keep On", DialogResult.Cancel), ("Turn Off", DialogResult.OK) },
-            defaultResult: DialogResult.Cancel, cancelResult: DialogResult.Cancel, MessageBoxIcon.Question) == DialogResult.OK;
+            defaultResult: DialogResult.Cancel, cancelResult: DialogResult.Cancel, MessageBoxIcon.Question,
+            primaryResult: DialogResult.OK) == DialogResult.OK;
 
     /// <summary>"Reinstall … as the x64 / ARM64 build?" (the row's ⋯ → "Use the x64 build (emulated)"). Cancel is the
     /// default (Enter) and what Esc or the close box answer. True = reinstall.</summary>
     public static bool ConfirmReinstall(IWin32Window owner, string caption, string text) =>
         HouseMessage.Ask(owner, caption, text,
-            new[] { ("Reinstall", DialogResult.OK), ("Cancel", DialogResult.Cancel) },
-            defaultResult: DialogResult.Cancel, cancelResult: DialogResult.Cancel, MessageBoxIcon.Question) == DialogResult.OK;
+            new[] { ("Cancel", DialogResult.Cancel), ("Reinstall", DialogResult.OK) },
+            defaultResult: DialogResult.Cancel, cancelResult: DialogResult.Cancel, MessageBoxIcon.Question,
+            primaryResult: DialogResult.OK) == DialogResult.OK;
 
     /// <summary>A pop-up menu built for one showing is disposed once it has closed (after its click has run).</summary>
     public static void DisposeWhenClosed(ContextMenuStrip menu, Control owner)
@@ -503,7 +517,14 @@ internal sealed class AppDetailsDialog : Form
         Row("Section", d.Category);
         Row("Installed", d.Installed ?? "Not installed");
         Row("Installed on", d.InstalledAt);
-        Row("Location", d.Location);
+        if (d.Location != null)
+        {
+            // A path breaks only after a "\" (a zero-width space there), never mid-name, and reads in a fixed-pitch face.
+            var path = new Label { Font = new Font("Consolas", Font.SizeInPoints, FontStyle.Regular, GraphicsUnit.Point) };
+            var pathFont = path.Font;
+            FormClosed += (_, _) => pathFont.Dispose();
+            Row("Location", d.Location.Replace("\\", "\\\u200B"), path);
+        }
         if (d.Location != null) { _size.Text = "Calculating…"; Row("Size on disk", null, _size); }
         Row("Latest", d.Latest);
         Row("Released", d.LatestDate);

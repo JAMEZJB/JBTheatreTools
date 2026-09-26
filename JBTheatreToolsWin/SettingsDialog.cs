@@ -151,7 +151,7 @@ public sealed class SettingsDialog : Form
         {
             if (HouseMessage.Show(this,
                     "Remove the saved token? You'll need to paste one again before you can install or update apps.",
-                    "Remove token", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                    "Remove token", MessageBoxButtons.YesNo, MessageBoxIcon.Question, destructive: true) != DialogResult.Yes) return;
             TokenStore.Clear();
             UpdateTokenState();
         };
@@ -184,7 +184,7 @@ public sealed class SettingsDialog : Form
         {
             if (HouseMessage.Show(this,
                     "Remove the server passphrase? You'll need to enter it again before you can install or update apps.",
-                    "Remove passphrase", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                    "Remove passphrase", MessageBoxButtons.YesNo, MessageBoxIcon.Question, destructive: true) != DialogResult.Yes) return;
             TokenStore.ClearServerPass();
             UpdateServerState();
         };

@@ -12,7 +12,9 @@ namespace JBTheatreTools;
 
 /// <summary>The three house button roles (macOS JBButtonStyle.Role): PRIMARY = accent fill, OnAccent text, no border;
 /// SECONDARY = raised fill with a strong hairline; ICON = no fill, a slate glyph, a hover wash only (rule 21).</summary>
-public enum HouseRole { Primary, Secondary, Icon }
+/// <summary>Primary = accent fill (the action); Danger = danger fill (a destructive action); Secondary = raised + hairline;
+/// Icon = glyph only.</summary>
+public enum HouseRole { Primary, Secondary, Icon, Danger }
 
 /// <summary>A vector glyph a <see cref="HouseButton"/> draws in place of its text (the text stays its accessible name).</summary>
 public enum HouseGlyph { None, More, Up, Down }
@@ -383,6 +385,10 @@ public sealed class HouseButton : Button
                 fill = _pressed ? Theme.Blend(Theme.Accent, back, 0.8) : _hover ? Theme.Blend(Theme.Fg(dark), Theme.Accent, 0.06) : Theme.Accent;
                 fg = Theme.OnAccent;
                 break;
+            case HouseRole.Danger:
+                fill = _pressed ? Theme.Blend(Theme.Danger, back, 0.8) : _hover ? Theme.Blend(Theme.Fg(dark), Theme.Danger, 0.06) : Theme.Danger;
+                fg = Color.White;
+                break;
             case HouseRole.Secondary:
                 fill = _pressed ? Theme.Sunken(dark) : _hover ? Theme.Blend(Theme.Fg(dark), Theme.Raised(dark), 0.06) : Theme.Raised(dark);
                 fg = Theme.Fg(dark);
@@ -414,7 +420,7 @@ public sealed class HouseButton : Button
         else DrawContent(g, fg, fill);
 
         if (Focused && ShowFocusCues)
-            HouseDraw.FocusRing(g, Size, DeviceDpi, _role == HouseRole.Primary ? Theme.OnAccent : Theme.Accent);
+            HouseDraw.FocusRing(g, Size, DeviceDpi, _role is HouseRole.Primary or HouseRole.Danger ? Theme.OnAccent : Theme.Accent);
     }
 
     private void DrawContent(Graphics g, Color fg, Color fill)
@@ -1334,6 +1340,9 @@ internal static class HouseMenu
 /// checked item, Line hairline separators and a slate chevron for a submenu (rule 21). Reads the theme as it paints.</summary>
 internal sealed class HouseMenuRenderer : ToolStripProfessionalRenderer
 {
+    /// <summary>Set as a menu item's <c>Tag</c> to draw it in Danger (rule 24: destructive actions, e.g. Uninstall).</summary>
+    public static readonly object DangerTag = new();
+
     private static bool Dark => Theme.CurrentDark;
     private static int Dpi(ToolStripItemRenderEventArgs e) => e.ToolStrip?.DeviceDpi ?? e.Item.Owner?.DeviceDpi ?? 96;
 
@@ -1370,7 +1379,8 @@ internal sealed class HouseMenuRenderer : ToolStripProfessionalRenderer
     {
         bool dark = Dark;
         bool shortcut = e.Item is ToolStripMenuItem mi && !string.IsNullOrEmpty(e.Text) && e.Text != mi.Text;
-        var color = !e.Item.Enabled ? Theme.Muted(dark) : shortcut ? Theme.Sub(dark) : Theme.Fg(dark);
+        var color = !e.Item.Enabled ? Theme.Muted(dark) : shortcut ? Theme.Sub(dark)
+                  : ReferenceEquals(e.Item.Tag, HouseMenuRenderer.DangerTag) ? Theme.Danger : Theme.Fg(dark);
         TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, e.TextRectangle, color, e.TextFormat | TextFormatFlags.NoPrefix);
     }
 

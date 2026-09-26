@@ -268,6 +268,7 @@ public sealed class AppRowControl : UserControl
                 if (_suppressVariantEvent) return;
                 int idx = _variant.SelectedIndex;
                 _name.Text = DisplayName;   // reflect the new variant suffix immediately
+                _more.AccessibleName = $"More actions for {DisplayName}";
                 if (idx >= 0 && app.Variants != null && idx < app.Variants.Count)
                     VariantChangeRequested?.Invoke(this, app.Variants[idx].Id);
             };
@@ -288,7 +289,7 @@ public sealed class AppRowControl : UserControl
         _launch.Click += (_, _) => LaunchRequested?.Invoke(this);
 
         _more.Text = "⋯";
-        _more.AccessibleName = "More actions";
+        _more.AccessibleName = $"More actions for {app.Name}";
         _tip.SetToolTip(_more, "Variant, reorder, other versions & uninstall");
         _more.Click += (_, _) => ShowMoreMenu();
 
@@ -548,6 +549,7 @@ public sealed class AppRowControl : UserControl
         _variant.SelectedIndex = idx;
         _suppressVariantEvent = false;
         _name.Text = DisplayName;   // reflect the new variant suffix
+        _more.AccessibleName = $"More actions for {DisplayName}";
     }
 
     private void ShowMoreMenu()
@@ -686,7 +688,7 @@ public sealed class AppRowControl : UserControl
             menu.Items.Add(start);
 
             menu.Items.Add(new ToolStripSeparator());
-            var uninstall = new ToolStripMenuItem($"Uninstall {DisplayName}") { Enabled = !_locked };
+            var uninstall = new ToolStripMenuItem($"Uninstall {DisplayName}") { Enabled = !_locked, Tag = HouseMenuRenderer.DangerTag };
             uninstall.Click += (_, _) => UninstallRequested?.Invoke(this);
             menu.Items.Add(uninstall);
         }
@@ -833,6 +835,7 @@ public sealed class AppRowControl : UserControl
     {
         ResolvedName = name;
         _name.Text = DisplayName;
+        _more.AccessibleName = $"More actions for {DisplayName}";
         LayoutControls();
         UpdateIcon();
     }

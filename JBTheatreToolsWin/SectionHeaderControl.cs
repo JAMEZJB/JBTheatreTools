@@ -21,6 +21,7 @@ public sealed class SectionHeaderControl : UserControl
     private bool _dark;
 
     // House icon buttons (no fill, slate glyph, hover wash only — rule 21), drawn as vector triangles.
+    private readonly ToolTip _tip = HouseTip.Create();
     private readonly HouseButton _up = new(HouseRole.Icon) { Glyph = HouseGlyph.Up, AccessibleName = "Move section up" };
     private readonly HouseButton _down = new(HouseRole.Icon) { Glyph = HouseGlyph.Down, AccessibleName = "Move section down" };
     // DPI: every pixel number is a 96-DPI design value scaled through S(); _dpi = what the geometry was built for.
@@ -84,6 +85,11 @@ public sealed class SectionHeaderControl : UserControl
     {
         Key = key; _title = title; _count = count; _collapsed = collapsed; _pinnedGroup = pinnedGroup; _dark = dark;
         _up.Visible = _down.Visible = !pinnedGroup;
+        // Named for the section (screen readers) and explained on hover.
+        _up.AccessibleName = $"Move {title} up";
+        _down.AccessibleName = $"Move {title} down";
+        _tip.SetToolTip(_up, $"Move the {title} section up");
+        _tip.SetToolTip(_down, $"Move the {title} section down");
         LayoutButtons();
         Invalidate();
     }
@@ -164,6 +170,6 @@ public sealed class SectionHeaderControl : UserControl
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
-        if (disposing) { _titleFont?.Dispose(); _titleFont = null; }
+        if (disposing) { _titleFont?.Dispose(); _titleFont = null; _tip.Dispose(); }
     }
 }

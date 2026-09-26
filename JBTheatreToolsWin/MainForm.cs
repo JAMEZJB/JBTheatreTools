@@ -2184,7 +2184,7 @@ public sealed class MainForm : Form
     {
         if (BlockedByLock($"uninstall {row.App.Id}")) return;
         if (HouseMessage.Show(this, $"Uninstall {row.DisplayName}?", "Uninstall",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question, destructive: true) != DialogResult.Yes) return;
         // Re-check after the dialog: an install (or show lock) may have started while it was open.
         if (row.IsBusy || BlockedByLock($"uninstall {row.App.Id}")) return;
         // Uninstalls the SELECTED variant's slot only (a sibling variant, if installed, stays). The delete runs
