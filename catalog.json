@@ -165,7 +165,26 @@
         "macos": "ShowHandbook-macOS.zip",
         "windows-x64": "ShowHandbook-Windows-x64.exe",
         "windows-arm64": "ShowHandbook-Windows-arm64.exe"
-      }
+      },
+      "variants": [
+        {
+          "id": "light",
+          "label": "Light",
+          "assets": {
+            "macos": "ShowHandbook-macOS.zip",
+            "windows-x64": "ShowHandbook-Windows-x64.exe",
+            "windows-arm64": "ShowHandbook-Windows-arm64.exe"
+          }
+        },
+        {
+          "id": "full",
+          "label": "Full",
+          "assets": {
+            "macos-arm64": "ShowHandbook-Full-macOS-arm64.zip",
+            "windows-x64": "ShowHandbook-Full-Windows-x64.zip"
+          }
+        }
+      ]
     },
     {
       "id": "psntools",
@@ -180,7 +199,27 @@
         "macos": "PSNTools-macOS.zip",
         "windows-x64": "PSNTools-Windows-x64.exe",
         "windows-arm64": "PSNTools-Windows-arm64.exe"
-      }
+      },
+      "variants": [
+        {
+          "id": "light",
+          "label": "Light",
+          "assets": {
+            "macos": "PSNTools-macOS.zip",
+            "windows-x64": "PSNTools-Windows-x64.exe",
+            "windows-arm64": "PSNTools-Windows-arm64.exe"
+          }
+        },
+        {
+          "id": "full",
+          "label": "Full",
+          "assets": {
+            "macos-arm64": "PSNTools-Full-macOS-arm64.zip",
+            "macos-x64": "PSNTools-Full-macOS-x64.zip",
+            "windows-x64": "PSNTools-Full-Windows-x64.zip"
+          }
+        }
+      ]
     },
     {
       "id": "dmxtools",
@@ -404,7 +443,8 @@
           "label": "Full",
           "assets": {
             "macos-arm64": "SurtitleTools-Full-macOS-arm64.zip",
-            "macos-x64": "SurtitleTools-Full-macOS-x64.zip"
+            "macos-x64": "SurtitleTools-Full-macOS-x64.zip",
+            "windows-x64": "SurtitleTools-Full-Windows-x64.zip"
           }
         }
       ]
