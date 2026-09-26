@@ -69,6 +69,11 @@ The same features on every launcher (the few that don't apply to Android are mar
   settings, every app's state and recent log lines. The token and passphrase are never included, and
   token-shaped strings in log lines are masked — read the report before sending it, as log lines can
   contain file paths.
+- **The launcher updates itself** — on Windows, Update in the banner (or Settings) downloads and verifies the new build
+  like any app, puts it in place of the running launcher — same folder, same file name, so shortcuts and pins keep
+  working — and restarts into it; apps that are open keep running. It waits while installs run and under show lock. If
+  Windows won't let the launcher change its own folder, the verified build is saved to Downloads instead. The command
+  line does the same with `--self-update`. Android updates itself too; on macOS the new build is saved to Downloads.
 - **What's new in the launcher** — after the launcher updates itself it offers, once, the notes of every
   release since the version you had.
 

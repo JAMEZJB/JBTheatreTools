@@ -145,10 +145,13 @@ public sealed class MainForm : Form
         ApplyTheme();
         SetupTray();
         FormClosing += OnFormClosing;
+        LauncherUpdate.ReadAfterUpdate();   // what the previous launcher passed on, if this start follows an update
         _scheduler.Tick += async (_, _) => await ScheduledTickAsync();
         Shown += async (_, _) =>
         {
             Log.Write($"launched v{CurrentVersion()}");
+            // After an in-place update: tell the previous launcher this one is up (it then closes), and remove its old exe.
+            LauncherUpdate.Started();
             PrepareLauncherWhatsNew();
             ApplyLock();
             _scheduler.Start();
@@ -231,30 +234,10 @@ public sealed class MainForm : Form
         _updateBanner.Paint += (_, e) => BannerEdge(e, _updateBanner, Theme.Accent);
 
         var download = _updateBtn;
-        download.Text = "Download Update";
+        download.Text = "Update";
         download.AutoSize = true;
         download.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        download.Click += async (_, _) =>
-        {
-            if (_catalog.Self == null) return;
-            download.Enabled = false;
-            var prev = download.Text;
-            download.Text = "Downloading…";
-            try
-            {
-                var dest = await LauncherUpdate.DownloadAndRevealAsync(_catalog.Self, AuthClient.SelfUpdate(_settings, _catalog.DownloadServer), CurrentVersion());
-                _updateBannerText.Text = $"Saved {Path.GetFileName(dest)} to Downloads — quit & replace JB Theatre Tools.";
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, ex.Message, "Download failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-            finally
-            {
-                download.Text = prev;
-                download.Enabled = true;
-            }
-        };
+        download.Click += async (_, _) => await UpdateLauncherAsync();
 
         _updateBanner.Controls.Add(_updateBannerText);
         _updateBanner.Controls.Add(download);
@@ -2098,6 +2081,96 @@ public sealed class MainForm : Form
         }
     }
 
+    private bool _launcherUpdating;
+
+    /// <summary>Updates the launcher in place: download + verify the new build, swap it in for this exe (same folder and
+    /// file name, so shortcuts keep working) and restart into it. Apps that are open keep running. Refused under show lock
+    /// and while installs run (the restart would end them); a folder Windows won't let us change gets the old
+    /// saved-to-Downloads route.</summary>
+    private async Task UpdateLauncherAsync()
+    {
+        if (_catalog.Self == null || _launcherUpdating) return;
+        if (Locked)
+        {
+            MessageBox.Show(this, "Show lock is on — turn it off to update JB Theatre Tools.", "Update JB Theatre Tools",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (LauncherBusy())
+        {
+            MessageBox.Show(this, "Installs are in progress. Updating restarts JB Theatre Tools, so let them finish (or stop them) first.",
+                            "Update JB Theatre Tools", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        _launcherUpdating = true;
+        var button = _updateBtn;
+        var prev = button.Text;
+        button.Enabled = false;
+        button.Text = "Downloading…";
+        try
+        {
+            var progress = new Progress<double>(p => button.Text = $"Downloading… {Math.Clamp(p, 0, 1) * 100:0}%");
+            var staged = await LauncherUpdate.DownloadAsync(_catalog.Self, AuthClient.SelfUpdate(_settings, _catalog.DownloadServer),
+                                                            CurrentVersion(), progress);
+            button.Text = "Installing…";
+            string old;
+            try { old = await Task.Run(() => LauncherUpdate.Install(staged)); }
+            catch (UpdateLocationException ex)
+            {
+                var dest = await Task.Run(() => LauncherUpdate.SaveToDownloads(staged));
+                Log.Write($"self-update: {ex.Message} — saved {dest}");
+                _updateBannerText.Text = $"{ex.Message} {staged.Tag} is saved to Downloads ({Path.GetFileName(dest)}) — quit JB Theatre Tools and replace it.";
+                return;
+            }
+            // Installed. Restart now unless something started meanwhile (an install, show lock, a dialog that's open)
+            // — then the new version opens next time.
+            if (Locked || LauncherBusy() || OwnedForms.Length > 0 || Application.OpenForms.Count > 1)
+            {
+                _updateBannerText.Text = $"JB Theatre Tools {staged.Tag} is installed — it opens next time you start JB Theatre Tools.";
+                button.Visible = false;
+                return;
+            }
+            var exe = Environment.ProcessPath!;
+            Log.Write($"self-update: starting {staged.Tag}");
+            button.Text = "Starting…";
+            SelfReplace.StartResult started;
+            try { started = await LauncherUpdate.StartNewAsync(exe, old, TimeSpan.FromSeconds(45)); }
+            catch (Exception ex)
+            {
+                Log.Write($"self-update: couldn't start the new version: {ex.Message}");
+                _updateBannerText.Text = $"JB Theatre Tools {staged.Tag} is installed — close this window and start JB Theatre Tools again.";
+                button.Visible = false;
+                return;
+            }
+            if (started == SelfReplace.StartResult.Quit)
+            {
+                // The new build quit before its window came up: put this version back so the launcher still opens.
+                bool back = await Task.Run(() => SelfReplace.RollBack(exe, old));
+                Log.Write($"self-update: {staged.Tag} quit at start-up — {(back ? "rolled back" : "roll back FAILED")}");
+                MessageBox.Show(this, back
+                        ? $"JB Theatre Tools {staged.Tag} didn't start on this PC, so this version (v{CurrentVersion()}) has been kept. Nothing else changed."
+                        : $"JB Theatre Tools {staged.Tag} didn't start on this PC, and the previous version couldn't be put back automatically. It's saved beside the launcher as {Path.GetFileName(old)}.",
+                    "Update JB Theatre Tools", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            _reallyQuit = true;   // the new launcher is up (or still starting after 45 s): this one steps aside
+            Close();
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"self-update failed: {ex.Message}");
+            MessageBox.Show(this, ex.Message, "Update failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _launcherUpdating = false;
+            if (!IsDisposed) { button.Text = prev; button.Enabled = true; }
+        }
+    }
+
+    /// <summary>A batch or any row install is running (a launcher restart would end it).</summary>
+    private bool LauncherBusy() => _batchRunning || _rows.Any(r => r.IsBusy);
+
     private async Task CheckLauncherUpdateAsync()
     {
         var s = _catalog.Self;
@@ -2123,6 +2196,7 @@ public sealed class MainForm : Form
 
     private void OpenSettings()
     {
+        if (_launcherUpdating) return;   // the update restarts the launcher: no dialog open meanwhile
         bool prevInstallLoc = _settings.InstallToApplications;
         bool prevLock = _settings.ShowLock;
         using var dlg = new SettingsDialog(_settings, _catalog.Self, CurrentVersion(), _catalog.DownloadServer, new SettingsExtras(
@@ -2152,6 +2226,12 @@ public sealed class MainForm : Form
         }
         ApplyLock();
         UpdateTrayVisibility();
+        if (dlg.RequestedLauncherUpdate)
+        {
+            _updateBannerText.Text = "Updating JB Theatre Tools…";
+            _updateBanner.Visible = true;   // the progress shows on its button
+            _ = UpdateLauncherAsync();
+        }
     }
 
     /// <summary>When the install-location setting changes, offer to add/remove shortcuts for ALL
@@ -2682,7 +2762,7 @@ public sealed class MainForm : Form
 
     // --- Helpers ---
 
-    private static string CurrentVersion()
+    internal static string CurrentVersion()
     {
         // InformationalVersion carries a dev build's full tag (build-win.sh stamps JBTT_VERSION, e.g.
         // 1.30.0-dev.1); the SDK may append "+<commit>", which is dropped. Else the numeric assembly version.

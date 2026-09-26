@@ -9,6 +9,9 @@ public sealed record SettingsExtras(
 
 public sealed class SettingsDialog : Form
 {
+    /// <summary>The user pressed Update (launcher update): the main window runs it once Settings has closed.</summary>
+    public bool RequestedLauncherUpdate { get; private set; }
+
     private readonly AppSettings _settings;
     private readonly SelfInfo? _selfInfo;
     private readonly string _currentVersion;
@@ -245,27 +248,16 @@ public sealed class SettingsDialog : Form
         _check.Location = new Point(280, 352);
         _check.Click += async (_, _) => await CheckLauncherAsync();
 
-        _viewRelease.Text = "Download Update";
+        _viewRelease.Text = "Update";
         _viewRelease.AutoSize = true;
         _viewRelease.Visible = false;
-        _viewRelease.Click += async (_, _) =>
+        // The update restarts the launcher, so it runs from the main window: Settings closes (keeping its changes) and
+        // hands over — the main window's banner shows the download and its outcome.
+        _viewRelease.Click += (_, _) =>
         {
             if (_selfInfo == null) return;
-            _viewRelease.Enabled = false;
-            SetResult("Downloading…", Theme.Sub(Theme.CurrentDark));
-            try
-            {
-                var dest = await LauncherUpdate.DownloadAndRevealAsync(_selfInfo, AuthClient.SelfUpdate(_settings, _downloadServer), _currentVersion);
-                SetResult($"Saved {Path.GetFileName(dest)} to Downloads — quit & replace.", Theme.Ok);
-            }
-            catch (Exception ex)
-            {
-                SetResult(ex.Message, Theme.Danger);
-            }
-            finally
-            {
-                _viewRelease.Enabled = true;
-            }
+            RequestedLauncherUpdate = true;
+            DialogResult = DialogResult.OK;
         };
 
         _checkResult.AutoSize = false;

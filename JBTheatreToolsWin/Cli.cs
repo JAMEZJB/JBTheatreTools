@@ -24,7 +24,7 @@ public static class Cli
     public static readonly HashSet<string> Commands = new()
     {
         "--list", "--installed", "--releases", "--install", "--uninstall",
-        "--launch", "--self-check", "--help", "-h",
+        "--launch", "--self-check", "--self-update", "--help", "-h",
     };
 
     /// <summary>Download-server override (`--server` / `--server-pass`): when set, every client the
@@ -86,7 +86,7 @@ public static class Cli
         }
         // Only verbs that talk to GitHub need credentials. Local verbs (--installed / --uninstall /
         // --launch) must never touch the Credential Manager / Keychain-equivalent (audit F14).
-        var needsAuth = cmd is not ("--installed" or "--uninstall" or "--launch");
+        var needsAuth = cmd is not ("--installed" or "--uninstall" or "--launch" or "--self-update");
         if (needsAuth) token ??= SafeLoadToken();
 
         Catalog catalog;
@@ -104,7 +104,10 @@ public static class Cli
         var builtInServer = AuthClient.ResolveServerUrl(settings, catalog.DownloadServer);
         if (!needsAuth)
         {
-            // Local verb — dispatch with no credentials resolved.
+            // Local verb — dispatch with no credentials resolved. --self-update takes only what's on the command line
+            // (--server/--server-pass, --token/GITHUB_TOKEN): the launcher's repo is public, so it never reads the saved
+            // passphrase by itself.
+            if (cmd == "--self-update" && (_serverBase != null || _serverPass != null)) _serverBase ??= builtInServer;
         }
         else if (_serverBase != null || _serverPass != null)
         {
@@ -133,6 +136,7 @@ public static class Cli
             "--uninstall"  => Uninstall(catalog, positional.FirstOrDefault()),
             "--launch"     => Launch(catalog, positional.FirstOrDefault()),
             "--self-check" => await SelfCheckAsync(catalog, token),
+            "--self-update" => await SelfUpdateAsync(catalog, settings, token),
             _              => PrintHelpReturn(),
         };
     }
@@ -299,6 +303,41 @@ public static class Cli
         catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
     }
 
+    /// <summary>--self-update: the launcher's in-place update, headless — this exe is replaced where it is (same name),
+    /// verified like every download; no restart (the next start runs the new version). The launcher's repo is public:
+    /// credentials are optional and only taken from the command line.</summary>
+    private static async Task<int> SelfUpdateAsync(Catalog catalog, AppSettings settings, string? token)
+    {
+        var s = catalog.Self;
+        if (s == null) { Console.Error.WriteLine("error: no `self` entry in catalog."); return 1; }
+        if (settings.ShowLock)
+        {
+            Console.Error.WriteLine("error: show lock is on — turn it off in JB Theatre Tools first.");
+            return 1;
+        }
+        Versions.DevChannel = settings.DevChannel;   // the same pick the window makes on this machine
+        var current = MainForm.CurrentVersion();
+        try
+        {
+            // Credentials given on the command line (a relay-only network, or GitHub's anonymous rate limit) are used.
+            var staged = await LauncherUpdate.DownloadAsync(s, HasAuth(token) ? MakeClient(token) : new GitHubClient((string?)null), current);
+            LauncherUpdate.Install(staged);
+            Console.WriteLine($"Updated JB Theatre Tools v{current} -> {staged.Tag} in place: {Environment.ProcessPath}");
+            Console.WriteLine("The next start runs it. The previous version is kept beside it as a .old file (delete it any time).");
+            return 0;
+        }
+        catch (Exception ex) when (ex.Message == "You're up to date.")
+        {
+            Console.WriteLine($"JB Theatre Tools v{current} is up to date.");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"error: {ex.Message}");
+            return 1;
+        }
+    }
+
     private static async Task<int> SelfCheckAsync(Catalog catalog, string? token)
     {
         var s = catalog.Self;
@@ -346,6 +385,7 @@ public static class Cli
           --uninstall <id>       Remove an installed app
           --launch    <id>       Launch an installed app
           --self-check           Check whether a newer launcher release exists
+          --self-update          Update this launcher in place (verified; the next start runs it)
           --help                 This help
 
         Options: --token <pat>       GitHub PAT (else $GITHUB_TOKEN, else Credential Manager)

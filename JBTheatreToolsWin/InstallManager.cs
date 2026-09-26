@@ -587,8 +587,11 @@ public sealed class InstallManager
     /// or (verify-if-present) <c>NoManifest</c> / <c>AssetNotListed</c> when there's nothing to check
     /// against: the caller proceeds but should report it as unverified.
     /// </summary>
+    /// <param name="onVerifiedHash">Given the SHA-256 the SIGNED manifest lists for the asset, when the result is
+    /// Verified — so a later step can re-check a copy against the signed value, not against a re-read of the file.</param>
     public static async Task<VerifyResult> VerifyDownloadAsync(string file, ReleaseAsset asset, ReleaseInfo release,
-                                                               string owner, string repo, GitHubClient client)
+                                                               string owner, string repo, GitHubClient client,
+                                                               Action<string>? onVerifiedHash = null)
     {
         var fi = new FileInfo(file);
         if (asset.Size > 0 && fi.Exists && fi.Length != asset.Size)
@@ -636,6 +639,7 @@ public sealed class InstallManager
             TryDelete(file);
             throw new Exception($"Checksum mismatch for {asset.Name} — the download does not match the release's SHA256SUMS. Aborting install.");
         }
+        if (signed) onVerifiedHash?.Invoke(expected.ToLowerInvariant());
         return signed ? VerifyResult.Verified : VerifyResult.Unsigned;
     }
 
