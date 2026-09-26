@@ -17,7 +17,7 @@ import Foundation
 enum CLI {
     static let commands: Set<String> = [
         "--list", "--installed", "--releases", "--install", "--uninstall",
-        "--launch", "--self-check", "--self-download", "--code-id", "--help", "-h",
+        "--launch", "--self-check", "--self-download", "--self-update", "--code-id", "--help", "-h",
     ]
 
     /// Download-server override (`--server` / `--server-pass`): when set, every client the CLI builds
@@ -76,7 +76,8 @@ enum CLI {
         // Only verbs that talk to GitHub need credentials. Local verbs (--installed / --uninstall /
         // --launch / --code-id) must never touch the Keychain: a read there can raise an OS prompt that
         // a headless run can't answer (audit F14).
-        let needsAuth = !["--installed", "--uninstall", "--launch", "--code-id"].contains(cmd)
+        // --self-update: the launcher's repo is public — only credentials given on the command line are used.
+        let needsAuth = !["--installed", "--uninstall", "--launch", "--code-id", "--self-update"].contains(cmd)
         if needsAuth, token == nil { token = TokenStore.load() }
 
         let catalog: Catalog
@@ -114,6 +115,7 @@ enum CLI {
         case "--launch":     launch(catalog: catalog, id: positional.first)
         case "--self-check": selfCheck(catalog: catalog, token: token)
         case "--self-download": selfDownload(catalog: catalog, token: token, dir: positional.first)
+        case "--self-update": selfUpdate(catalog: catalog, token: token)
         case "--code-id":    print(CodeIdentity.current())
         default:             printHelp()
         }
@@ -320,6 +322,38 @@ enum CLI {
         }
     }
 
+    /// --self-update: the launcher's in-place update, headless — this app bundle is replaced where it is (same name),
+    /// verified like every download; no restart (the next start runs the new version and bins the old copy).
+    private static func selfUpdate(catalog: Catalog, token: String?) {
+        guard let s = catalog.selfInfo else { fputs("error: no `self` entry in catalog.\n", stderr); exit(1) }
+        if UserDefaults.standard.bool(forKey: AppState.showLockKey) {
+            fputs("error: show lock is on — turn it off in JB Theatre Tools (⌘L) first.\n", stderr); exit(1)
+        }
+        let current = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
+        let bundle = Bundle.main.bundleURL.resolvingSymlinksInPath()   // a symlinked install: replace the real bundle
+        guard bundle.pathExtension == "app" else { fputs("error: run this from inside the JB Theatre Tools app.\n", stderr); exit(1) }
+        if SelfUpdate.isTranslocated(bundle) { fputs("error: \(SelfUpdate.Failure.translocated.localizedDescription)\n", stderr); exit(1) }
+        let client = hasAuth(token: token) ? makeClient(token: token) : GitHubClient(token: nil)
+        runBlocking {
+            do {
+                // The same pick the window makes on this Mac (Development builds on or off).
+                let releases = try await client.releases(owner: s.owner, repo: s.repo)
+                let dev = AppState.devChannel
+                let pick = AppState.latest(from: releases, devChannel: dev)
+                guard let target = pick, AppState.versionIsNewer(target.tagName, than: current)
+                        || (!dev && AppState.isDevTag(current) && !VersionDisplay.equal(target.tagName, current)) else {
+                    print("JB Theatre Tools v\(current) is up to date."); return
+                }
+                let staged = try await SelfUpdate.download(s, target: target, client: client)
+                defer { SelfUpdate.discard(staged) }
+                let old = try SelfUpdate.swap(newBundle: staged.bundle, into: bundle)
+                AppLog.shared.log("cli: self-update \(current) -> \(target.tagName) at \(bundle.path)")
+                print("Updated JB Theatre Tools v\(current) -> \(target.tagName) in place: \(bundle.path)")
+                print("The next start runs it. The previous version is kept beside it as \(old.lastPathComponent) (delete it any time).")
+            } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
+        }
+    }
+
     // MARK: - Helpers
 
     private static func appFor(_ id: String?, _ catalog: Catalog) -> CatalogApp? {
@@ -338,6 +372,7 @@ enum CLI {
           --uninstall <id>       Remove an installed app
           --launch    <id>       Launch an installed app
           --self-check           Check whether a newer launcher release exists
+          --self-update          Update this launcher in place (verified; the next start runs it)
           --help                 This help
 
         Options: --token <pat>       GitHub PAT (else $GITHUB_TOKEN, else Keychain)

@@ -163,6 +163,9 @@ struct ContentView: View {
             Task { await updateAllAction() }
         }
         .onAppear {
+            // After an in-place update: tell the previous launcher this one is up (it then quits) and bin its old bundle.
+            SelfUpdate.readAfterUpdate()
+            SelfUpdate.started()
             // AppKit gives the first text field (Find apps) the keyboard at launch; the launcher opens with nothing
             // focused, as it did before it had a find field (⌘F focuses it).
             DispatchQueue.main.async {
@@ -174,6 +177,11 @@ struct ContentView: View {
             // Dev harness (see main.swift): `JBTT_OPEN_SETTINGS=1` opens Settings at launch so JBTT_SNAPSHOT can capture it.
             if ProcessInfo.processInfo.environment["JBTT_OPEN_SETTINGS"] == "1" { showSettings = true }
             await firstRefresh()
+            // Dev harness: `JBTT_AUTO_SELF_UPDATE=1` runs the launcher's in-place update as if Update had been pressed.
+            if ProcessInfo.processInfo.environment["JBTT_AUTO_SELF_UPDATE"] == "1" {
+                _ = await state.checkLauncherUpdate()
+                await state.updateLauncher()
+            }
         }
     }
 
@@ -475,12 +483,13 @@ struct ContentView: View {
             }
             Spacer()
             Button {
-                Task { await state.downloadLauncherUpdate() }
+                Task { await state.updateLauncher() }
             } label: {
                 if state.launcherDownloading { ProgressView().controlSize(.small) }
-                else { Text("Download Update") }
+                else { Text(state.launcherPendingRestart != nil ? "Restart" : "Update") }
             }
             .disabled(state.launcherDownloading)
+            .help("Download, verify and install the new version in place, then restart — open apps keep running")
         }
         .padding(12)
         .bannerTint(.jbAccent)

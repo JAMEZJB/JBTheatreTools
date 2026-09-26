@@ -69,11 +69,14 @@ The same features on every launcher (the few that don't apply to Android are mar
   settings, every app's state and recent log lines. The token and passphrase are never included, and
   token-shaped strings in log lines are masked — read the report before sending it, as log lines can
   contain file paths.
-- **The launcher updates itself** — on Windows, Update in the banner (or Settings) downloads and verifies the new build
-  like any app, puts it in place of the running launcher — same folder, same file name, so shortcuts and pins keep
-  working — and restarts into it; apps that are open keep running. It waits while installs run and under show lock. If
-  Windows won't let the launcher change its own folder, the verified build is saved to Downloads instead. The command
-  line does the same with `--self-update`. Android updates itself too; on macOS the new build is saved to Downloads.
+- **The launcher updates itself** — Update in the banner (or Settings) downloads and verifies the new build like any
+  app, puts it in place of the running launcher — same folder, same name, so the Dock, Launchpad, shortcuts and pins
+  keep working — and restarts into it; apps that are open keep running. If the new version doesn't start, the old one is
+  put back. It waits while installs run and under show lock. Once the new version has started, the previous one goes to
+  the Bin (macOS) or is deleted (Windows); if it didn't restart straight away (installs were running, or it was updated
+  from the command line) the previous version stays beside it as "….old" until the next update — delete it any time. If the launcher can't change its own folder — a standard user in /Applications, a copy
+  macOS runs straight from a download, Program Files without admin rights — the verified build is saved to Downloads
+  instead. The command line does the same with `--self-update`. Android updates itself too.
 - **What's new in the launcher** — after the launcher updates itself it offers, once, the notes of every
   release since the version you had.
 

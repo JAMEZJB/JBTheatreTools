@@ -220,7 +220,9 @@ final class AppState: ObservableObject {
     /// Set to the latest tag when a newer launcher release exists (drives the in-app banner).
     @Published var launcherUpdateAvailable: String?
     @Published var launcherDownloading = false
-    /// Set after a self-update download (e.g. "Saved to Downloads — quit & replace.").
+    /// The new launcher is in place but hasn't been started yet: Update becomes Restart, which never swaps again.
+    @Published private(set) var launcherPendingRestart: (tag: String, old: URL)?
+    /// The launcher update's progress / outcome line (banner + Settings).
     @Published var launcherDownloadMessage: String?
     /// Drives the "after an update, macOS will ask for your password" explainer sheet.
     @Published var showKeychainExplainer = false
@@ -1172,8 +1174,8 @@ final class AppState: ObservableObject {
     @discardableResult
     private func runSlots(_ work: [Slot], label: String, unattended: Bool = false) async -> [(name: String, version: String)] {
         var done: [(name: String, version: String)] = []
-        guard !batchRunning else {
-            AppLog.shared.log("\(label): another batch is running — not started")
+        guard !batchRunning, !launcherDownloading else {
+            AppLog.shared.log("\(label): \(batchRunning ? "another batch is running" : "the launcher is updating") — not started")
             return done
         }
         batchRunning = true
@@ -1425,8 +1427,11 @@ final class AppState: ObservableObject {
     /// its SHA-256 must match the listed value. A mismatch deletes the file and throws. Returns
     /// `.verified` on a checksum match, or (verify-if-present) `.noManifest` / `.assetNotListed` when
     /// there's nothing to check against — the caller proceeds but should report it as unverified.
+    /// `onVerifiedHash` gets the SHA-256 the SIGNED manifest lists for the asset when the result is `.verified`, so a later
+    /// step can re-check against the signed value rather than a re-read of the file.
     nonisolated static func verifyDownload(_ file: URL, asset: ReleaseAsset, release: ReleaseInfo,
-                                           app: CatalogApp, client: GitHubClient) async throws -> VerifyResult {
+                                           app: CatalogApp, client: GitHubClient,
+                                           onVerifiedHash: ((String) -> Void)? = nil) async throws -> VerifyResult {
         let fm = FileManager.default
         if asset.size > 0,
            let attrs = try? fm.attributesOfItem(atPath: file.path),
@@ -1463,6 +1468,9 @@ final class AppState: ObservableObject {
         let text = String(decoding: sumsData, as: UTF8.self)
         do {
             guard try InstallManager.verify(file: file, assetName: asset.name, sums: text) else { return .assetNotListed }
+            if signed, let expected = InstallManager.expectedSHA256(forAsset: asset.name, inSums: text) {
+                onVerifiedHash?(expected.lowercased())
+            }
             return signed ? .verified : .unsigned
         } catch {
             try? fm.removeItem(at: file)
@@ -1522,6 +1530,8 @@ final class AppState: ObservableObject {
                                lenient: Bool = false) async -> Downloaded? {
         guard let app = rows.first(where: { $0.id == id })?.app else { return nil }
         guard !blockedByLock("install \(id)") else { return nil }
+        // The launcher is updating itself (it restarts at the end): nothing new starts meanwhile.
+        guard !launcherDownloading else { AppLog.shared.log("install \(id): not started — the launcher is updating"); return nil }
         await ensureKeychainExplained()
         guard let client = activeClient() else { return nil }
         // Address the row BY ID after every `await` — a concurrent drag/Move can permute `rows` while
@@ -1743,7 +1753,7 @@ final class AppState: ObservableObject {
     /// runs off the main actor with the row busy, then the row is updated. `uninstall(_:)` below stays
     /// synchronous for the CLI.
     func uninstallAsync(_ id: String) async {
-        guard let row = rows.first(where: { $0.id == id }), !blockedByLock("uninstall \(id)") else { return }
+        guard let row = rows.first(where: { $0.id == id }), !blockedByLock("uninstall \(id)"), !launcherDownloading else { return }
         let key = installKey(for: row.app)
         let fromVersion = InstallManager.shared.installedVersion(key)
         let name = row.displayName
@@ -2557,42 +2567,98 @@ final class AppState: ObservableObject {
         return Self.isDevTag(current) ? latest : nil
     }
 
-    /// Downloads the launcher's latest build to ~/Downloads and reveals it in Finder.
-    /// (We don't self-replace a running .app — the user quits and swaps it in.)
-    func downloadLauncherUpdate() async {
-        guard let s = selfInfo else { return }
-        launcherDownloading = true
-        launcherDownloadMessage = nil
+    /// Updates the launcher in place: download + verify, unpack, swap the running bundle for the new one (same folder and
+    /// name, so the Dock and Launchpad keep finding it) and restart into it — apps that are open keep running. Refused
+    /// under show lock and while installs run (the restart would end them). If the new build quits before its window
+    /// shows, this version is put back. A folder this user can't change (or a translocated copy): saved to Downloads.
+    func updateLauncher() async {
+        if launcherPendingRestart != nil { await restartLauncher(); return }   // already swapped: just restart
+        guard let s = selfInfo, !launcherDownloading else { return }
+        if showLock { launcherDownloadMessage = "Show lock is on — turn it off to update JB Theatre Tools."; return }
+        if batchRunning || rows.contains(where: { $0.busy }) {
+            launcherDownloadMessage = "Installs are in progress. Updating restarts JB Theatre Tools, so let them finish (or stop them) first."
+            return
+        }
+        launcherDownloading = true   // also holds off new installs until this is done (see downloadPhase / runSlots)
+        launcherDownloadMessage = "Downloading…"
         defer { launcherDownloading = false }
-
         let client = cachedOnlyClient()   // public repo; no forced Keychain read
+        let staged: SelfUpdate.Staged
         do {
-            guard let info = try await launcherTarget(client: client, owner: s.owner, repo: s.repo) else {
+            guard let target = try await launcherTarget(client: client, owner: s.owner, repo: s.repo) else {
                 launcherDownloadMessage = "You're up to date."
                 return
             }
-            guard let asset = info.assets.first(where: { $0.name == s.macAssetName }) else {
-                launcherDownloadMessage = "No macOS asset in \(info.tagName)."
-                return
-            }
-            let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
-            let dest = downloads.appendingPathComponent(PathSafe.component(asset.name))
-            try await client.downloadAsset(owner: s.owner, repo: s.repo, assetId: asset.id, to: dest)
-            // Strict verify (this is a current release): size + suite-signed SHA256SUMS + hash, through
-            // the same path every app install uses. A bad hash or bad signature throws (and deletes the
-            // file); anything short of `.verified` is refused too.
-            let verification = try await Self.verifyDownload(dest, asset: asset, release: info,
-                                                             app: CatalogApp.forSelf(s), client: client)
-            guard verification == .verified else {
-                try? FileManager.default.removeItem(at: dest)
-                launcherDownloadMessage = "Couldn't verify the update — \(Self.strictFailureReason(verification, assetName: asset.name)). Not saved."
-                return
-            }
-            NSWorkspace.shared.activateFileViewerSelecting([dest])
-            launcherDownloadMessage = "Saved \(asset.name) to your Downloads folder — quit JB Theatre Tools and replace it."
+            staged = try await SelfUpdate.download(s, target: target, client: client)
         } catch {
-            launcherDownloadMessage = "Download failed: \(error.localizedDescription)"
+            launcherDownloadMessage = "Update failed: \(error.localizedDescription)"
+            AppLog.shared.log("self-update: \(error.localizedDescription)")
+            return
         }
+        // A symlinked install: the real bundle is the one to replace.
+        let current = Bundle.main.bundleURL.resolvingSymlinksInPath()
+        func fallBackToDownloads(_ why: String) {
+            if let dest = try? SelfUpdate.saveToDownloads(staged) {
+                launcherDownloadMessage = "\(why) \(staged.tag) is saved to your Downloads folder (\(dest.lastPathComponent)) — quit JB Theatre Tools and replace it."
+            } else {
+                launcherDownloadMessage = why
+            }
+            SelfUpdate.discard(staged)
+        }
+        if SelfUpdate.isTranslocated(current) {
+            fallBackToDownloads(SelfUpdate.Failure.translocated.localizedDescription)
+            return
+        }
+        launcherDownloadMessage = "Installing…"
+        let old: URL
+        do {
+            old = try await Task.detached(priority: .userInitiated) { try SelfUpdate.swap(newBundle: staged.bundle, into: current) }.value
+            AppLog.shared.log("self-update: \(staged.tag) installed at \(current.path) (old copy \(old.lastPathComponent))")
+        } catch let failure as SelfUpdate.Failure {
+            fallBackToDownloads(failure.localizedDescription)
+            return
+        } catch {
+            launcherDownloadMessage = "Update failed — nothing was replaced: \(error.localizedDescription)"
+            AppLog.shared.log("self-update: swap failed: \(error.localizedDescription)")
+            SelfUpdate.discard(staged)
+            return
+        }
+        SelfUpdate.discard(staged)
+        launcherPendingRestart = (staged.tag, old)
+        launcherDownloading = false
+        await restartLauncher()
+    }
+
+    /// Starts the new launcher (already in place) and steps aside once it's up. Waits while installs run; if the new
+    /// build quits — or macOS won't open it — this version is put back. Never swaps again (see `launcherPendingRestart`).
+    func restartLauncher() async {
+        guard let (tag, old) = launcherPendingRestart, !launcherDownloading else { return }
+        if showLock || batchRunning || rows.contains(where: { $0.busy }) {
+            launcherDownloadMessage = "JB Theatre Tools \(tag) is installed — press Restart when the installs have finished (or it opens next time)."
+            return
+        }
+        launcherDownloading = true   // no installs start while the hand-over runs
+        defer { launcherDownloading = false }
+        let current = Bundle.main.bundleURL.resolvingSymlinksInPath()
+        launcherDownloadMessage = "Starting the new version…"
+        AppLog.shared.log("self-update: starting \(tag)")
+        let ready = SelfUpdate.stagingDir.appendingPathComponent("\(ProcessInfo.processInfo.processIdentifier)-started")
+        var result: SelfUpdate.StartResult
+        do { result = try await SelfUpdate.startAndWait(app: current, old: old, ready: ready, timeout: 45) }
+        catch {
+            AppLog.shared.log("self-update: macOS wouldn't open the new version: \(error.localizedDescription)")
+            result = .quit   // it can't open, so put this version back
+        }
+        if result == .quit {
+            let back = await Task.detached { SelfUpdate.rollBack(current: current, old: old) }.value
+            AppLog.shared.log("self-update: \(tag) didn't start — \(back ? "rolled back" : "roll back FAILED")")
+            launcherPendingRestart = nil
+            launcherDownloadMessage = back
+                ? "JB Theatre Tools \(tag) didn't start on this Mac, so this version (v\(currentVersion)) has been kept."
+                : "JB Theatre Tools \(tag) didn't start on this Mac, and the previous version couldn't be put back automatically — it's beside the app as \(old.lastPathComponent)."
+            return
+        }
+        NSApp.terminate(nil)   // the new launcher is up (or still starting after 45 s): this one steps aside
     }
 }
 

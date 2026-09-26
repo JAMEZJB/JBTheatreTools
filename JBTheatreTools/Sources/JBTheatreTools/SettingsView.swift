@@ -457,9 +457,10 @@ struct SettingsView: View {
                 HStack(spacing: 8) {
                     Text("v\(latest) is available.").font(JBFont.small).foregroundStyle(Color.jbInfo)
                     Button {
-                        Task { await state.downloadLauncherUpdate() }
+                        Task { await state.updateLauncher() }
                     } label: {
-                        if state.launcherDownloading { Text("Downloading…") } else { Text("Download Update") }
+                        if state.launcherDownloading { Text("Updating…") }
+                        else { Text(state.launcherPendingRestart != nil ? "Restart" : "Update") }
                     }
                     .font(JBFont.small)
                     .disabled(state.launcherDownloading)

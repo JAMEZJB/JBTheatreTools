@@ -484,6 +484,9 @@ final class InstallManager: @unchecked Sendable {
 
     // MARK: - Helpers
 
+    /// Unpacks a zip with `ditto` (also the launcher's own self-update).
+    func dittoExtract(_ zip: URL, to dir: URL) throws { try ditto(extract: zip, to: dir) }
+
     private func ditto(extract zip: URL, to dir: URL) throws {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
@@ -497,7 +500,7 @@ final class InstallManager: @unchecked Sendable {
     /// archive contains more than one bundle, prefer the one whose name matches the catalog name, then
     /// fall back to alphabetical order so the choice is **deterministic** (rather than depending on the
     /// unspecified order of `contentsOfDirectory`, which could install a helper bundle non-reproducibly).
-    private func appBundle(in dir: URL, preferring expectedName: String) -> URL? {
+    func appBundle(in dir: URL, preferring expectedName: String) -> URL? {
         guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return nil }
         let bundles = items
             .filter { $0.pathExtension == "app" && $0.lastPathComponent != "__MACOSX" }
