@@ -76,11 +76,23 @@ struct CatalogApp: Decodable, Identifiable, Sendable {
     }
 
     /// The macOS launcher installs the macOS build of each tool, preferring an arch-specific
-    /// build (macos-arm64 / macos-x64) when the catalog carries one, else the universal `macos`.
-    var macAssetName: String? { MacArch.pick(from: assets) }
+    /// build (macos-arm64 / macos-x64) when the catalog carries one, else the universal `macos` —
+    /// or the Intel build when this slot is set to run as Intel (see `MacArch`).
+    var macAssetName: String? { macAssetName(variantId: nil) }
 
     /// Variant-aware macOS asset name (the selected variant's per-arch build).
-    func macAssetName(variantId: String?) -> String? { MacArch.pick(from: assets(variantId: variantId)) }
+    func macAssetName(variantId: String?) -> String? { macPick(variantId: variantId)?.name }
+
+    /// The build this Mac installs for a slot, and whether it runs translated (Rosetta).
+    func macPick(variantId: String?) -> MacArch.Pick? {
+        MacArch.pick(from: assets(variantId: variantId), appleSilicon: MacArch.isAppleSilicon,
+                     intel: MacArch.prefersIntel(installKey(variantId: variantId)))
+    }
+
+    /// "Run as Intel (Rosetta)" is offered for this slot: an Apple silicon Mac, and a build that can run either way.
+    func macCanChooseIntel(variantId: String?) -> Bool {
+        MacArch.canChoose(assets(variantId: variantId), appleSilicon: MacArch.isAppleSilicon)
+    }
 
     /// True when `variantId` is this app's default (first) variant, or the app has no variants.
     func isDefaultVariant(_ variantId: String?) -> Bool {
@@ -129,8 +141,76 @@ enum MacArch {
     /// Picks the best macOS asset: the arch-specific build for this Mac when present, else the
     /// universal `macos` build. Returns nil only when the catalog has no usable macOS asset.
     static func pick(from assets: [String: String]) -> String? {
-        let archKey = isAppleSilicon ? "macos-arm64" : "macos-x64"
-        return assets[archKey] ?? assets["macos"]
+        pick(from: assets, appleSilicon: isAppleSilicon, intel: false)?.name
+    }
+
+    /// One slot's build: the asset to install, and whether it runs translated by Rosetta.
+    struct Pick: Equatable {
+        let name: String
+        let translated: Bool
+    }
+
+    /// The build for this Mac. `intel` (Apple silicon only, the slot's "Run as Intel" choice): the Intel build when
+    /// the catalog has one, else the universal build (opened as Intel). Without it: the Apple silicon build, else the
+    /// universal one — and only when neither exists, the Intel build (translated). An Intel Mac takes the Intel or
+    /// universal build as before. Pure, for the tests.
+    static func pick(from assets: [String: String], appleSilicon: Bool, intel: Bool) -> Pick? {
+        guard appleSilicon else { return (assets["macos-x64"] ?? assets["macos"]).map { Pick(name: $0, translated: false) } }
+        if intel, let x = assets["macos-x64"] ?? assets["macos"] { return Pick(name: x, translated: true) }
+        if let native = assets["macos-arm64"] ?? assets["macos"] { return Pick(name: native, translated: false) }
+        return assets["macos-x64"].map { Pick(name: $0, translated: true) }
+    }
+
+    /// The choice exists only when the slot can run both ways: an Apple silicon build (or a universal one) AND an
+    /// Intel build (or a universal one). An Apple-silicon-only edition (Image Tools Full) never offers it.
+    static func canChoose(_ assets: [String: String], appleSilicon: Bool) -> Bool {
+        appleSilicon && (assets["macos-arm64"] != nil || assets["macos"] != nil)
+            && (assets["macos-x64"] != nil || assets["macos"] != nil)
+    }
+
+    /// Install slots set to run as Intel on this Mac (the row's ⋯ → "Run as Intel (Rosetta)"). Per Mac, not synced.
+    static let intelSlotsKey = "theatre.intelSlots"
+
+    static func prefersIntel(_ slotKey: String) -> Bool {
+        isAppleSilicon && (UserDefaults.standard.stringArray(forKey: intelSlotsKey) ?? []).contains(slotKey)
+    }
+
+    /// Rosetta 2 is installed (it's an optional macOS component on Apple silicon).
+    static var rosettaInstalled: Bool {
+        FileManager.default.fileExists(atPath: "/Library/Apple/usr/share/rosetta/rosetta")
+    }
+}
+
+/// Which CPU architectures an executable contains — read from its Mach-O header (thin or universal).
+enum MachO {
+    /// "x86_64" / "arm64" found in the header; empty when the data isn't a Mach-O executable.
+    static func archs(_ data: Data) -> Set<String> {
+        let b = [UInt8](data.prefix(4096))
+        guard b.count >= 8 else { return [] }
+        func be32(_ o: Int) -> UInt32? { o + 4 <= b.count ? b[o..<o + 4].reduce(0) { $0 << 8 | UInt32($1) } : nil }
+        func le32(_ o: Int) -> UInt32? { o + 4 <= b.count ? b[o..<o + 4].reversed().reduce(0) { $0 << 8 | UInt32($1) } : nil }
+        func name(_ cpu: UInt32) -> String? {
+            switch cpu { case 0x0100_0007: return "x86_64"; case 0x0100_000C: return "arm64"; default: return nil }
+        }
+        switch be32(0) {
+        case 0xCAFE_BABE, 0xCAFE_BABF:                     // universal: big-endian table of fat_arch(_64) entries
+            let stride = be32(0) == 0xCAFE_BABF ? 32 : 20
+            guard let n = be32(4), n > 0, n < 16 else { return [] }
+            return Set((0..<Int(n)).compactMap { i in be32(8 + i * stride).flatMap(name) })
+        case 0xCFFA_EDFE:                                   // thin 64-bit, little-endian on disk
+            return le32(4).flatMap(name).map { [$0] } ?? []
+        default:
+            return []
+        }
+    }
+
+    /// The architectures of an installed `.app` (its main executable). Empty when it can't be read.
+    static func archs(ofApp bundle: URL) -> Set<String> {
+        let exe = (NSDictionary(contentsOf: bundle.appendingPathComponent("Contents/Info.plist"))?["CFBundleExecutable"] as? String)
+            ?? bundle.deletingPathExtension().lastPathComponent
+        guard let h = FileHandle(forReadingAtPath: bundle.appendingPathComponent("Contents/MacOS/\(exe)").path) else { return [] }
+        defer { try? h.close() }
+        return archs((try? h.read(upToCount: 4096)) ?? Data())
     }
 }
 

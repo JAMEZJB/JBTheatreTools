@@ -84,12 +84,18 @@ public sealed class CatalogApp
         return Assets;
     }
 
-    /// <summary>The Windows asset name for this machine's architecture (default variant).</summary>
-    public string? WindowsAssetName => Assets.TryGetValue(Platform.AssetKey, out var n) ? n : null;
+    /// <summary>The build this PC installs for a variant's slot, and whether it runs emulated (x64 on an ARM64 PC):
+    /// see <see cref="Platform.Pick"/>. <paramref name="x64Slots"/> = the install slots set to use the x64 build
+    /// (settings.json <c>X64Slots</c>).</summary>
+    public (string Name, bool Emulated)? WindowsPick(string? variantId, IEnumerable<string> x64Slots)
+        => Platform.Pick(AssetsFor(variantId), Platform.OsIsArm64, x64Slots.Contains(InstallKey(variantId)));
 
-    /// <summary>Variant-aware Windows asset name for this machine's architecture.</summary>
-    public string? WindowsAsset(string? variantId)
-        => AssetsFor(variantId).TryGetValue(Platform.AssetKey, out var n) ? n : null;
+    /// <summary>Variant-aware Windows asset name for this PC (every install / update / verify decision goes through
+    /// this, so they all use the slot's chosen build).</summary>
+    public string? WindowsAsset(string? variantId, IEnumerable<string> x64Slots) => WindowsPick(variantId, x64Slots)?.Name;
+
+    /// <summary>"Use the x64 build (emulated)" is offered for this slot: an ARM64 PC, and both builds exist.</summary>
+    public bool CanChooseX64(string? variantId) => Platform.CanChoose(AssetsFor(variantId), Platform.OsIsArm64);
 
     /// <summary>True when <paramref name="variantId"/> is the default (first) variant, or the app has no variants.</summary>
     public bool IsDefaultVariant(string? variantId)

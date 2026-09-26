@@ -1838,6 +1838,8 @@ final class AppState: ObservableObject {
         guard let i = rows.firstIndex(where: { $0.id == id }), !rows[i].installing else { return }
         do {
             try InstallManager.shared.launch(installKey: installKey(for: rows[i].app))
+        } catch InstallError.rosettaMissing {
+            offerRosetta(rows[i].displayName)
         } catch {
             rows[i].status = .error(error.localizedDescription)
         }
@@ -2345,7 +2347,7 @@ final class AppState: ObservableObject {
             case .unknown: status = "unknown"
             }
             return .init(name: row.displayName, installed: row.installed, latest: row.latest, status: status,
-                         held: row.installed != nil && isHeld(row.id))
+                         held: row.installed != nil && isHeld(row.id), translated: row.installed != nil && runsTranslated(row))
         }
         return Diagnostics.build(.init(
             launcherVersion: currentVersion,
@@ -2387,11 +2389,138 @@ final class AppState: ObservableObject {
         do {
             try InstallManager.shared.launch(installKey: key)
             AppLog.shared.log("launched \(key) (menu bar)")
+        } catch InstallError.rosettaMissing {
+            // Name the edition the menu item opened (it may not be the row's selected one).
+            let app = rows.first(where: { $0.app.id == appId })?.app
+            let variant = key.split(separator: "@").dropFirst().first.map(String.init)
+            offerRosetta(app.map { $0.name + $0.variantSuffix(variant) } ?? key)
         } catch {
             inform("Couldn't Open", error.localizedDescription)
         }
     }
 
+    // MARK: - Run as Intel (Rosetta)
+
+    /// The row's selected edition runs translated: set to run as Intel, or it only has an Intel build.
+    func runsTranslated(_ row: Row) -> Bool {
+        row.app.macPick(variantId: selectedVariantId(row.app))?.translated ?? false
+    }
+
+    /// The ⋯ menu offers "Run as Intel (Rosetta)" for this row's selected edition.
+    func canChooseIntel(_ row: Row) -> Bool { row.app.macCanChooseIntel(variantId: selectedVariantId(row.app)) }
+
+    func prefersIntel(_ row: Row) -> Bool { MacArch.prefersIntel(installKey(for: row.app)) }
+
+    /// The edition has its own Intel build (switching reinstalls it) — else it's universal and only the way the
+    /// launcher opens it changes (Finder, the Dock and Launchpad still open it as Apple silicon).
+    func hasSeparateIntelBuild(_ row: Row) -> Bool {
+        row.app.assets(variantId: selectedVariantId(row.app))["macos-x64"] != nil
+    }
+
+    /// Switches the row's selected edition between Apple silicon and Intel. A universal app only changes how the
+    /// launcher opens it (`open --arch x86_64`); an edition with its own Intel build is reinstalled — the same version,
+    /// verified as usual — after asking. The choice is stored only once it has really taken effect, so a check or an
+    /// automatic update running meanwhile never acts on a choice the person may still cancel.
+    func setRunsAsIntel(_ id: String, _ on: Bool) async {
+        guard let row = rows.first(where: { $0.id == id }), !row.busy, !blockedByLock("run as Intel \(id)") else { return }
+        let slot = installKey(for: row.app)
+        guard MacArch.prefersIntel(slot) != on else { return }
+        let name = row.displayName
+        let kind = on ? "Intel" : "Apple Silicon"
+        defer { refreshRowAsset(id) }
+        // Intel needs Rosetta — sort that out first (installing an Intel build it then can't open helps nobody).
+        if on, !MacArch.rosettaInstalled {
+            guard await ensureRosetta(name) else { return }
+        }
+        let vid = selectedVariantId(row.app)
+        let target = MacArch.pick(from: row.app.assets(variantId: vid), appleSilicon: MacArch.isAppleSilicon, intel: on)?.name
+        // What's installed may already run this way (a universal app): then only the way it's opened changes.
+        guard let installed = row.installed, let path = InstallManager.shared.installedPath(slot),
+              !MachO.archs(ofApp: path).contains(on ? "x86_64" : "arm64") else {
+            storeIntel(slot, on)
+            AppLog.shared.log("run as \(kind): \(slot)")
+            return
+        }
+        guard !row.releases.isEmpty else {
+            inform("Use the \(kind) Build", "The list of \(name) releases hasn't loaded yet. Press Refresh, then try again.")
+            return
+        }
+        guard let rel = row.releases.first(where: { VersionDisplay.equal($0.tagName, installed) }),
+              rel.assets.contains(where: { $0.name == target }), Self.hasSignedManifest(rel),
+              Self.devChannel || !Self.isDevTag(rel.tagName) else {
+            inform("Use the \(kind) Build", "\(VersionDisplay.display(installed)) of \(name) has no verifiable \(kind) build, so it can't be switched. It can switch with a later version.")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Reinstall \(name) as the \(kind) build?"
+        alert.informativeText = on
+            ? "\(VersionDisplay.display(installed)) for Intel replaces the Apple silicon build. It runs through Rosetta — usually a little slower."
+            : "\(VersionDisplay.display(installed)) for Apple silicon replaces the Intel build."
+        let reinstall = alert.addButton(withTitle: "Reinstall")
+        let cancel = alert.addButton(withTitle: "Cancel")
+        reinstall.keyEquivalent = ""
+        cancel.keyEquivalent = "\r"   // Return keeps what's there: a reinstall takes a deliberate click
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // The world may have moved on while the question was up.
+        guard let now = rows.first(where: { $0.id == id }), !now.busy, !blockedByLock("run as Intel \(id)") else { return }
+        storeIntel(slot, on)
+        AppLog.shared.log("run as \(kind): reinstalling \(slot) \(installed)")
+        await install(id, tag: rel.tagName)
+        // Not reinstalled (failed, cancelled, "Quit and Update?" declined, show lock): keep the choice matching the disk.
+        if let p = InstallManager.shared.installedPath(slot), !MachO.archs(ofApp: p).contains(on ? "x86_64" : "arm64") {
+            storeIntel(slot, !on)
+            AppLog.shared.log("run as \(kind): \(slot) not reinstalled — choice put back")
+        }
+    }
+
+    private func storeIntel(_ slot: String, _ on: Bool) {
+        var list = Set(UserDefaults.standard.stringArray(forKey: MacArch.intelSlotsKey) ?? [])
+        if on { list.insert(slot) } else { list.remove(slot) }
+        UserDefaults.standard.set(list.sorted(), forKey: MacArch.intelSlotsKey)
+    }
+
+    /// Re-picks the row's latest release, asset and status after the build choice changed (the Intel build may be in
+    /// a different release), and refreshes the counts and sizes that depend on it.
+    private func refreshRowAsset(_ id: String) {
+        guard let i = rows.firstIndex(where: { $0.id == id }) else { return }
+        recomputeRow(i)
+        rows[i].objectWillChange.send()   // the version line's "Intel (Rosetta)" tag
+        bumpRows()
+    }
+
+    /// Opening an Intel build without Rosetta: offer to install it — never during a show (show lock).
+    func offerRosetta(_ name: String) {
+        if showLock {
+            inform("Rosetta Isn't Installed", "\(name) runs as Intel, which needs Rosetta. Turn off show lock to install it.")
+            return
+        }
+        Task {
+            if await ensureRosetta(name) { inform("Rosetta Installed", "Open \(name) again.") }
+        }
+    }
+
+    /// Asks to install Rosetta (macOS asks for an administrator's password) and waits for it. True when it's there.
+    func ensureRosetta(_ name: String) async -> Bool {
+        if MacArch.rosettaInstalled { return true }
+        let alert = NSAlert()
+        alert.messageText = "Install Rosetta?"
+        alert.informativeText = "\(name) runs as Intel, which needs Rosetta — and it isn't installed on this Mac. macOS asks for an administrator's password."
+        alert.addButton(withTitle: "Install Rosetta")
+        alert.addButton(withTitle: "Not Now")
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        AppLog.shared.log("rosetta: installing")
+        let detail: String = await Task.detached(priority: .userInitiated) {
+            var err: NSDictionary?
+            let script = NSAppleScript(source:
+                "do shell script \"/usr/sbin/softwareupdate --install-rosetta --agree-to-license\" with administrator privileges")
+            _ = script?.executeAndReturnError(&err)
+            return (err?[NSAppleScript.errorMessage] as? String) ?? ""
+        }.value
+        let ok = MacArch.rosettaInstalled
+        AppLog.shared.log("rosetta: \(ok ? "installed" : "not installed (\(detail.isEmpty ? "cancelled" : detail))")")
+        if !ok { inform("Rosetta Wasn't Installed", "Nothing changed. You can try again from the app's ⋯ menu.") }
+        return ok
+    }
     // MARK: - Launcher self-update
 
     /// Checks JBTheatreTools' own latest release against the running version.

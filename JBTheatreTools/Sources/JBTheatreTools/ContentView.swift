@@ -1217,6 +1217,10 @@ struct AppRowView: View, Equatable {
                 Text("·")
                 Text("dev build").foregroundStyle(Color.jbWarn)
             }
+            if row.installed != nil, state.runsTranslated(row) {
+                Text("·")
+                Text(state.hasSeparateIntelBuild(row) ? "Intel (Rosetta)" : "opens as Intel").foregroundStyle(Color.jbInfo)
+            }
         }
         .font(JBFont.labelRegular)
         .foregroundStyle(Color.jbText3)
@@ -1540,6 +1544,7 @@ struct AppMenuButtons: View {
             arrangeSection
             infoSection
             variantSection
+            archSection
             versionsSection
             installedSection
         }
@@ -1583,6 +1588,19 @@ struct AppMenuButtons: View {
             )) {
                 ForEach(vs) { Text($0.label).tag($0.id) }
             }
+        }
+    }
+
+    /// Apple silicon Macs: run this edition as Intel through Rosetta (a universal app is opened as Intel; an edition
+    /// with its own Intel build is reinstalled — asked first). Only offered when the edition can run both ways.
+    @ViewBuilder private var archSection: some View {
+        if state.canChooseIntel(row) {
+            Divider()
+            Toggle(state.hasSeparateIntelBuild(row) ? "Use the Intel Build (Rosetta)" : "Open as Intel (Rosetta)", isOn: Binding(
+                get: { state.prefersIntel(row) },
+                set: { on in Task { await state.setRunsAsIntel(row.id, on) } }
+            ))
+            .disabled(state.showLock || row.busy)
         }
     }
 

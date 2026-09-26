@@ -12,6 +12,8 @@ enum Diagnostics {
         let latest: String?
         let status: String
         let held: Bool
+        /// Runs translated (Intel through Rosetta / x64 emulated on ARM). Defaulted so existing callers stay valid.
+        var translated: Bool = false
     }
 
     struct Info {
@@ -56,6 +58,7 @@ enum Diagnostics {
         for a in i.apps {
             s += "  \(a.name) — installed \(a.installed ?? "—"), latest \(a.latest ?? "—"), \(a.status)"
             if a.held { s += ", held" }
+            if a.translated { s += ", runs translated" }
             s += "\n"
         }
         let tail = Array(i.logTail.suffix(logLines))

@@ -263,6 +263,45 @@ final class FeatureLogicTests: XCTestCase {
         XCTAssertFalse(AppState.hasSignedManifest(rel(["A.zip"])))
     }
 
+    func testMacBuildPick() {
+        let universal = ["macos": "A-macOS.zip"]
+        let split = ["macos-arm64": "A-Full-macOS-arm64.zip", "macos-x64": "A-Full-macOS-x64.zip"]
+        let armOnly = ["macos-arm64": "A-Full-macOS-arm64.zip"]
+        let intelOnly = ["macos-x64": "A-macOS-x64.zip"]
+        typealias P = MacArch.Pick
+        // Apple silicon, native
+        XCTAssertEqual(MacArch.pick(from: universal, appleSilicon: true, intel: false), P(name: "A-macOS.zip", translated: false))
+        XCTAssertEqual(MacArch.pick(from: split, appleSilicon: true, intel: false), P(name: "A-Full-macOS-arm64.zip", translated: false))
+        XCTAssertEqual(MacArch.pick(from: intelOnly, appleSilicon: true, intel: false), P(name: "A-macOS-x64.zip", translated: true))
+        // Apple silicon, set to run as Intel
+        XCTAssertEqual(MacArch.pick(from: universal, appleSilicon: true, intel: true), P(name: "A-macOS.zip", translated: true))
+        XCTAssertEqual(MacArch.pick(from: split, appleSilicon: true, intel: true), P(name: "A-Full-macOS-x64.zip", translated: true))
+        XCTAssertEqual(MacArch.pick(from: armOnly, appleSilicon: true, intel: true), P(name: "A-Full-macOS-arm64.zip", translated: false))
+        // Intel Mac: never translated, the choice doesn't apply
+        XCTAssertEqual(MacArch.pick(from: split, appleSilicon: false, intel: true), P(name: "A-Full-macOS-x64.zip", translated: false))
+        XCTAssertNil(MacArch.pick(from: armOnly, appleSilicon: false, intel: false))
+        // When the choice is offered
+        XCTAssertTrue(MacArch.canChoose(universal, appleSilicon: true))
+        XCTAssertTrue(MacArch.canChoose(split, appleSilicon: true))
+        XCTAssertFalse(MacArch.canChoose(armOnly, appleSilicon: true))
+        XCTAssertFalse(MacArch.canChoose(intelOnly, appleSilicon: true))
+        XCTAssertFalse(MacArch.canChoose(universal, appleSilicon: false))
+    }
+
+    func testMachOArchs() {
+        func be(_ v: UInt32) -> [UInt8] { [UInt8(v >> 24), UInt8(v >> 16 & 0xFF), UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF)] }
+        func le(_ v: UInt32) -> [UInt8] { be(v).reversed() }
+        func fatEntry(_ cpu: UInt32) -> [UInt8] { be(cpu) + be(0) + be(0) + be(0) + be(0) }
+        let fat = Data(be(0xCAFE_BABE) + be(2) + fatEntry(0x0100_0007) + fatEntry(0x0100_000C))
+        XCTAssertEqual(MachO.archs(fat), ["x86_64", "arm64"])
+        XCTAssertEqual(MachO.archs(Data(le(0xFEED_FACF) + le(0x0100_000C) + le(0))), ["arm64"])
+        XCTAssertEqual(MachO.archs(Data(le(0xFEED_FACF) + le(0x0100_0007) + le(0))), ["x86_64"])
+        XCTAssertEqual(MachO.archs(Data("#!/bin/sh\necho hi\n".utf8)), [])
+        XCTAssertEqual(MachO.archs(Data()), [])
+        // A real bundle on every Mac
+        XCTAssertFalse(MachO.archs(ofApp: URL(fileURLWithPath: "/System/Applications/Calculator.app")).isEmpty)
+    }
+
     func testDiskSpace() {
         XCTAssertEqual(DiskSpace.required(assetSize: 100_000_000, assetName: "NDITools-Full-macOS-arm64.zip"), 3 * 100_000_000 + DiskSpace.margin)
         XCTAssertEqual(DiskSpace.required(assetSize: 100_000_000, assetName: "DMXTools-Windows-x64.exe"), 2 * 100_000_000 + DiskSpace.margin)

@@ -10,7 +10,9 @@ public static class Diagnostics
 {
     public const int LogLines = 40;
 
-    public sealed record AppLine(string Name, string? Installed, string? Latest, string Status, bool Held);
+    /// <param name="Translated">Runs translated (x64 emulated on an ARM64 PC / Intel through Rosetta on the Mac).
+    /// Defaulted so existing callers stay valid.</param>
+    public sealed record AppLine(string Name, string? Installed, string? Latest, string Status, bool Held, bool Translated = false);
 
     public sealed record Info(
         string LauncherVersion, string Os, string Arch, string AuthMode, string? RelayHost, bool DevChannel,
@@ -42,6 +44,7 @@ public static class Diagnostics
             sb.Append("  ").Append(a.Name).Append(" — installed ").Append(a.Installed ?? "—")
               .Append(", latest ").Append(a.Latest ?? "—").Append(", ").Append(a.Status);
             if (a.Held) sb.Append(", held");
+            if (a.Translated) sb.Append(", runs translated");
             sb.Append('\n');
         }
         var tail = i.LogTail.Skip(Math.Max(0, i.LogTail.Count - LogLines)).ToList();

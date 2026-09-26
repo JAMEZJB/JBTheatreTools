@@ -45,11 +45,14 @@ enum InstallError: LocalizedError {
     case appRunning(String)
     /// Something the launcher didn't install already occupies the destination — don't destroy it (F6).
     case destinationOccupied(String)
+    /// The app is set to run as Intel (or only has an Intel build) and Rosetta isn't installed on this Mac.
+    case rosettaMissing
 
     var errorDescription: String? {
         switch self {
         case .noAppInZip: return "Downloaded archive did not contain a .app bundle."
         case .notInstalled: return "App is not installed."
+        case .rosettaMissing: return "This app runs as Intel, which needs Rosetta — and Rosetta isn't installed on this Mac."
         case .unzipFailed(let code): return "Could not extract the archive (ditto exit \(code))."
         case .sizeMismatch(let expected, let got):
             return "Download is \(got) bytes but the release lists \(expected). Aborting install."
@@ -365,9 +368,15 @@ final class InstallManager: @unchecked Sendable {
     /// Launches a specific install slot (the row's selected variant).
     func launch(installKey: String) throws {
         guard let path = installedPath(installKey) else { throw InstallError.notInstalled }
+        let archs = MachO.archs(ofApp: path)
+        // Set to run as Intel: a universal app is opened as Intel (`open --arch x86_64`); an Intel-only build runs
+        // through Rosetta by itself. Either way Rosetta must be there — say so rather than failing silently.
+        let asIntel = MacArch.prefersIntel(installKey) && archs.contains("x86_64") && archs.contains("arm64")
+        let translated = MacArch.isAppleSilicon && (asIntel || (archs == ["x86_64"]))
+        if translated, !MacArch.rosettaInstalled { throw InstallError.rosettaMissing }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        proc.arguments = [path.path]
+        proc.arguments = asIntel ? ["--arch", "x86_64", path.path] : [path.path]
         try proc.run()
     }
 

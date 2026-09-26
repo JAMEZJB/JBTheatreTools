@@ -48,6 +48,23 @@ internal static class DialogKit
         return TaskDialog.ShowDialog(owner, page) == off;
     }
 
+    /// <summary>"Reinstall … as the x64 / ARM64 build?" (the row's ⋯ → "Use the x64 build (emulated)"). Cancel is the
+    /// default (Enter) and what Esc or the close box answer. True = reinstall.</summary>
+    public static bool ConfirmReinstall(IWin32Window owner, string caption, string text)
+    {
+        var reinstall = new TaskDialogButton("Reinstall");
+        var cancel = TaskDialogButton.Cancel;
+        var page = new TaskDialogPage
+        {
+            Caption = caption,
+            Text = text,
+            Buttons = { reinstall, cancel },
+            DefaultButton = cancel,
+            AllowCancel = true,
+        };
+        return TaskDialog.ShowDialog(owner, page) == reinstall;
+    }
+
     /// <summary>A pop-up menu built for one showing is disposed once it has closed (after its click has run).</summary>
     public static void DisposeWhenClosed(ContextMenuStrip menu, Control owner)
         => menu.Closed += (_, _) => { if (owner.IsHandleCreated) owner.BeginInvoke(new Action(menu.Dispose)); else menu.Dispose(); };
@@ -220,7 +237,8 @@ internal sealed class HistoryDialog : Form
 /// <summary>What the app-details window shows (gathered by MainForm; the size is filled in asynchronously).</summary>
 internal sealed record AppDetails(
     string Name, string Blurb, string? Category, string? Installed, string? InstalledAt, string? Location,
-    string? Latest, string? LatestDate, string? DownloadSize, bool Held, string? Previous);
+    string? Latest, string? LatestDate, string? DownloadSize, bool Held, string? Previous,
+    string? RunsAs = null);   // ARM64 PCs, when installed: "ARM64" or "x64, through emulation"
 
 /// <summary>Everything about one installed (or installable) app, with "Show in Explorer" and "Release notes…".</summary>
 internal sealed class AppDetailsDialog : Form
@@ -266,6 +284,7 @@ internal sealed class AppDetailsDialog : Form
         Row("Download size", d.DownloadSize);
         if (d.Held) Row("Updates", "Held at this version — Update All leaves it alone");
         Row("Previous version", d.Previous);
+        Row("Runs as", d.RunsAs);
 
         var buttons = DialogKit.ButtonRow();
         var close = DialogKit.Button("Close", DialogResult.Cancel);

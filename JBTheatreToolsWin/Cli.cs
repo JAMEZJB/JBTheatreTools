@@ -34,6 +34,12 @@ public static class Cli
 
     private static bool ServerConfigured => _serverBase != null && _serverPass != null;
 
+    /// <summary>ARM64 PCs: the install slots set (in the app) to use the x64 build — the command line installs the same
+    /// build the app would. The CLI works on each app's default slot.</summary>
+    private static List<string> _x64Slots = new();
+
+    private static string? AssetName(CatalogApp app) => app.WindowsAsset(null, _x64Slots);
+
     /// <summary>The client for this invocation: the server relay when configured, else direct GitHub.</summary>
     private static GitHubClient MakeClient(string? token) =>
         ServerConfigured ? new GitHubClient(_serverBase!, _serverPass!) : new GitHubClient(token);
@@ -94,6 +100,7 @@ public static class Cli
         // defaulting to the built-in relay); then a usable token; then the GUI-configured server mode
         // (built-in URL + saved passphrase) so a machine set up in the app works with no flags at all.
         var settings = AppSettings.Load();
+        _x64Slots = settings.X64Slots;
         var builtInServer = AuthClient.ResolveServerUrl(settings, catalog.DownloadServer);
         if (!needsAuth)
         {
@@ -132,7 +139,7 @@ public static class Cli
 
     private static async Task<int> ListAsync(Catalog catalog, string? token)
     {
-        Console.WriteLine($"JBTheatreTools — {catalog.Apps.Count} apps (platform: {Platform.AssetKey})\n");
+        Console.WriteLine($"JBTheatreTools — {catalog.Apps.Count} apps (platform: {Platform.NativeKey})\n");
         using var client = HasAuth(token) ? MakeClient(token) : null;
         foreach (var app in catalog.Apps)
         {
@@ -150,10 +157,11 @@ public static class Cli
                     else
                     {
                         latest = info.TagName;
-                        var asset = info.Assets.FirstOrDefault(a => a.Name == app.WindowsAssetName);
+                        var name = AssetName(app);
+                        var asset = info.Assets.FirstOrDefault(a => a.Name == name);
                         note = asset != null
                             ? $"{asset.Name} ({ByteString(asset.Size)})"
-                            : $"⚠ no {Platform.AssetKey} asset ({app.WindowsAssetName})";
+                            : $"⚠ no Windows asset ({name})";
                     }
                 }
                 catch (GitHubException ge) when (ge.Kind == GitHubErrorKind.NotAccessible) { latest = "—"; note = "HIDDEN — token has no access to this repo"; }
@@ -200,8 +208,8 @@ public static class Cli
             Console.WriteLine($"{app.Name} — {all.Count} release(s):\n");
             foreach (var rel in all)
             {
-                bool hasWin = rel.Assets.Any(a => a.Name == app.WindowsAssetName);
-                var flags = (rel.Prerelease ? " [pre-release]" : "") + (hasWin ? "" : $" [no {Platform.AssetKey} asset]");
+                bool hasWin = rel.Assets.Any(a => a.Name == AssetName(app));
+                var flags = (rel.Prerelease ? " [pre-release]" : "") + (hasWin ? "" : " [no Windows asset]");
                 Console.WriteLine($"  {Pad(rel.TagName, 12)}{flags}");
             }
             return 0;
@@ -227,8 +235,9 @@ public static class Cli
                 ? all.FirstOrDefault(r => VersionCompare.Equal(r.TagName, tag))   // "1.2.0" finds "v1.2.0"
                 : Versions.Latest(all);
             if (rel == null) { Console.Error.WriteLine($"error: version {tag ?? "latest"} not found."); return 1; }
-            var asset = rel.Assets.FirstOrDefault(a => a.Name == app.WindowsAssetName);
-            if (asset == null) { Console.Error.WriteLine($"error: release {rel.TagName} has no {Platform.AssetKey} asset."); return 1; }
+            var name = AssetName(app);
+            var asset = rel.Assets.FirstOrDefault(a => a.Name == name);
+            if (asset == null) { Console.Error.WriteLine($"error: release {rel.TagName} has no Windows asset{(name == null ? "" : $" ({name})")}."); return 1; }
 
             Console.WriteLine($"Downloading {asset.Name} ({ByteString(asset.Size)}) @ {rel.TagName}…");
             var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{app.Id}-{rel.TagName}-{asset.Name}");

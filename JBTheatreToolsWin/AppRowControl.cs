@@ -101,8 +101,8 @@ public sealed class AppRowControl : UserControl
         if (Versions.DevChannel || Installed == null || !VersionCompare.IsDev(Installed)) return null;
         var stable = VersionCompare.PickLatest(Releases, r => r.TagName, r => r.Prerelease, devChannel: false);
         if (stable == null || VersionCompare.IsDev(stable.TagName) || VersionCompare.IsNewer(stable.TagName, Installed)) return null;
-        var asset = App.WindowsAsset(SelectedVariantQuery?.Invoke(this));
-        return stable.Assets.Any(a => a.Name == asset) ? stable.TagName : null;
+        var asset = SelectedAssetQuery?.Invoke(this);
+        return asset != null && stable.Assets.Any(a => a.Name == asset) ? stable.TagName : null;
     }
     /// <summary>The semver-picked latest release, computed once in SetReleases — the header/menu/Download-All
     /// checks used to re-sort every row's release list on every button refresh.</summary>
@@ -204,6 +204,14 @@ public sealed class AppRowControl : UserControl
     /// time Launch is off. While it is only DOWNLOADING the app can still be opened (the install step then asks to
     /// quit it, or an automatic update leaves it for later).</summary>
     public Func<AppRowControl, bool>? LaunchBlockedQuery;
+    /// <summary>Set by MainForm: the asset the selected edition installs on this PC (its x64 / ARM64 choice applied).</summary>
+    public Func<AppRowControl, string?>? SelectedAssetQuery;
+    /// <summary>ARM64 PCs: whether the selected edition can use its x64 build (both builds exist), whether it's set to,
+    /// whether it runs emulated (set to, or it only has an x64 build), and the toggle (row, use x64).</summary>
+    public Func<AppRowControl, bool>? CanChooseX64Query;
+    public Func<AppRowControl, bool>? PrefersX64Query;
+    public Func<AppRowControl, bool>? RunsEmulatedQuery;
+    public event Func<AppRowControl, bool, Task>? X64ToggleRequested;
     private bool IsHeld => IsHeldQuery?.Invoke(this) ?? false;
 
     public AppRowControl(CatalogApp app)
@@ -600,6 +608,24 @@ public sealed class AppRowControl : UserControl
             }
             menu.Items.Add(variant);
         }
+        // ARM64 PCs: this edition's x64 build instead of its ARM64 one (Windows runs it through emulation). Only offered
+        // when the edition has both builds; changing it on an installed edition reinstalls it (MainForm asks first).
+        if (CanChooseX64Query?.Invoke(this) ?? false)
+        {
+            menu.Items.Add(new ToolStripSeparator());
+            bool x64 = PrefersX64Query?.Invoke(this) ?? false;
+            var arch = new ToolStripMenuItem("Use the x64 build (emulated)")
+            {
+                Checked = x64, Enabled = !_locked && !IsBusy,
+                ToolTipText = "Install this edition's x64 build — Windows runs it through emulation, usually a little slower",
+            };
+            arch.Click += async (_, _) =>
+            {
+                try { if (X64ToggleRequested != null) await X64ToggleRequested(this, !x64); }
+                catch (Exception ex) { Log.Write($"x64 build {App.Id}: {ex.Message}"); }
+            };
+            menu.Items.Add(arch);
+        }
         var rollback = RollbackTagQuery?.Invoke(this);
         if (offered.Count > 0 || rollback != null)
         {
@@ -995,7 +1021,8 @@ public sealed class AppRowControl : UserControl
         long size = LatestAssetId == null ? 0 : latestRel?.Assets.FirstOrDefault(a => a.Id == LatestAssetId)?.Size ?? 0;
         _version.Text = $"Installed: {instText}    ·    Latest: {latestText}"
             + (size > 0 ? $"    ·    {ByteSize.Format(size)}" : "")
-            + ((Installed != null && VersionCompare.IsDev(Installed)) || (Latest != null && VersionCompare.IsDev(Latest)) ? "    ·    dev build" : "");
+            + ((Installed != null && VersionCompare.IsDev(Installed)) || (Latest != null && VersionCompare.IsDev(Latest)) ? "    ·    dev build" : "")
+            + (Installed != null && (RunsEmulatedQuery?.Invoke(this) ?? false) ? "    ·    x64 (emulated)" : "");
         bool held = IsHeld && Installed != null;
         bool heldUpdate = held && Status == RowStatus.UpdateAvailable;
 

@@ -1,7 +1,6 @@
 // The integration tests compile the real installer/catalog with inert OS/network boundaries.
 namespace JBTheatreTools;
 
-internal static class Platform { public static string AssetKey => "windows-x64"; }
 internal static class Log { public static void Write(string message) { } }
 internal static class Shortcuts
 {

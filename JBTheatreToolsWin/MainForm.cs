@@ -553,6 +553,11 @@ public sealed class MainForm : Form
             row.RollbackTagQuery = RollbackTag;
             row.RollbackRequested += async (r, tag) => await RollbackAsync(r, tag);
             row.LaunchBlockedQuery = r => _slotsInstalling.Contains(InstallKey(r.App));
+            row.SelectedAssetQuery = r => AssetFor(r.App, SelectedVariant(r.App));
+            row.CanChooseX64Query = r => r.App.CanChooseX64(SelectedVariant(r.App));
+            row.PrefersX64Query = r => _settings.X64Slots.Contains(InstallKey(r.App));
+            row.RunsEmulatedQuery = RunsEmulated;
+            row.X64ToggleRequested += SetX64Async;
             row.SetLocked(_settings.ShowLock);
             row.SetSelectedVariant(SelectedVariant(app));
             var slot = InstallKey(app);
@@ -641,21 +646,108 @@ public sealed class MainForm : Form
     /// <summary>Re-derives a row's latest-asset id + status from its cached releases (after a variant change).</summary>
     private void RecomputeRow(AppRowControl row)
     {
+        var assetName = AssetFor(row.App, SelectedVariant(row.App));   // the slot's chosen build (x64 / ARM64)
         var latest = row.LatestRelease == null ? null
-            : Versions.LatestFor(row.Releases, row.App.WindowsAsset(SelectedVariant(row.App)));   // per edition
+            : Versions.LatestFor(row.Releases, assetName);   // per edition
         if (latest == null)
         {
             // No cached releases yet (pre-refresh): the row just reflects whether the slot is installed.
             row.SetState(row.Installed, null, null, row.Installed != null ? RowStatus.Installed : RowStatus.Unknown);
             return;
         }
-        var asset = latest.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAsset(SelectedVariant(row.App)));
+        var asset = latest.Assets.FirstOrDefault(a => a.Name == assetName);
         row.SetState(row.Installed, latest.TagName, asset?.Id, ComputeStatus(row.Installed, latest.TagName, asset != null));
     }
 
     /// <summary>The install-manifest key of the row's SELECTED variant slot. Every variant is its own
     /// slot, so Light and Full can both be installed; the toggle just picks which slot the row shows.</summary>
     private string InstallKey(CatalogApp app) => app.InstallKey(SelectedVariant(app));
+
+    // ── x64 build on ARM64 PCs (Windows runs it through its built-in emulation) ─────────────
+
+    /// <summary>The asset this PC installs for a slot: the slot's x64 / ARM64 choice applied, and the x64 build when an
+    /// edition has no ARM64 one (see Platform.Pick). Every install / update / verify decision goes through here.</summary>
+    private string? AssetFor(CatalogApp app, string? variantId) => app.WindowsAsset(variantId, _settings.X64Slots);
+
+    /// <summary>The row's selected edition runs emulated: set to use the x64 build, or it only has an x64 build.</summary>
+    private bool RunsEmulated(AppRowControl row) =>
+        row.App.WindowsPick(SelectedVariant(row.App), _settings.X64Slots)?.Emulated ?? false;
+
+    private void StoreX64(string slot, bool on)
+    {
+        _settings.X64Slots.Remove(slot);
+        if (on) _settings.X64Slots.Add(slot);
+        _settings.Save();
+    }
+
+    /// <summary>Switches the row's selected edition between its ARM64 and x64 builds (⋯ → "Use the x64 build
+    /// (emulated)"). Not installed, or already installed as that build: only the choice is stored, and the next install
+    /// uses it. Installed as the other build: asked first, then that same version is reinstalled with the other build —
+    /// the normal install path, verified against the signed checksums as usual. Nothing changes if the answer is no or
+    /// that version has no such build, and the choice is put back whenever the build on disk didn't change (failed,
+    /// cancelled, show lock, left open), so the setting always matches what's installed. Parity: macOS setRunsAsIntel.</summary>
+    private async Task SetX64Async(AppRowControl row, bool on)
+    {
+        try
+        {
+            if (row.IsBusy || BlockedByLock($"x64 build {row.App.Id}")) return;
+            var vid = SelectedVariant(row.App);
+            var slot = row.App.InstallKey(vid);
+            bool before = _settings.X64Slots.Contains(slot);
+            if (before == on) return;
+            var name = row.DisplayName;
+            var kind = on ? "x64" : "ARM64";
+            ushort want = on ? PeArch.X64 : PeArch.Arm64;
+            var installed = InstallManager.Shared.InstalledVersion(slot);
+            var path = installed == null ? null : InstallManager.Shared.InstalledPath(slot);
+            // The installed exe's own header (the recorded main exe of a .zip Full install too): disk, so off the UI thread.
+            ushort? machine = path == null ? null : await Task.Run(() => PeArch.OfFile(path));
+            if (installed != null && path != null && machine != want)
+            {
+                var asset = Platform.Pick(row.App.AssetsFor(vid), Platform.OsIsArm64, on)?.Name;
+                if (row.Releases.Count == 0)
+                {
+                    MessageBox.Show(this, $"The list of {name} releases hasn't loaded yet. Press Refresh, then try again.",
+                                    $"Use the {kind} build", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                var rel = row.Releases.FirstOrDefault(r => VersionCompare.Equal(r.TagName, installed));
+                // Only a release the strict reinstall can pass: the build is there, signed, and not a hidden dev build.
+                if (asset == null || rel == null || !rel.Assets.Any(a => a.Name == asset) || !Versions.HasSignedManifest(rel)
+                    || (!Versions.DevChannel && VersionCompare.IsDev(rel.TagName)))
+                {
+                    MessageBox.Show(this, $"{VersionCompare.Display(installed)} of {name} has no verifiable {kind} build, so it can't be switched. It can switch with a later version.",
+                                    $"Use the {kind} build", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                var text = on
+                    ? $"{VersionCompare.Display(installed)} for x64 replaces the ARM64 build. Windows runs it through emulation — usually a little slower."
+                    : $"{VersionCompare.Display(installed)} for ARM64 replaces the x64 build.";
+                if (!DialogKit.ConfirmReinstall(this, $"Reinstall {name} as the {kind} build?", text)) return;
+                if (row.IsBusy || BlockedByLock($"x64 build {row.App.Id}")) return;   // started / locked while the question was up
+                StoreX64(slot, on);   // the install below resolves the chosen build from here
+                Log.Write($"{kind} build: reinstalling {slot} {installed}");
+                RecomputeRow(row);
+                await InstallSlotAsync(row, rel.TagName, vid);
+                // Not reinstalled (failed, cancelled, show lock, the app left open): keep the choice matching what's on disk.
+                var now = InstallManager.Shared.InstalledPath(slot);
+                if (now != null && await Task.Run(() => PeArch.OfFile(now)) != want)
+                {
+                    StoreX64(slot, before);
+                    Log.Write($"{kind} build: {slot} not reinstalled — choice put back");
+                }
+            }
+            else
+            {
+                StoreX64(slot, on);
+                Log.Write($"{kind} build: {slot}");
+            }
+            // The chosen build may be in a different latest release (and have a different size): re-pick the row.
+            RecomputeRow(row);
+            RefreshDownloadAllButton();
+        }
+        catch (Exception ex) { Log.Write($"x64 build {row.App.Id}: {ex.Message}"); }
+    }
 
     /// <summary>Shortcut base name for a slot: the installed exe's product name (or the catalog name)
     /// plus the variant suffix (" (Full)") so the two variants' shortcuts don't collide.</summary>
@@ -1145,7 +1237,8 @@ public sealed class MainForm : Form
                     case FetchKind.Releases:
                         accessible = true;
                         row.SetReleases(res.Releases!);
-                        var latest = Versions.LatestFor(res.Releases!, row.App.WindowsAsset(SelectedVariant(row.App)));
+                        var assetName = AssetFor(row.App, SelectedVariant(row.App));
+                        var latest = Versions.LatestFor(res.Releases!, assetName);
                         if (latest == null)
                         {
                             // Nothing released on this PC's channel (only dev builds so far, or none): only the
@@ -1155,7 +1248,7 @@ public sealed class MainForm : Form
                         }
                         else
                         {
-                            var asset = latest.Assets.FirstOrDefault(a => a.Name == row.App.WindowsAsset(SelectedVariant(row.App)));
+                            var asset = latest.Assets.FirstOrDefault(a => a.Name == assetName);
                             row.SetState(installed, latest.TagName, asset?.Id, ComputeStatus(installed, latest.TagName, asset != null));
                         }
                         break;
@@ -1264,7 +1357,7 @@ public sealed class MainForm : Form
             variants.AddRange(row.App.Variants.Skip(1).Select(v => (string?)v.Id));
         foreach (var vid in variants)
         {
-            var name = row.App.WindowsAsset(vid);
+            var name = AssetFor(row.App, vid);
             var rel = Versions.LatestFor(row.Releases, name);   // per edition (a dev build may lack one)
             if (name == null || rel == null || !rel.Assets.Any(a => a.Name == name)) continue;   // no asset for this arch → skip
             var installed = InstallManager.Shared.InstalledVersion(row.App.InstallKey(vid));
@@ -1293,15 +1386,15 @@ public sealed class MainForm : Form
         OrderedSlots(_rows.ToList().SelectMany(r => SlotsToUpdate(r).ToList().Select(v => (r, v, (string?)null))));
 
     /// <summary>The download size of a work list's latest assets.</summary>
-    private static long WorkBytes(IEnumerable<(AppRowControl row, string? vid, string? tag)> work) => ByteSize.Sum(work.Select(w =>
+    private long WorkBytes(IEnumerable<(AppRowControl row, string? vid, string? tag)> work) => ByteSize.Sum(work.Select(w =>
     {
-        var name = w.row.App.WindowsAsset(w.vid);
+        var name = AssetFor(w.row.App, w.vid);
         var rel = Versions.LatestFor(w.row.Releases, name);
         return rel?.Assets.FirstOrDefault(a => a.Name == name)?.Size ?? 0L;
     }));
 
     /// <summary>"  (450 MB)" for a menu item, or "" when the size isn't known.</summary>
-    private static string SizeSuffix(List<(AppRowControl row, string? vid, string? tag)> work)
+    private string SizeSuffix(List<(AppRowControl row, string? vid, string? tag)> work)
     {
         long bytes = WorkBytes(work);
         return bytes > 0 ? $"  ({ByteSize.Format(bytes)})" : "";
@@ -1334,7 +1427,7 @@ public sealed class MainForm : Form
         if (row.App.Variants != null) variants.AddRange(row.App.Variants.Skip(1).Select(v => (string?)v.Id));
         foreach (var vid in variants)
         {
-            var name = row.App.WindowsAsset(vid);
+            var name = AssetFor(row.App, vid);
             var rel = Versions.LatestFor(row.Releases, name);   // per edition (a dev build may lack one)
             if (name == null || rel == null || !rel.Assets.Any(a => a.Name == name)) continue;
             var installed = InstallManager.Shared.InstalledVersion(row.App.InstallKey(vid));
@@ -1600,7 +1693,7 @@ public sealed class MainForm : Form
             return null;
         }
         if (client == null) return null;
-        var assetName = row.App.WindowsAsset(variantId);
+        var assetName = AssetFor(row.App, variantId);
         if (assetName == null) { client.Dispose(); return null; }
 
         row.SetBusy(true);
@@ -1857,7 +1950,7 @@ public sealed class MainForm : Form
             // Held after the batch started: an update (latest, already installed) leaves it where it is.
             if (HeldNow(row, tag, now)) return "is held";
             if (installedAtStart[i] != null && now == null) return "was removed meanwhile";
-            var target = tag ?? Versions.LatestFor(row.Releases, row.App.WindowsAsset(vid))?.TagName;
+            var target = tag ?? Versions.LatestFor(row.Releases, AssetFor(row.App, vid))?.TagName;
             if (now != null && target != null && VersionCompare.Equal(now, target)) return $"is already at {VersionCompare.Display(target)}";
             return null;
         }
@@ -2099,7 +2192,7 @@ public sealed class MainForm : Form
             string? best = null;
             foreach (var vid in SlotsToUpdate(r))
             {
-                var tag = Versions.LatestFor(r.Releases, r.App.WindowsAsset(vid))?.TagName;
+                var tag = Versions.LatestFor(r.Releases, AssetFor(r.App, vid))?.TagName;
                 if (tag != null && (best == null || Versions.IsNewer(tag, best))) best = tag;
             }
             if (best != null) list.Add(new UpdatePolicy.Pending(r.App.Id, r.App.Name, best));
@@ -2216,7 +2309,8 @@ public sealed class MainForm : Form
             row.Latest == null ? null : VersionCompare.Display(row.Latest), released,
             assetSize > 0 ? ByteSize.Format(assetSize) : null,
             installed != null && IsHeld(row.App.Id),
-            rec?.PreviousVersion == null ? null : VersionCompare.Display(rec.PreviousVersion));
+            rec?.PreviousVersion == null ? null : VersionCompare.Display(rec.PreviousVersion),
+            Platform.OsIsArm64 && installed != null ? (RunsEmulated(row) ? "x64, through emulation" : "ARM64") : null);
         AppDetailsDialog? dlg = null;
         dlg = new AppDetailsDialog(details, Theme.IsDark(_settings.Appearance),
             installed == null ? null : () => Task.Run(() => InstallManager.Shared.SizeOnDisk(key)),
@@ -2235,7 +2329,7 @@ public sealed class MainForm : Form
         var prev = InstallManager.Shared.Record(key)?.PreviousVersion;
         // Only ever BACK: after a roll back (or an older install from the picker) "previous" is the newer one.
         if (prev == null || !VersionCompare.IsNewer(installed, prev)) return null;
-        var asset = row.App.WindowsAsset(vid);
+        var asset = AssetFor(row.App, vid);
         // Roll back installs strictly, so only offer a release that can pass: signed checksums, and never a
         // development build on a PC without Development builds switched on.
         return Versions.Offered(row.Releases).FirstOrDefault(r => VersionCompare.Equal(r.TagName, prev)
@@ -2391,7 +2485,7 @@ public sealed class MainForm : Form
         foreach (var i in plan.ToInstall.ToList())
         {
             var app = _catalog.Apps.First(a => a.Id == i.AppId);
-            if (app.WindowsAsset(i.VariantId ?? app.Variants?.FirstOrDefault()?.Id) != null) continue;
+            if (AssetFor(app, i.VariantId ?? app.Variants?.FirstOrDefault()?.Id) != null) continue;
             plan.ToInstall.Remove(i);
             plan.Skipped.Add($"{i.Label} — no Windows build");
         }
@@ -2548,7 +2642,8 @@ public sealed class MainForm : Form
         if (_settings.AuthMode == "server" && Uri.TryCreate(AuthClient.ResolveServerUrl(_settings, _catalog.DownloadServer),
                                                             UriKind.Absolute, out var relay)) host = relay.Host;
         var apps = _rows.Select(r => new Diagnostics.AppLine(r.DisplayName, r.Installed, r.Latest, StatusText(r.Status),
-                                                             r.Installed != null && IsHeld(r.App.Id))).ToList();
+                                                             r.Installed != null && IsHeld(r.App.Id),
+                                                             r.Installed != null && RunsEmulated(r))).ToList();
         return Diagnostics.Build(new Diagnostics.Info(
             CurrentVersion(), RuntimeInformation.OSDescription, RuntimeInformation.ProcessArchitecture.ToString(),
             _settings.AuthMode == "server" ? "Download server" : "GitHub token", host, _settings.DevChannel, Locked,

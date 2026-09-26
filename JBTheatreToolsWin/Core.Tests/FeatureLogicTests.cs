@@ -465,6 +465,22 @@ public class DiagnosticsTests
     }
 
     [Fact]
+    public void MarksAppsThatRunTranslated()
+    {
+        var report = Diagnostics.Build(new Diagnostics.Info("1.30.0", "Windows 11", "Arm64", "Download server", null, false,
+            false, "Launcher only",
+            new[]
+            {
+                new Diagnostics.AppLine("PDF Tools (Full)", "v0.9.0", "v0.9.0", "up to date", false, Translated: true),
+                new Diagnostics.AppLine("DMX Tools", "v1.1.0", "v1.2.0", "Update", true, Translated: true),
+                new Diagnostics.AppLine("PSN Tools", "v1.6.0", "v1.6.0", "up to date", false),
+            }, new List<string>(), new DateTimeOffset(2026, 9, 25, 12, 0, 0, TimeSpan.Zero)));
+        Assert.Contains("  PDF Tools (Full) — installed v0.9.0, latest v0.9.0, up to date, runs translated\n", report);
+        Assert.Contains("  DMX Tools — installed v1.1.0, latest v1.2.0, Update, held, runs translated\n", report);
+        Assert.Contains("  PSN Tools — installed v1.6.0, latest v1.6.0, up to date\n", report);
+    }
+
+    [Fact]
     public void RedactsAuthorizationValues()
     {
         Assert.Equal("Basic [redacted]", Diagnostics.Redact("Basic c3VpdGU6cGFzcw=="));

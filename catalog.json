@@ -17,8 +17,8 @@
       "windows-x64": "JBTheatreTools-Windows-x64.exe",
       "windows-arm64": "JBTheatreTools-Windows-arm64.exe"
     },
-    "whatsNew": "Find and filter the list, activity history, setup files, hold and roll back, scheduled checks with notifications, and a show lock.",
-    "whatsNewVersion": "v1.30.0"
+    "whatsNew": "Run an app as Intel (Rosetta) on Apple silicon, or its x64 build on ARM Windows — per app, from its ⋯ menu.",
+    "whatsNewVersion": "v1.31.0"
   },
   "apps": [
     {

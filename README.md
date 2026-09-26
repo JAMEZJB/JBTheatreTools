@@ -46,6 +46,13 @@ The same features on every launcher (the few that don't apply to Android are mar
   them on.
 - **Automatic updates** *(desktop, opt-in)* — after each check, updates install on their own: never for
   held apps, apps that are open, or under show lock.
+- **Run translated** *(desktop, Apple silicon Macs and ARM64 Windows PCs)* — per app edition, from its ⋯ menu:
+  on a Mac, "Open as Intel (Rosetta)" for a universal app (the launcher and its menu-bar menu open it as Intel;
+  Finder and the Dock still open it as Apple silicon) or "Use the Intel Build (Rosetta)" for an edition with its
+  own Intel build (reinstalled as that build — asked first); on Windows, "Use the x64 build (emulated)" (the x64
+  build is installed and Windows emulates it). An edition with no native build uses the translated one automatically. The row
+  says when an app runs translated; the build is verified exactly like any other. If Rosetta isn't installed,
+  the launcher offers to install it.
 - **Cancel and Stop** — cancel a single download; Stop ends an Update All / Download All after the app that's
   installing.
 - **Disk-space check** — before a download, the launcher makes sure there's room for it (and for unpacking

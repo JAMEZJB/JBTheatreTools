@@ -183,8 +183,15 @@ struct AppDetailsView: View {
             item("Latest", row.latest.map(VersionDisplay.display))
             item("Released", latestRelease?.published.map { "\(RelativeAge.shortDate($0)) (\(RelativeAge.describe($0, now: Date())))" })
             item("Download size", downloadSize)
-            if row.installed != nil, state.isHeld(row.id) { item("Updates", "Held at this version — Update All leaves it alone") }
-            item("Previous version", record?.previousVersion.map(VersionDisplay.display))
+            Group {   // (a ViewBuilder takes ten children)
+                if row.installed != nil, state.isHeld(row.id) { item("Updates", "Held at this version — Update All leaves it alone") }
+                item("Previous version", record?.previousVersion.map(VersionDisplay.display))
+                if MacArch.isAppleSilicon, row.installed != nil {
+                    item("Runs as", !state.runsTranslated(row) ? "Apple silicon"
+                         : state.hasSeparateIntelBuild(row) ? "Intel, through Rosetta"
+                         : "Intel, through Rosetta, when opened from JB Theatre Tools (Finder and the Dock open it as Apple silicon)")
+                }
+            }
         }
     }
 
