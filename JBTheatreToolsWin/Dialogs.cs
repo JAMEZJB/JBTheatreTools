@@ -82,12 +82,18 @@ internal static class DialogKit
             WrapContents = false,
         };
 
-    public static Button Button(string text, DialogResult result = DialogResult.None)
-        => new() { Text = text, AutoSize = true, DialogResult = result, Margin = new Padding(6, 0, 0, 0), UseMnemonic = false };
+    /// <summary>A house button for a dialog's button row: <paramref name="primary"/> = the accent-filled default action
+    /// (the dialog's AcceptButton), otherwise the quiet secondary.</summary>
+    public static HouseButton Button(string text, DialogResult result = DialogResult.None, bool primary = false)
+        => new(primary ? HouseRole.Primary : HouseRole.Secondary)
+        {
+            Text = text, AutoSize = true, DialogResult = result, Margin = new Padding(6, 0, 0, 0),
+        };
 
     /// <summary>A read-only rich text view in the panel surface colour, for notes and history.</summary>
     public static RichTextBox Reader(bool dark)
-        => new()
+    {
+        var reader = new RichTextBox
         {
             Dock = DockStyle.Fill,
             ReadOnly = true,
@@ -98,6 +104,9 @@ internal static class DialogKit
             ShortcutsEnabled = true,   // Ctrl+C / Ctrl+A still work
             WordWrap = true,
         };
+        reader.HandleCreated += (_, _) => HouseDraw.NativeTheme(reader, dark);   // a dark scrollbar in dark mode
+        return reader;
+    }
 
     /// <summary>Wraps a control in a padded surface panel (the reader's margin).</summary>
     public static Panel Padded(Control inner, bool dark)
@@ -351,7 +360,7 @@ internal sealed class ImportPreviewDialog : Form
 
         var buttons = DialogKit.ButtonRow();
         var cancel = DialogKit.Button("Cancel", DialogResult.Cancel);
-        var ok = DialogKit.Button(installs ? "Install" : "Apply", DialogResult.OK);
+        var ok = DialogKit.Button(installs ? "Install" : "Apply", DialogResult.OK, primary: true);
         buttons.Controls.Add(cancel);
         buttons.Controls.Add(ok);
         AcceptButton = ok;

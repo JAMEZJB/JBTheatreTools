@@ -17,11 +17,11 @@ public sealed class SectionHeaderControl : UserControl
     private bool _pinnedGroup;
     private bool _dark;
 
-    private readonly Button _up = new();
-    private readonly Button _down = new();
-    // DPI: every pixel number is a 96-DPI design value scaled through S(); _dpi = what the fonts were built for.
+    // House icon buttons (no fill, slate glyph, hover wash only — rule 21), drawn as vector triangles.
+    private readonly HouseButton _up = new(HouseRole.Icon) { Glyph = HouseGlyph.Up, AccessibleName = "Move section up" };
+    private readonly HouseButton _down = new(HouseRole.Icon) { Glyph = HouseGlyph.Down, AccessibleName = "Move section down" };
+    // DPI: every pixel number is a 96-DPI design value scaled through S(); _dpi = what the geometry was built for.
     private int _dpi;
-    private Font? _buttonFont;
     private int S(int v) => Theme.Px(v, DeviceDpi);
 
     /// <summary>Raised when the header is clicked (toggle collapse). Argument = section key.</summary>
@@ -39,11 +39,8 @@ public sealed class SectionHeaderControl : UserControl
 
         foreach (var b in new[] { _up, _down })
         {
-            b.FlatStyle = FlatStyle.Flat;
-            b.FlatAppearance.BorderSize = 0;
             b.TabStop = false;
-            b.BackColor = Color.Transparent;
-            b.Cursor = Cursors.Hand;
+            b.AutoSize = false;   // a fixed 26×22 hit target (Rescale)
         }
         _up.Text = "▲";     // ▲
         _down.Text = "▼";   // ▼
@@ -60,14 +57,7 @@ public sealed class SectionHeaderControl : UserControl
     /// handle creation on a different-DPI monitor, and every Per-Monitor V2 DPI change).</summary>
     public void Rescale()
     {
-        if (DeviceDpi != _dpi)
-        {
-            _dpi = DeviceDpi;
-            var old = _buttonFont;
-            _buttonFont = Theme.Ui(7f, semibold: true, _dpi);
-            _up.Font = _down.Font = _buttonFont;
-            old?.Dispose();
-        }
+        _dpi = DeviceDpi;
         Height = S(30);
         Margin = new Padding(0, S(6), 0, S(1));
         _up.Size = _down.Size = new Size(S(26), S(22));
@@ -91,7 +81,6 @@ public sealed class SectionHeaderControl : UserControl
     {
         Key = key; _title = title; _count = count; _collapsed = collapsed; _pinnedGroup = pinnedGroup; _dark = dark;
         _up.Visible = _down.Visible = !pinnedGroup;
-        _up.ForeColor = _down.ForeColor = Theme.Selector;
         LayoutButtons();
         Invalidate();
     }
@@ -100,8 +89,9 @@ public sealed class SectionHeaderControl : UserControl
     public void ApplyTheme(bool dark)
     {
         _dark = dark;
-        _up.ForeColor = _down.ForeColor = Theme.Selector;
         Invalidate();
+        _up.Invalidate();
+        _down.Invalidate();
     }
 
     public void SetMoveEnabled(bool canUp, bool canDown)

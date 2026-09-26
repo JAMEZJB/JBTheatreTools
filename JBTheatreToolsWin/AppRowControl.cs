@@ -109,7 +109,7 @@ public sealed class AppRowControl : UserControl
     public ReleaseInfo? LatestRelease { get; private set; }
     /// <summary>The installed app's self-declared exe name (kept for diagnostics only — NOT shown; see DisplayName).</summary>
     public string? ResolvedName { get; private set; }
-    /// <summary>The selected variant id (from the row's combobox), or null for a non-variant app.</summary>
+    /// <summary>The selected variant id (from the row's Light/Full picker), or null for a non-variant app.</summary>
     private string? CurrentVariantId =>
         App.HasVariants && App.Variants != null && _variant.SelectedIndex >= 0 && _variant.SelectedIndex < App.Variants.Count
             ? App.Variants[_variant.SelectedIndex].Id : null;
@@ -127,14 +127,18 @@ public sealed class AppRowControl : UserControl
     private readonly Label _blurb = new();
     private readonly Label _version = new();
     private readonly Label _whatsNew = new();
-    private readonly ComboBox _variant = new();
+    // Light/Full picker: the house segmented control (macOS JBSegmented, compact), inline before the row's buttons.
+    private readonly HouseSegmented _variant;
     private readonly PillLabel _badge = new();
     private bool _compact;
     private bool _suppressVariantEvent;
-    private readonly Button _install = new();
-    private readonly Button _launch = new();
-    private readonly Button _more = new();
-    private readonly Button _cancel = new();
+    // House buttons, compact (the mac row's .controlSize(.small)): Install/Update/Retry and Launch are the accent-filled
+    // primary, Cancel the quiet secondary, and ⋯ a bare slate icon (rule 21).
+    private readonly HouseButton _install = new(HouseRole.Primary, compact: true);
+    // Secondary, as on the mac: only actions that change something (Install / Update / Retry) are filled.
+    private readonly HouseButton _launch = new(HouseRole.Secondary, compact: true);
+    private readonly HouseButton _more = new(HouseRole.Icon, compact: true) { Glyph = HouseGlyph.More };
+    private readonly HouseButton _cancel = new(HouseRole.Secondary, compact: true);
     private readonly ToolTip _tip = new();
     private readonly ProgressBar _progress = new();
     /// <summary>A download is in flight and can be cancelled (the Cancel button / menu item show).</summary>
@@ -234,23 +238,25 @@ public sealed class AppRowControl : UserControl
         _pin.Visible = false;
 
         _blurb.Text = app.Blurb;
-        _blurb.AutoSize = true;
+        _blurb.AutoSize = false;     // sized in LayoutControls: one line, ellipsised before the buttons
+        _blurb.AutoEllipsis = true;
         _blurb.UseMnemonic = false;
 
         _version.AutoSize = true;
 
         // One-line "what's new" for the app's current release; only present when the catalog carries it.
-        _whatsNew.AutoSize = true;
+        _whatsNew.AutoSize = false;   // sized in LayoutControls: one line, ellipsised at the row's edge
+        _whatsNew.AutoEllipsis = true;
         _whatsNew.UseMnemonic = false;
         _whatsNewText = app.WhatsNew; _whatsNewVersion = app.WhatsNewVersion;
         ApplyWhatsNewText();
 
         // Variant toggle (Light/Full) — only for apps that ship more than one download.
-        _variant.DropDownStyle = ComboBoxStyle.DropDownList;
+        _variant = new HouseSegmented(app.HasVariants && app.Variants != null ? app.Variants.Select(v => v.Label) : Array.Empty<string>(),
+                                      compact: true) { AccessibleName = "Edition" };
         _variant.Visible = app.HasVariants;
         if (app.HasVariants && app.Variants != null)
         {
-            foreach (var v in app.Variants) _variant.Items.Add(v.Label);
             if (_variant.Items.Count > 0) { _suppressVariantEvent = true; _variant.SelectedIndex = 0; _suppressVariantEvent = false; }
             _variant.SelectedIndexChanged += (_, _) =>
             {
@@ -277,6 +283,8 @@ public sealed class AppRowControl : UserControl
         _launch.Click += (_, _) => LaunchRequested?.Invoke(this);
 
         _more.Text = "⋯";
+        _more.AccessibleName = "More actions";
+        _tip.SetToolTip(_more, "Variant, reorder, other versions & uninstall");
         _more.Click += (_, _) => ShowMoreMenu();
 
         _cancel.Text = "Cancel";
@@ -353,7 +361,6 @@ public sealed class AppRowControl : UserControl
         _blurb.Font = F(Theme.PtSmall);                    // t-small 12px
         _version.Font = F(Theme.PtLabel);                  // t-label step, sentence case (a meta line)
         _whatsNew.Font = F(Theme.PtLabel);
-        _variant.Font = F(Theme.PtSmall);
         _badge.Font = F(Theme.PtLabel, semibold: true);    // t-label 10.5px/600
         foreach (var f in old) f.Dispose();                // the controls hold the new ones now
     }
@@ -362,8 +369,8 @@ public sealed class AppRowControl : UserControl
     private void ApplyGeometry()
     {
         _pin.Size = new Size(S(12), S(12));
-        _more.Size = new Size(S(30), S(24));
-        _variant.Width = S(120);
+        _more.Size = new Size(S(26), S(22));
+        _variant.Rescale();
         if (_compact)
         {
             Margin = new Padding(S(6));
@@ -686,12 +693,12 @@ public sealed class AppRowControl : UserControl
     /// <summary>Re-reads the held state (after a hold toggle) and redraws.</summary>
     public void RefreshHeld() => UpdateVisual();
 
-    /// <summary>List-row layout. The text column keeps the 96-DPI design offsets (name 10 / blurb 31 /
-    /// version 52 / what's-new 68 / variant 68|86, row 82 / 96 / 100 / 114 — parity with the macOS row),
-    /// scaled. Fonts scale with the same factor, so the scaled pitch fits them (checked against GDI's Segoe
-    /// UI metrics at 100–200%); as a guard against pixel-rounded font heights outgrowing it (odd scales, a
-    /// fallback UI font), a line never overlaps the one above and the row never ends above its last line.
-    /// At 100% those floors are inert and the layout is the original, pixel for pixel.</summary>
+    /// <summary>List-row layout. The text column keeps the 96-DPI design offsets (name 10 / blurb 31 / version 52 /
+    /// what's-new 68, row 82 / 100 — parity with the macOS row), scaled. Fonts scale with the same factor, so the
+    /// scaled pitch fits them (checked against GDI's Segoe UI metrics at 100–200%); as a guard against pixel-rounded
+    /// font heights outgrowing it (odd scales, a fallback UI font), a line never overlaps the one above and the row
+    /// never ends above its last line. At 100% those floors are inert. The Light/Full picker sits inline with the
+    /// buttons (not on a line of its own), so a row is the same height whether or not the app has editions.</summary>
     private void LayoutControls()
     {
         if (_compact) { LayoutCompact(); return; }
@@ -699,29 +706,41 @@ public sealed class AppRowControl : UserControl
         _icon.Location = new Point(S(14), S(21));
         _name.Location = new Point(x, S(10));
         _pin.Location = new Point(_name.Right + S(4), S(12));
+        // The blurb is one line that stops short of the right-hand cluster (width set below), ellipsised with the
+        // full text in a tooltip, rather than running under the buttons at narrow widths.
+        var blurbSize = TextRenderer.MeasureText(_blurb.Text, _blurb.Font, Size.Empty, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+        _blurb.Height = blurbSize.Height;
         _blurb.Location = new Point(x, Math.Max(S(31), _name.Bottom + gap));
         _version.Location = new Point(x, Math.Max(S(52), _blurb.Bottom + gap));
         int bottom = _version.Bottom;
         if (HasWhatsNew)
         {
+            // One line, ellipsised at the row's right padding (full text in a tooltip) instead of clipped mid-word.
+            var whatsNewSize = TextRenderer.MeasureText(_whatsNew.Text, _whatsNew.Font, Size.Empty, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            _whatsNew.Size = new Size(Math.Max(S(40), Math.Min(whatsNewSize.Width + S(2), Width - S(14) - x)), whatsNewSize.Height);
             _whatsNew.Location = new Point(x, Math.Max(S(68), bottom + gap));
             bottom = _whatsNew.Bottom;
         }
-        if (App.HasVariants)
-        {
-            _variant.Location = new Point(x, Math.Max(S(HasWhatsNew ? 86 : 68), bottom + gap));
-            bottom = _variant.Bottom;
-        }
-        int designHeight = App.HasVariants ? (HasWhatsNew ? 114 : 96) : (HasWhatsNew ? 100 : 82);
-        Height = Math.Max(S(designHeight), bottom + S(App.HasVariants ? 5 : 15));
+        Height = Math.Max(S(HasWhatsNew ? 100 : 82), bottom + S(15));
 
-        int y = S(28), rx = Width - S(14);
-        _more.Location = new Point(rx - _more.Width, y); rx = _more.Left - S(8);
+        // Right cluster, right to left: ⋯ · Cancel · Launch · Install/Update · Light/Full · status pill, all on one
+        // centre line. AutoSize buttons are sized here too (a button made visible this pass hasn't been measured yet).
+        int bh = _launch.GetPreferredSize(Size.Empty).Height, cy = S(28) + bh / 2, rx = Width - S(14);
+        int Place(Control c, int spacing)
+        {
+            if (c is HouseButton { AutoSize: true } b) b.Size = b.GetPreferredSize(Size.Empty);
+            c.Location = new Point(rx - c.Width, cy - c.Height / 2);
+            return c.Left - spacing;
+        }
+        rx = Place(_more, S(6));
         _cancel.Visible = _cancellable;
-        if (_cancel.Visible) { _cancel.Location = new Point(rx - _cancel.Width, y); rx = _cancel.Left - S(8); }
-        if (_launch.Visible) { _launch.Location = new Point(rx - _launch.Width, y); rx = _launch.Left - S(8); }
-        if (_install.Visible) { _install.Location = new Point(rx - _install.Width, y); rx = _install.Left - S(8); }
-        _badge.Location = new Point(rx - _badge.Width - S(4), S(32));
+        if (_cancel.Visible) rx = Place(_cancel, S(8));
+        if (_launch.Visible) rx = Place(_launch, S(8));
+        if (_install.Visible) rx = Place(_install, S(8));
+        if (App.HasVariants) rx = Place(_variant, S(10));
+        _badge.Size = _badge.GetPreferredSize(Size.Empty);
+        rx = Place(_badge, S(8));
+        _blurb.Width = Math.Max(S(40), Math.Min(blurbSize.Width + S(2), rx - x));
         _progress.Location = new Point(S(14), Height - S(12));   // pinned to the bottom (row height varies with the what's-new line)
     }
 
@@ -743,13 +762,9 @@ public sealed class AppRowControl : UserControl
         _progress.Width = w - S(20);
         _blurb.Visible = _version.Visible = _whatsNew.Visible = false;
         _install.Visible = _launch.Visible = _more.Visible = _cancel.Visible = false;   // tile: right-click menu
-        // The Light/Full picker, as on the list row (it was hidden in grid view, leaving only the ⋯ menu).
+        // The Light/Full picker, as on the list row (it was hidden in grid view, leaving only the ⋯ menu), centred.
         _variant.Visible = App.HasVariants;
-        if (App.HasVariants)
-        {
-            _variant.Width = w - S(24);
-            _variant.Location = new Point(S(12), _badge.Bottom + S(3));
-        }
+        if (App.HasVariants) _variant.Location = new Point((w - _variant.Width) / 2, _badge.Bottom + S(3));
     }
 
     /// <summary>Switches the row between the detailed list layout and a compact grid tile.</summary>
@@ -1085,8 +1100,7 @@ public sealed class AppRowControl : UserControl
         _blurb.ForeColor = Theme.Sub(dark);
         _version.ForeColor = Theme.Muted(dark);
         _whatsNew.ForeColor = Theme.Selector;   // rule 21 — meta prose is slate, not the accent
-        _variant.BackColor = Theme.Card(dark);
-        _variant.ForeColor = Theme.Fg(dark);
+        _variant.Invalidate();                  // the house controls read the theme tokens as they paint
         UpdateVisual();   // the badge's semantic colours are theme-dependent
         UpdateIcon();     // ditto the monogram fallback, which is tinted with the accent
     }

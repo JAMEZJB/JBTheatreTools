@@ -15,32 +15,40 @@ public sealed class MainForm : Form
     private readonly Label _tokenBannerText = new();
     private readonly Panel _updateBanner = new();
     private readonly Label _updateBannerText = new();
-    private readonly Button _refresh = new();
-    private readonly Button _downloadAll = new();
-    private readonly Button _viewToggle = new();
-    private readonly Button _settingsBtn = new();
+    // Header buttons in the house roles (macOS header): Download / Update All is the one accent-filled primary; the
+    // rest are quiet secondaries with Windows' own symbols (Segoe Fluent Icons / MDL2) where the mac shows SF Symbols.
+    private readonly HouseButton _refresh = new(HouseRole.Secondary) { Symbol = "\uE72C" };
+    private readonly HouseButton _downloadAll = new(HouseRole.Primary);
+    private readonly HouseButton _viewToggle = new(HouseRole.Secondary);
+    private readonly HouseButton _settingsBtn = new(HouseRole.Secondary) { Symbol = "\uE713" };
+    private readonly IdentityTileControl _identity = new();
     private readonly Label _title = new();
     private readonly Label _subtitle = new();
+    /// <summary>"24 installed · 0 updates available" under the subtitle (parity with the Android status row).</summary>
+    private readonly Label _statusLine = new();
     private readonly Label _credit = new();
     private readonly Panel _header = new();
     private readonly Panel _footer = new();
-    private readonly Button _updateBtn = new();
-    private readonly Button _tokenBtn = new();
-    private readonly Button _moreBtn = new();
+    private readonly HouseButton _updateBtn = new(HouseRole.Primary);
+    private readonly HouseButton _tokenBtn = new(HouseRole.Secondary);
+    private readonly HouseButton _moreBtn = new(HouseRole.Secondary) { Symbol = "\uE712", Chevron = true };
 
     // Show lock (installs / updates / removals paused) and the one-time "Updated to vX" notice.
     private readonly Panel _lockBanner = new();
     private readonly Label _lockBannerText = new();
-    private readonly Button _unlockBtn = new();
+    private readonly HouseButton _unlockBtn = new(HouseRole.Secondary);
     private readonly Panel _whatsNewBanner = new();
     private readonly Label _whatsNewText = new();
-    private readonly Button _whatsNewBtn = new();
-    private readonly Button _whatsNewDismiss = new();
+    private readonly HouseButton _whatsNewBtn = new(HouseRole.Secondary);
+    private readonly HouseButton _whatsNewDismiss = new(HouseRole.Secondary);
 
-    // Find & filter bar, and the empty-result line shown in the list.
+    // Find & filter bar, and the empty-result line shown in the list. The search field is a borderless TextBox in a
+    // house well; the status filter is the macOS filter bar's segmented control (All / Installed / Updates / Not installed).
     private readonly Panel _filterBar = new();
-    private readonly TextBox _search = new();
-    private readonly ComboBox _statusFilter = new();
+    private readonly HouseTextField _searchBox = new(searchGlyph: true);
+    private TextBox _search => _searchBox.Box;
+    private readonly HouseSegmented _statusFilter =
+        new(Enum.GetValues<StatusFilter>().Select(AppFilter.Label)) { AccessibleName = "Show" };
     private readonly Label _filterCount = new();
     private readonly Label _noMatches = new();
 
@@ -48,6 +56,7 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _scheduler = new() { Interval = 60_000 };
     private DateTimeOffset? _lastCheck;
     private bool _refreshing;
+    private bool _showCheckingStatus;
     private bool _batchRunning;
     private CancellationTokenSource? _batchCts;
     private readonly Dictionary<AppRowControl, CancellationTokenSource> _rowCts = new();
@@ -132,6 +141,7 @@ public sealed class MainForm : Form
         // Double-buffer the panel so the live drag-reorder reflow doesn't flicker.
         typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
             ?.SetValue(_list, true);
+        _list.HandleCreated += (_, _) => HouseDraw.NativeTheme(_list, Theme.CurrentDark);
         root.Controls.Add(_list, 0, 6);
 
         root.Controls.Add(BuildFooter(), 0, 7);
@@ -150,6 +160,10 @@ public sealed class MainForm : Form
         Shown += async (_, _) =>
         {
             Log.Write($"launched v{CurrentVersion()}");
+            // Again once visible: on Windows 11 (26100) DWM didn't honour the dark title bar set before the first show.
+            Theme.ApplyTitleBar(this, Theme.IsDark(_settings.Appearance));
+            // Start with focus on the list, not the first header button (which Windows would show as the default).
+            _list.Focus();
             // After an in-place update: tell the previous launcher this one is up (it then closes), and remove its old exe.
             LauncherUpdate.Started();
             PrepareLauncherWhatsNew();
@@ -180,6 +194,9 @@ public sealed class MainForm : Form
         _subtitle.AutoSize = true;
         _subtitle.UseMnemonic = false;
 
+        _statusLine.AutoSize = true;
+        _statusLine.UseMnemonic = false;
+
         _refresh.Text = "Refresh";
         _refresh.AutoSize = true;
         _refresh.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -187,7 +204,8 @@ public sealed class MainForm : Form
 
         // A single "Download All ▾" dropdown (parity with the macOS header menu): Update all (N),
         // Download all apps, and — when any app ships a Full edition — Download all incl. Full editions.
-        _downloadAll.Text = "Download All  ▾";
+        _downloadAll.Text = "Download All";
+        _downloadAll.Chevron = true;
         _downloadAll.AutoSize = true;
         _downloadAll.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _downloadAll.Visible = false;
@@ -198,7 +216,7 @@ public sealed class MainForm : Form
         _viewToggle.Click += (_, _) => ToggleViewMode();
 
         // Everything that isn't per-app: show lock, activity, setup files, diagnostics.
-        _moreBtn.Text = "More  ▾";
+        _moreBtn.Text = "More";
         _moreBtn.AutoSize = true;
         _moreBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _moreBtn.Click += (_, _) => ShowMoreMenu();
@@ -208,20 +226,44 @@ public sealed class MainForm : Form
         _settingsBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _settingsBtn.Click += (_, _) => OpenSettings();
 
-        header.Controls.AddRange(new Control[] { _title, _subtitle, _downloadAll, _viewToggle, _moreBtn, _refresh, _settingsBtn });
+        header.Controls.AddRange(new Control[] { _identity, _title, _subtitle, _statusLine, _downloadAll, _viewToggle, _moreBtn, _refresh, _settingsBtn });
         header.Resize += (_, _) => LayoutHeaderButtons();
         return header;
     }
 
-    /// <summary>Right-aligns the header buttons (Settings, Refresh, More, view toggle, Download All).</summary>
+    /// <summary>Right-aligns the header buttons (Settings, Refresh, More, view toggle, Download All), centred on the
+    /// header's height (the macOS header is one centre-aligned row). The header never changes height with the window
+    /// width: when the buttons would reach the text column they first drop their symbols, then the subtitle and the
+    /// status line step aside (the macOS subtitle drops out the same way), and at the narrowest the identity tile
+    /// goes so the title keeps clear of the buttons.</summary>
     private void LayoutHeaderButtons()
     {
-        int y = S(16);
-        _settingsBtn.Location = new Point(_header.Width - _settingsBtn.Width - S(14), y);
-        _refresh.Location = new Point(_settingsBtn.Left - _refresh.Width - S(8), y);
-        _moreBtn.Location = new Point(_refresh.Left - _moreBtn.Width - S(8), y);
-        _viewToggle.Location = new Point(_moreBtn.Left - _viewToggle.Width - S(8), y);
-        _downloadAll.Location = new Point(_viewToggle.Left - _downloadAll.Width - S(8), y);
+        var buttons = new[] { _settingsBtn, _refresh, _moreBtn, _viewToggle, _downloadAll };
+        int Place()
+        {
+            int y = Math.Max(S(8), (_header.Height - _settingsBtn.Height) / 2);
+            int x = _header.Width - S(14), left = x;
+            foreach (var b in buttons)
+            {
+                b.Location = new Point(x - b.Width, y);
+                x = b.Left - S(8);
+                if (b.Visible) left = b.Left;
+            }
+            return left;
+        }
+        int withTile = S(14) + S(36) + S(12);   // the text column beside the identity tile
+        foreach (var b in buttons) b.ShowSymbol = true;
+        int leftmost = Place();
+        if (leftmost < withTile + Math.Max(_subtitle.Width, _statusLine.Width) + S(16))
+        {
+            foreach (var b in buttons) b.ShowSymbol = false;
+            leftmost = Place();
+        }
+        _identity.Visible = withTile + _title.Width + S(16) <= leftmost;
+        int tx = _identity.Visible ? withTile : S(14);
+        _title.Left = _subtitle.Left = _statusLine.Left = tx;
+        _subtitle.Visible = tx + _subtitle.Width + S(16) <= leftmost;
+        _statusLine.Visible = tx + _statusLine.Width + S(16) <= leftmost;
     }
 
     private Control BuildUpdateBanner()
@@ -313,24 +355,23 @@ public sealed class MainForm : Form
         return _whatsNewBanner;
     }
 
-    /// <summary>Find &amp; filter: a search box, a status dropdown (house rule: mode selectors are dropdowns) and a
+    /// <summary>Find &amp; filter: a search field, the status filter (the macOS filter bar's segmented control) and a
     /// count. Narrowing the list shows collapsed sections open and pauses reordering (see <see cref="FilterActive"/>).</summary>
     private Control BuildFilterBar()
     {
         _filterBar.Dock = DockStyle.Fill;
-        _search.PlaceholderText = "Search apps  (Ctrl+F)";
+        _searchBox.Placeholder = "Search apps  (Ctrl+F)";
+        _search.AccessibleName = "Search apps";
         _search.TextChanged += (_, _) => ReindexList();
         _search.KeyDown += (_, e) =>
         {
             if (e.KeyCode == Keys.Escape && _search.Text.Length > 0) { _search.Clear(); e.Handled = e.SuppressKeyPress = true; }
         };
-        _statusFilter.DropDownStyle = ComboBoxStyle.DropDownList;
-        foreach (var f in Enum.GetValues<StatusFilter>()) _statusFilter.Items.Add(f == StatusFilter.All ? "All apps" : AppFilter.Label(f));
-        _statusFilter.SelectedIndex = 0;
+        _statusFilter.SelectedIndex = 0;   // segments are StatusFilter order: All / Installed / Updates / Not installed
         _statusFilter.SelectedIndexChanged += (_, _) => ReindexList();
         _filterCount.AutoSize = true;
         _filterCount.UseMnemonic = false;
-        _filterBar.Controls.AddRange(new Control[] { _search, _statusFilter, _filterCount });
+        _filterBar.Controls.AddRange(new Control[] { _searchBox, _statusFilter, _filterCount });
         _filterBar.Resize += (_, _) => LayoutFilterBar();
 
         _noMatches.AutoSize = true;
@@ -340,13 +381,15 @@ public sealed class MainForm : Form
         return _filterBar;
     }
 
+    /// <summary>The search field takes up to 260 px (less at narrow widths, never under 140), the segmented filter
+    /// sits after it, and the count after that; the field matches the filter's height so the bar reads as one row.</summary>
     private void LayoutFilterBar()
     {
-        _search.Location = new Point(S(14), S(6));
-        _search.Width = S(260);
-        _statusFilter.Location = new Point(_search.Right + S(8), S(6));
-        _statusFilter.Width = S(140);
-        _filterBar.Height = Math.Max(_search.Height, _statusFilter.Height) + S(12);
+        int h = Math.Max(_statusFilter.Height, _search.Height + S(8));
+        int room = _filterBar.Width - S(14) - S(10) - _statusFilter.Width - S(12) - _filterCount.Width - S(14);
+        _searchBox.Bounds = new Rectangle(S(14), S(6), Math.Clamp(room, S(140), S(260)), h);
+        _statusFilter.Location = new Point(_searchBox.Right + S(10), S(6) + (h - _statusFilter.Height) / 2);
+        _filterBar.Height = h + S(12);
         _filterCount.Location = new Point(_statusFilter.Right + S(12), (_filterBar.Height - _filterCount.Height) / 2);
     }
 
@@ -395,7 +438,8 @@ public sealed class MainForm : Form
         // prefix, eating the "&" and the following space → a double space).
         _credit.UseMnemonic = false;
         // Rule 28 — the house credit line, carrying the launcher's own version.
-        _credit.Text = $"Created by: James Breedon & Claude Code · v{CurrentVersion()}";
+        // Non-breaking double spaces around the dot, so it reads as a separator rather than a run-on.
+        _credit.Text = $"Created by: James Breedon & Claude Code\u00a0\u00a0·\u00a0\u00a0v{CurrentVersion()}";
         _credit.AutoSize = true;
         _credit.Anchor = AnchorStyles.None;
         footer.Controls.Add(_credit);
@@ -421,6 +465,8 @@ public sealed class MainForm : Form
             Font F(float pt, bool semibold = false) { var f = Theme.Ui(pt, semibold, _chromeDpi); _chromeFonts.Add(f); return f; }
             _title.Font = F(Theme.PtTitle, semibold: true);              // t-title 15px/600
             _subtitle.Font = F(Theme.PtSmall);                           // t-small 12px
+            _statusLine.Font = F(Theme.PtSmall);                         // t-small 12px
+            _search.Font = F(Theme.PtBody);                              // body 13px
             _updateBannerText.Font = F(Theme.PtTitle, semibold: true);   // t-status 15px/600
             _tokenBannerText.Font = F(Theme.PtTitle, semibold: true);    // t-status 15px/600
             _lockBannerText.Font = F(Theme.PtTitle, semibold: true);     // t-status 15px/600
@@ -432,11 +478,20 @@ public sealed class MainForm : Form
         }
         MinimumSize = new Size(S(640), S(460));
         _list.Padding = new Padding(S(10));
+        // The house controls size themselves from their DPI; make sure they have before the layout below reads them.
+        foreach (var b in new[] { _downloadAll, _viewToggle, _moreBtn, _refresh, _settingsBtn, _updateBtn, _tokenBtn, _unlockBtn, _whatsNewBtn, _whatsNewDismiss })
+            b.Rescale();
+        _statusFilter.Rescale();
 
         _header.Padding = new Padding(S(14), S(10), S(14), S(10));
-        _title.Location = new Point(S(14), S(10));
-        _subtitle.Location = new Point(S(14), Math.Max(S(36), _title.Bottom + S(5)));   // floors: never overlap / clip
-        _header.Height = Math.Max(S(64), _subtitle.Bottom + S(11));
+        // Identity tile, then the title / subtitle / status column beside it.
+        int tx = S(14) + S(36) + S(12);
+        _title.Location = new Point(tx, S(10));
+        _subtitle.Location = new Point(tx, Math.Max(S(33), _title.Bottom + S(2)));   // floors: never overlap / clip
+        _statusLine.Location = new Point(tx, Math.Max(S(51), _subtitle.Bottom + S(2)));
+        _header.Height = Math.Max(S(76), _statusLine.Bottom + S(10));
+        _identity.Size = new Size(S(36), S(36));
+        _identity.Location = new Point(S(14), (_header.Height - _identity.Height) / 2);
         LayoutHeaderButtons();
 
         LayoutBanner(_updateBanner, _updateBannerText, _updateBtn);
@@ -475,6 +530,8 @@ public sealed class MainForm : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
+        // ApplyTheme first ran in the constructor, before there was a window to give a dark title bar to.
+        Theme.ApplyTitleBar(this, Theme.IsDark(_settings.Appearance));
         // Per-Monitor V2: the window may open on a monitor whose DPI differs from the system DPI the
         // constructor laid out for (the framework refreshes DeviceDpi at handle creation).
         if (DeviceDpi != _chromeDpi) RescaleAll();
@@ -767,6 +824,8 @@ public sealed class MainForm : Form
     {
         bool grid = _settings.ViewMode == "grid";
         _viewToggle.Text = grid ? "List view" : "Grid view";
+        _viewToggle.Symbol = grid ? "\uEA37" : "\uF0E2";   // List / GridView
+        LayoutHeaderButtons();   // the label width changed
         _list.SuspendLayout();
         _list.WrapContents = grid;
         _list.FlowDirection = grid ? FlowDirection.LeftToRight : FlowDirection.TopDown;
@@ -1174,6 +1233,9 @@ public sealed class MainForm : Form
         ShowNotice(null);
 
         _refresh.Enabled = false;
+        _showCheckingStatus = !quiet;   // a scheduled background check leaves the status line as it was
+        UpdateStatusLine(UpdatesAvailable());
+        LayoutHeaderButtons();
         bool unauthorized = false;
         try
         {
@@ -1271,6 +1333,7 @@ public sealed class MainForm : Form
         finally
         {
             _refresh.Enabled = true;
+            _showCheckingStatus = false;   // the status line shows the counts again (below)
             RefreshDownloadAllButton();
         }
         return !unauthorized;
@@ -1287,13 +1350,26 @@ public sealed class MainForm : Form
                         && AuthClient.HasCredentials(_settings, _catalog.DownloadServer)
                         && (updates > 0 || HasAnyToDownload(false)));
         bool stopping = _batchRunning && _batchCts?.IsCancellationRequested == true;
-        _downloadAll.Text = stopping ? "Stopping…" : _batchRunning ? "Stop  ■" : updates > 0 ? $"Update All ({updates})  ▾" : "Download All  ▾";
+        _downloadAll.Text = stopping ? "Stopping…" : _batchRunning ? "Stop" : updates > 0 ? $"Update All ({updates})" : "Download All";
+        _downloadAll.Chevron = !_batchRunning;   // a menu opens only when it isn't the Stop button
+        _downloadAll.Role = _batchRunning ? HouseRole.Secondary : HouseRole.Primary;   // Stop is quiet, as on the mac
+        UpdateStatusLine(updates);
         _downloadAll.Enabled = !stopping;
         _headerTip.SetToolTip(_downloadAll, _batchRunning
             ? "Stop after the app that's installing now — the download in progress is cancelled"
             : "Install or update every app in one go");
         _downloadAll.Visible = show;
         LayoutHeaderButtons();   // the label width changed
+    }
+
+    /// <summary>The header's status line (the Android status row's wording): how many apps are installed and how many
+    /// updates wait — the same count as Update All (N) — or "Checking releases…" while a check the user can see runs.</summary>
+    private void UpdateStatusLine(int updates)
+    {
+        int installed = _rows.Count(r => r.Installed != null);
+        _statusLine.Text = _refreshing && _showCheckingStatus
+            ? "Checking releases…"
+            : $"{installed} installed · {updates} update{(updates == 1 ? "" : "s")} available";
     }
 
     /// <summary>True if any app has a slot to fetch — a not-installed or updatable default slot (and Full
@@ -2791,6 +2867,7 @@ public sealed class MainForm : Form
         ForeColor = Theme.Fg(dark);
         _title.ForeColor = Theme.Fg(dark);
         _subtitle.ForeColor = Theme.Sub(dark);
+        _statusLine.ForeColor = Theme.Muted(dark);
         _credit.ForeColor = Theme.Muted(dark);
         // Banners follow the kit's `.banner`: a 10% wash of the semantic colour, text in that colour.
         // The launcher-update notice is the accent; the credentials notice is WARN (orange, never yellow).
@@ -2803,14 +2880,13 @@ public sealed class MainForm : Form
         _whatsNewBanner.BackColor = Theme.BannerBack(Theme.Accent, dark);
         _whatsNewText.ForeColor = Theme.Accent;
         _filterBar.BackColor = Theme.Bg(dark);
-        _search.BackColor = Theme.Card(dark);
-        _search.ForeColor = Theme.Fg(dark);
-        _statusFilter.BackColor = Theme.Card(dark);
-        _statusFilter.ForeColor = Theme.Fg(dark);
+        _searchBox.ApplyTheme(dark);
         _filterCount.ForeColor = Theme.Muted(dark);
         _noMatches.ForeColor = Theme.Sub(dark);
         foreach (var row in _rows) row.ApplyTheme(dark);
         foreach (var header in _headers.Values) header.ApplyTheme(dark);
+        HouseDraw.NativeTheme(_list, dark);   // the list's scrollbar: dark in dark mode (it was the light system one)
         if (IsHandleCreated) Theme.ApplyTitleBar(this, dark);
+        Invalidate(true);   // the house controls read the tokens as they paint
     }
 }

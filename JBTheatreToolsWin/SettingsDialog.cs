@@ -16,29 +16,33 @@ public sealed class SettingsDialog : Form
     private readonly SelfInfo? _selfInfo;
     private readonly string _currentVersion;
 
-    private readonly ComboBox _authMode = new();
-    private readonly TextBox _token = new();
+    private readonly HouseComboBox _authMode = new();
+    // The two secret fields are house text fields (a sunken well, not the stock white box); _token / _serverPass are
+    // the TextBoxes inside them, so masking, Clear() and Text work as before.
+    private readonly HouseTextField _tokenField = new();
+    private TextBox _token => _tokenField.Box;
     private readonly Label _tokenState = new();
-    private readonly Button _save = new();
-    private readonly Button _remove = new();
+    private readonly HouseButton _save = new();
+    private readonly HouseButton _remove = new();
     private readonly LinkLabel _tokenLink = new();
     private readonly Label _tokenHelp = new();
     private readonly Label _serverState = new();
-    private readonly TextBox _serverPass = new();
+    private readonly HouseTextField _serverPassField = new();
+    private TextBox _serverPass => _serverPassField.Box;
     private readonly Label _serverHint = new();    // forgiving-entry note (case & spaces don't matter)
     private readonly Label _serverRelay = new();   // read-only effective relay host (audit F2)
-    private readonly Button _serverSave = new();
-    private readonly Button _serverRemove = new();
-    private readonly ComboBox _updateMode = new();
+    private readonly HouseButton _serverSave = new();
+    private readonly HouseButton _serverRemove = new();
+    private readonly HouseComboBox _updateMode = new();
     private readonly Label _updateHint = new();
     private readonly Label _intervalLabel = new();   // "While open, check again" — under the check-mode dropdown
-    private readonly ComboBox _interval = new();
-    private readonly Button _check = new();
-    private readonly Button _viewRelease = new();
+    private readonly HouseComboBox _interval = new();
+    private readonly HouseButton _check = new();
+    private readonly HouseButton _viewRelease = new();
     private readonly Label _checkResult = new();
     private readonly CheckBox _devChannel = new();
-    private readonly ComboBox _appearance = new();
-    private readonly ComboBox _closeBehavior = new();
+    private readonly HouseComboBox _appearance = new();
+    private readonly HouseComboBox _closeBehavior = new();
     private readonly CheckBox _installToApps = new();
 
     private readonly string? _downloadServer;
@@ -49,7 +53,7 @@ public sealed class SettingsDialog : Form
     private readonly CheckBox _autoInstall = new();
     private readonly CheckBox _tray = new();
     private readonly Label _storage = new();
-    private readonly Button _clearCache = new();
+    private readonly HouseButton _clearCache = new();
     private readonly List<Label> _hints = new();
     private readonly SettingsExtras? _extras;
 
@@ -98,9 +102,9 @@ public sealed class SettingsDialog : Form
         UpdateTokenState();
 
         _token.UseSystemPasswordChar = true;
-        _token.PlaceholderText = "Paste a fine-grained PAT…";
-        _token.Location = new Point(16, 108);
-        _token.Width = 428;
+        _token.AccessibleName = "GitHub token";
+        _tokenField.Placeholder = "Paste a fine-grained PAT…";
+        _tokenField.Bounds = new Rectangle(16, 105, 428, 26);
 
         _save.Text = "Save";
         _save.Location = new Point(16, 136);
@@ -143,9 +147,9 @@ public sealed class SettingsDialog : Form
         _serverState.Size = new Size(428, 34);
 
         _serverPass.UseSystemPasswordChar = true;
-        _serverPass.PlaceholderText = "Suite passphrase…";
-        _serverPass.Location = new Point(16, 108);
-        _serverPass.Width = 428;
+        _serverPass.AccessibleName = "Suite passphrase";
+        _serverPassField.Placeholder = "Suite passphrase…";
+        _serverPassField.Bounds = new Rectangle(16, 105, 428, 26);
 
         _serverSave.Text = "Save";
         _serverSave.Location = new Point(16, 136);
@@ -237,7 +241,7 @@ public sealed class SettingsDialog : Form
             versionClicks.Add(now);
             if (versionClicks.Count >= 7) RevealDevChannel();
         };
-        _devChannel.Text = "Development builds on this PC (pre-releases marked \u201cdev\u201d; mac + Android only for now)";
+        _devChannel.Text = "Development builds on this PC (pre-releases marked \u201cdev\u201d)";
         _devChannel.AutoSize = true;
         _devChannel.Visible = false;
         _devChannel.Checked = _settings.DevChannel;
@@ -297,7 +301,7 @@ public sealed class SettingsDialog : Form
         _installToApps.Checked = _settings.InstallToApplications;
         _installToApps.CheckedChanged += (_, _) => _settings.InstallToApplications = _installToApps.Checked;
 
-        var openLog = new Button
+        var openLog = new HouseButton
         {
             Text = "Open Log",
             Location = new Point(16, 580),
@@ -305,7 +309,7 @@ public sealed class SettingsDialog : Form
         };
         openLog.Click += (_, _) => Log.Open();
 
-        var resetOrder = new Button
+        var resetOrder = new HouseButton
         {
             Text = "Reset App Order",
             Location = new Point(110, 580),
@@ -314,7 +318,7 @@ public sealed class SettingsDialog : Form
         // Clears the saved order; MainForm re-applies (→ catalog order) when the dialog closes.
         resetOrder.Click += (_, _) => _settings.AppOrder.Clear();
 
-        var showHidden = new Button
+        var showHidden = new HouseButton
         {
             Text = _settings.HiddenApps.Count > 0 ? $"Show Hidden Apps ({_settings.HiddenApps.Count})" : "Show Hidden Apps",
             Location = new Point(228, 580),
@@ -324,7 +328,7 @@ public sealed class SettingsDialog : Form
         // Un-hides everything; MainForm re-applies when the dialog closes.
         showHidden.Click += (_, _) => { _settings.HiddenApps.Clear(); showHidden.Enabled = false; showHidden.Text = "Show Hidden Apps"; };
 
-        var done = new Button
+        var done = new HouseButton(HouseRole.Primary)
         {
             Text = "Done",
             DialogResult = DialogResult.OK,
@@ -341,8 +345,8 @@ public sealed class SettingsDialog : Form
         var ordered = new List<Control>
         {
             tokenHeading, _authMode,
-            _tokenState, _token, _save, _remove, _tokenLink, _tokenHelp,
-            _serverState, _serverPass, _serverSave, _serverRemove, _serverHint, _serverRelay,
+            _tokenState, _tokenField, _save, _remove, _tokenLink, _tokenHelp,
+            _serverState, _serverPassField, _serverSave, _serverRemove, _serverHint, _serverRelay,
             updatesHeading, _updateMode, _updateHint, _intervalLabel, _interval, versionLabel, _check, _viewRelease, _checkResult,
             appearanceHeading, _appearance, closeHeading, _closeBehavior, _installToApps,
         };
@@ -354,8 +358,15 @@ public sealed class SettingsDialog : Form
         UpdateServerState();
         UpdateAuthPanels();
         UpdateIntervalEnabled();
+        // ApplyTheme runs before the window exists: give the title bar its theme once there is one.
+        HandleCreated += (_, _) => Theme.ApplyTitleBar(this, Theme.CurrentDark);
+        Shown += (_, _) => Theme.ApplyTitleBar(this, Theme.CurrentDark);
         ResumeLayout(false);
         PerformLayout();   // the AutoScale pass runs here
+        // The house buttons hug their (semibold, 13 px) labels, which are wider than the stock ones: chain the bottom
+        // row from the measured widths, after the AutoScale pass, so the gaps are in device units.
+        resetOrder.Left = openLog.Right + LogicalToDeviceUnits(8);
+        showHidden.Left = resetOrder.Right + LogicalToDeviceUnits(8);
         // Shown only while dev mode is ON (or after the gesture above, this session only): switch it off and the
         // checkbox is gone next time Settings opens.
         if (_settings.DevChannel) RevealDevChannel();
@@ -398,7 +409,7 @@ public sealed class SettingsDialog : Form
 
         // What happens when a check finds updates (the check itself — mode and interval — is under Updates).
         list.Add(Bold("When updates are found", new Point(X, 110)));
-        _notify.Text = "Notify me about new updates";
+        _notify.Text = "Notify me when updates are available";
         _notify.AutoSize = true;
         _notify.Location = new Point(X, 134);
         _notify.Checked = _settings.NotifyUpdates;
@@ -442,7 +453,7 @@ public sealed class SettingsDialog : Form
         list.Add(_clearCache);
 
         list.Add(Bold("Support", new Point(X, 428)));
-        var diag = new Button { Text = "Copy Diagnostics", AutoSize = true, Location = new Point(X, 452), Visible = _extras != null };
+        var diag = new HouseButton { Text = "Copy Diagnostics", AutoSize = true, Location = new Point(X, 452), Visible = _extras != null };
         diag.Click += (_, _) => _extras?.CopyDiagnostics(this);
         list.Add(diag);
         list.Add(Hint("Versions, settings and recent log lines for a support question — never passwords or tokens.", 482));
@@ -491,9 +502,9 @@ public sealed class SettingsDialog : Form
     private void UpdateAuthPanels()
     {
         bool server = _settings.AuthMode == "server";
-        foreach (Control c in new Control[] { _tokenState, _token, _save, _remove, _tokenLink, _tokenHelp })
+        foreach (Control c in new Control[] { _tokenState, _tokenField, _save, _remove, _tokenLink, _tokenHelp })
             c.Visible = !server;
-        foreach (Control c in new Control[] { _serverState, _serverPass, _serverHint, _serverSave, _serverRemove, _serverRelay })
+        foreach (Control c in new Control[] { _serverState, _serverPassField, _serverHint, _serverSave, _serverRemove, _serverRelay })
             c.Visible = server;
         if (!server) UpdateTokenState(); else UpdateServerState();
     }
@@ -591,6 +602,11 @@ public sealed class SettingsDialog : Form
         Theme.SetCurrent(dark);
         BackColor = Theme.Bg(dark);
         ForeColor = Theme.Fg(dark);
+        // The house dropdowns and buttons paint from the tokens; the dropdowns' open lists and the text fields' native
+        // boxes need their colours set.
+        foreach (var combo in new[] { _authMode, _updateMode, _interval, _appearance, _closeBehavior }) combo.ApplyTheme(dark);
+        _tokenField.ApplyTheme(dark);
+        _serverPassField.ApplyTheme(dark);
         // Panel headings and hint prose carry their own tones (the kit's --text-3 / --text-2).
         foreach (Control c in Controls)
             if (c is Label { Tag: "panel-heading" } heading) heading.ForeColor = Theme.Muted(dark);
