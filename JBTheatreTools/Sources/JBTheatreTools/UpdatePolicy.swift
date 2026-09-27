@@ -122,3 +122,19 @@ enum DiskSpace {
             : "Not enough disk space — needs about \(ByteSize.format(required)), \(ByteSize.format(free)) free."
     }
 }
+
+/// Which editions of an app (Light / Full) the header's Download All menu works on. Pure, and word-for-word the
+/// Windows BatchEditions.
+enum BatchEditions {
+    /// The editions "Install every app" considers, in catalog order: the edition the row shows (what the person
+    /// picked — it used to be the first edition whatever the row showed, so an app switched to Full was never fetched
+    /// and the button hid as soon as every Light edition was current), plus every edition already installed (so none
+    /// is left out of date). `includeFull` ("plus the Full editions") considers them all. A single-edition app is one
+    /// slot, nil.
+    static func forDownloadAll(_ variants: [String]?, shown: String?, includeFull: Bool,
+                               isInstalled: (String?) -> Bool) -> [String?] {
+        guard let variants, variants.count > 1 else { return [nil] }
+        let picked = shown.flatMap { variants.contains($0) ? $0 : nil } ?? variants[0]
+        return variants.filter { includeFull || $0 == picked || isInstalled($0) }.map { Optional($0) }
+    }
+}

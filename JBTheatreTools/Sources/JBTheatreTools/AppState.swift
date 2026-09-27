@@ -913,6 +913,7 @@ final class AppState: ObservableObject {
             rows[i].variantSuffix = rows[i].app.variantSuffix(variantId)
             recomputeRow(i)
         }
+        bumpRows()   // the header: the edition the row shows is the one Download All installs
         AppLog.shared.log("variant for \(appId) → \(variantId)")
     }
 
@@ -1111,7 +1112,7 @@ final class AppState: ObservableObject {
         guard !blockedByLock("update all") else { return }
         let work = updateWork()
         AppLog.shared.log("update all: \(work.count) slot(s)")
-        await runSlots(work, label: "update all")
+        await runSlots(work, label: "update all", refill: { [unowned self] in self.updateWork() })
     }
 
     /// Every installed, non-held slot with an update, default editions first.
@@ -1154,11 +1155,7 @@ final class AppState: ObservableObject {
     private var bytesCache: (gen: Int, update: Int64, all: Int64, allFull: Int64)?
     private func batchBytes() -> (update: Int64, all: Int64, allFull: Int64) {
         if let c = bytesCache, c.gen == rowsGen { return (c.update, c.all, c.allFull) }
-        func dl(_ full: Bool) -> Int64 {
-            workBytes(orderedSlots(rows.flatMap { row in
-                slotsToDownload(row.app, includeFull: full).map { Slot(id: row.id, variant: $0, tag: nil) }
-            }))
-        }
+        func dl(_ full: Bool) -> Int64 { workBytes(downloadWork(includeFull: full)) }
         let v = (update: workBytes(updateWork()), all: dl(false), allFull: dl(true))
         bytesCache = (rowsGen, v.update, v.all, v.allFull)
         return v
@@ -1170,9 +1167,13 @@ final class AppState: ObservableObject {
     /// themselves stay serial (venue Wi-Fi is the bottleneck; two at once would just split it) and at most two
     /// downloaded zips exist at any moment (the one being installed + the one arriving).
     /// Stop (`stopBatch`) cancels the download in flight and starts nothing more; `unattended` (automatic
-    /// updates) never asks to quit an open app. Returns what was installed.
+    /// updates) never asks to quit an open app. `refill` (Download All / Update All) is asked again whenever the list
+    /// runs out: a slot it now lists that this batch hasn't had yet — an app switched to its Full edition, an update a
+    /// check found meanwhile — is added to the end, so the batch never finishes with work the button would still offer.
+    /// Each slot runs at most once per batch (a failure isn't re-added). Returns what was installed.
     @discardableResult
-    private func runSlots(_ work: [Slot], label: String, unattended: Bool = false) async -> [(name: String, version: String)] {
+    private func runSlots(_ initial: [Slot], label: String, unattended: Bool = false,
+                          refill: (() -> [Slot])? = nil) async -> [(name: String, version: String)] {
         var done: [(name: String, version: String)] = []
         guard !batchRunning, !launcherDownloading else {
             AppLog.shared.log("\(label): \(batchRunning ? "another batch is running" : "the launcher is updating") — not started")
@@ -1180,10 +1181,24 @@ final class AppState: ObservableObject {
         }
         batchRunning = true
         batchStopRequested = false
+        var work = initial
         batchIds = Set(work.map(\.id))
         // The list is fixed when the batch starts, but the person can keep working: each slot is re-checked just
         // before its turn (and before its look-ahead download starts) so the batch never undoes or repeats that.
-        let installedAtStart = work.map { installedVersion($0) }
+        var installedAtStart = work.map { installedVersion($0) }
+        var had = Set(work.map { "\($0.id)|\($0.variant ?? "")" })
+        // Appends what `refill` now lists that this batch hasn't had; true when anything was added.
+        func topUp() -> Bool {
+            guard let refill, !batchStopRequested, !showLock else { return false }
+            let before = work.count
+            for s in refill() where had.insert("\(s.id)|\(s.variant ?? "")").inserted {
+                work.append(s)
+                installedAtStart.append(installedVersion(s))
+                batchIds.insert(s.id)
+            }
+            if work.count > before { AppLog.shared.log("\(label): \(work.count - before) more slot(s) added while it ran") }
+            return work.count > before
+        }
         func skipReason(_ i: Int) -> String? {
             let slot = work[i]
             // Held after the batch started: an update (latest, already installed) leaves it where it is.
@@ -1198,7 +1213,11 @@ final class AppState: ObservableObject {
             return nil
         }
         var next: Task<Downloaded?, Never>? = nil
-        for (i, slot) in work.enumerated() {
+        var i = -1
+        while true {
+            i += 1
+            guard i < work.count || topUp() else { break }
+            let slot = work[i]
             if batchStopRequested { break }
             if let reason = skipReason(i) {
                 if next != nil { downloadTasks[slot.id]?.cancel() }   // its look-ahead download: no point finishing it
@@ -1211,6 +1230,7 @@ final class AppState: ObservableObject {
             let current = next ?? Task { await self.downloadPhase(slot.id, tag: slot.tag, variantOverride: slot.variant, unattended: unattended) }
             let d = await current.value                       // download N done (or failed + recorded)
             next = nil
+            if i + 1 >= work.count { _ = topUp() }   // the list ran out: anything new becomes N+1
             if i + 1 < work.count, !batchStopRequested, skipReason(i + 1) == nil {
                 let n = work[i + 1]                           // start download N+1 now…
                 next = Task { await self.downloadPhase(n.id, tag: n.tag, variantOverride: n.variant, unattended: unattended) }
@@ -1273,12 +1293,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Which variant slots of an app need fetching now: a slot whose asset exists in the latest release
-    /// (so it's reachable on this OS/arch) and that isn't already installed at the latest version.
+    /// Which variant slots of an app need fetching now: the edition the row shows plus any installed one (every edition
+    /// when `includeFull` — see BatchEditions) whose asset exists in the latest release (so it's reachable on this
+    /// OS/arch) and that isn't already installed at the latest version.
     private func slotsToDownload(_ app: CatalogApp, includeFull: Bool) -> [String?] {
         guard let row = rows.first(where: { $0.id == app.id }), row.latestRelease != nil else { return [] }
-        var variants: [String?] = [app.hasVariants ? app.variants?.first?.id : nil]
-        if includeFull, let vs = app.variants { variants += vs.dropFirst().map { $0.id } }
+        let variants = BatchEditions.forDownloadAll(app.variants?.map(\.id), shown: selectedVariantId(app), includeFull: includeFull,
+                                                    isInstalled: { InstallManager.shared.installedVersion(app.installKey(variantId: $0)) != nil })
         return variants.filter { vid in
             guard let name = app.macAssetName(variantId: vid),
                   let latest = Self.latest(from: row.releases, for: name),   // per edition (dev builds may lack one)
@@ -1295,11 +1316,18 @@ final class AppState: ObservableObject {
     /// asset for this OS/arch.
     func downloadAll(includeFull: Bool) async {
         guard !blockedByLock("download all") else { return }
-        let work = orderedSlots(rows.flatMap { row in
+        let work = downloadWork(includeFull: includeFull)
+        AppLog.shared.log("download all\(includeFull ? " (incl. Full)" : ""): \(work.count) slot(s)")
+        // An app switched to Full (or an update found) while it runs is picked up before it ends.
+        await runSlots(work, label: "download all\(includeFull ? " (incl. Full)" : "")",
+                       refill: { [unowned self] in self.downloadWork(includeFull: includeFull) })
+    }
+
+    /// The Download All work list: every slot to fetch, default editions first.
+    private func downloadWork(includeFull: Bool) -> [Slot] {
+        orderedSlots(rows.flatMap { row in
             slotsToDownload(row.app, includeFull: includeFull).map { Slot(id: row.id, variant: $0, tag: nil) }
         })
-        AppLog.shared.log("download all\(includeFull ? " (incl. Full)" : ""): \(work.count) slot(s)")
-        await runSlots(work, label: "download all\(includeFull ? " (incl. Full)" : "")")
     }
 
     private static func status(installed: String?, latest: String, hasAsset: Bool) -> Status {
