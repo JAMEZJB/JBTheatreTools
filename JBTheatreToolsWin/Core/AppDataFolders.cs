@@ -14,9 +14,10 @@ public static class AppDataFolders
     };
 
     /// <summary>A single, ordinary folder name: 1–64 characters, no path separators or wildcards, not "." / "..", no
-    /// leading or trailing space or dot, and not one of the shared folders above.</summary>
+    /// leading or trailing space or dot, not one of the shared folders above, and never Apple's own (com.apple.*).</summary>
     public static bool IsSafeName(string? name) =>
         !string.IsNullOrWhiteSpace(name) && name.Length <= 64
+        && !name.StartsWith("com.apple.", StringComparison.OrdinalIgnoreCase)
         && name.Trim() == name && !name.StartsWith('.') && !name.EndsWith('.')
         && name.IndexOfAny(new[] { '/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0' }) < 0
         && !Reserved.Contains(name);

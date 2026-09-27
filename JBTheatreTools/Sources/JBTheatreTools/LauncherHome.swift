@@ -45,6 +45,10 @@ enum LauncherHome {
         return original as URL?
     }
 
+    /// The installed launcher's bundle name — always this, whatever the download was called ("… 2.app" must never
+    /// become a second launcher in Applications).
+    static let bundleName = "JB Theatre Tools.app"
+
     enum MoveError: LocalizedError {
         case openThere(String), notWritable(String)
         var errorDescription: String? {
@@ -55,35 +59,71 @@ enum LauncherHome {
         }
     }
 
-    /// Copies `source` (this bundle — a translocated one's contents are the real app) into `folder` under its real name,
-    /// replacing an older copy there that isn't open (which goes to the Bin), clears the download quarantine on the copy
-    /// (the person has already opened this app), then bins `original` — the downloaded copy — when there is one.
-    /// Returns the new bundle. On a failure before the copy is in place nothing has changed.
-    static func move(_ source: URL, original: URL?, into folder: URL, fileManager fm: FileManager = .default,
-                     isOpen: (URL) -> Bool = { url in NSWorkspace.shared.runningApplications.contains { $0.bundleURL?.standardizedFileURL == url.standardizedFileURL } },
-                     toBin: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }) throws -> URL {
-        let name = (original ?? source).lastPathComponent
-        let dest = folder.appendingPathComponent(name, isDirectory: true)
+    /// Installing would put an older (or the same) launcher over `existing` — then the copy already there is simply opened
+    /// instead (a stale download must never downgrade a self-updated install). Pure.
+    static func keepExisting(existing: String?, mine: String) -> Bool {
+        guard let existing, !existing.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        return !AppState.versionIsNewer(mine, than: existing)
+    }
+
+    /// Why a folder picked with "Choose Folder…" can't take the launcher, or nil when it can: never the launcher's own
+    /// data or install folders or an app's data folder (a later Uninstall / "remove its data" there would take the
+    /// launcher with it) — nor inside one of them. Pure.
+    static func refuseFolder(_ folder: String, own: [String]) -> String? {
+        let f = standard(folder)
+        guard f.hasPrefix("/") else { return "Choose a folder on a disk." }
+        for o in own.map(standard) where f == o || f.hasPrefix(o + "/") {
+            return "\(folder) is where JB Theatre Tools keeps its own files or an app's data. Choose another folder."
+        }
+        return nil
+    }
+
+    /// True when `path` is inside `folder`. Pure.
+    static func isInside(_ path: String, _ folder: String) -> Bool { standard(path).hasPrefix(standard(folder) + "/") }
+
+    /// The launcher version of the bundle at `url` (its CFBundleShortVersionString — the full dev tag), or nil.
+    static func bundleVersion(at url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url.appendingPathComponent("Contents/Info.plist")),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return nil }
+        return plist["CFBundleShortVersionString"] as? String
+    }
+
+    /// Copies `source` (this bundle — a translocated one's contents are the real app) into `folder` as
+    /// "JB Theatre Tools.app" and clears the download quarantine on the copy (the person has already opened this app).
+    /// An older copy there that isn't open is first set aside in the same folder, and binned only once the new copy is in
+    /// place (put back if it can't be). The copy this runs from is NOT touched here — the caller bins a downloaded copy
+    /// once the new one has opened. Returns the new bundle; on a failure nothing has changed.
+    static func install(_ source: URL, into folder: URL, fileManager fm: FileManager = .default,
+                        isOpen: (URL) -> Bool = { url in NSWorkspace.shared.runningApplications.contains { $0.bundleURL?.standardizedFileURL == url.standardizedFileURL } },
+                        toBin: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }) throws -> URL {
+        let dest = folder.appendingPathComponent(bundleName, isDirectory: true)
         if dest.standardizedFileURL == source.standardizedFileURL { return dest }
         do { try fm.createDirectory(at: folder, withIntermediateDirectories: true) }
         catch { throw MoveError.notWritable(folder.path) }
         guard fm.isWritableFile(atPath: folder.path) else { throw MoveError.notWritable(folder.path) }
-        if fm.fileExists(atPath: dest.path) {
-            if isOpen(dest) { throw MoveError.openThere(folder.path) }
-        }
+        let exists = fm.fileExists(atPath: dest.path)
+        if exists, isOpen(dest) { throw MoveError.openThere(folder.path) }
+        let tag = UUID().uuidString.prefix(8)
         // Copy beside the destination under a temporary name first, so a half-copied app never sits at `dest`.
-        let incoming = folder.appendingPathComponent(".\(name).moving-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        let incoming = folder.appendingPathComponent(".\(bundleName).incoming-\(tag)", isDirectory: true)
         do { try fm.copyItem(at: source, to: incoming) }
         catch { try? fm.removeItem(at: incoming); throw error }
-        if fm.fileExists(atPath: dest.path) {
-            do { try toBin(dest) } catch { try? fm.removeItem(at: incoming); throw error }
+        var aside: URL? = nil
+        if exists {
+            let a = folder.appendingPathComponent(".\(bundleName).previous-\(tag)", isDirectory: true)
+            do { try fm.moveItem(at: dest, to: a); aside = a }
+            catch { try? fm.removeItem(at: incoming); throw error }
         }
         do { try fm.moveItem(at: incoming, to: dest) }
-        catch { try? fm.removeItem(at: incoming); throw error }
+        catch {
+            if let aside { try? fm.moveItem(at: aside, to: dest) }   // put the older copy back
+            try? fm.removeItem(at: incoming)
+            throw error
+        }
         clearQuarantine(dest)
-        if let original, original.standardizedFileURL != dest.standardizedFileURL, fm.fileExists(atPath: original.path) {
-            do { try toBin(original); AppLog.shared.log("move: the downloaded copy \(original.path) went to the Bin") }
-            catch { AppLog.shared.log("move: left the old copy \(original.path): \(error.localizedDescription)") }
+        if let aside {
+            do { try toBin(aside); AppLog.shared.log("move: the older copy that was in \(folder.path) went to the Bin") }
+            catch { AppLog.shared.log("move: left the older copy at \(aside.path): \(error.localizedDescription)") }
         }
         AppLog.shared.log("move: launcher now at \(dest.path) (from \(source.path))")
         return dest

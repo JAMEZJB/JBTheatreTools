@@ -66,6 +66,14 @@ internal static class LauncherInstall
         Log.Write($"launcher installed at {targetExe} (from {currentExe}){(desktopShortcut ? " + desktop shortcut" : "")}");
     }
 
+    /// <summary>The version of the launcher exe at <paramref name="exe"/> (its product version, i.e. the full dev tag), or
+    /// null when there's none / it can't be read.</summary>
+    public static string? VersionOf(string exe)
+    {
+        try { return File.Exists(exe) ? FileVersionInfo.GetVersionInfo(exe).ProductVersion?.Split('+')[0] : null; }
+        catch { return null; }
+    }
+
     /// <summary>Starts the installed copy, telling it which exe it replaced.</summary>
     public static void Start(string targetExe, string fromExe)
     {

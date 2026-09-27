@@ -232,9 +232,15 @@ public sealed class MainForm : Form
                    + "Start menu shortcut, and no administrator is needed. Your settings and apps stay as they are"
                    + (fromDownloads ? ", and the downloaded copy goes to the Recycle Bin." : ".");
         const DialogResult install = DialogResult.Yes, choose = DialogResult.Retry, keep = DialogResult.No;
-        var answer = HouseMessage.AskWithOption(this, "Install JB Theatre Tools", text,
-            new[] { ("Install", install), ("Choose Folder…", choose), ("Keep Here", keep) }, install, DialogResult.Cancel,
-            MessageBoxIcon.Question, install, destructive: false, ("Also add a desktop shortcut", null), out bool desktop);
+        DialogResult answer;
+        bool desktop = false;
+        // Test hook (with JBTT_LAUNCHER_HOME / JBTT_DOWNLOADS_DIR): JBTT_AUTO_INSTALL=install|keep answers for you.
+        if (Environment.GetEnvironmentVariable("JBTT_AUTO_INSTALL") is { Length: > 0 } auto)
+            answer = auto == "keep" ? keep : install;
+        else
+            answer = HouseMessage.AskWithOption(this, "Install JB Theatre Tools", text,
+                new[] { ("Install", install), ("Choose Folder…", choose), ("Keep Here", keep) }, install, DialogResult.Cancel,
+                MessageBoxIcon.Question, install, destructive: false, ("Also add a desktop shortcut", null), out desktop);
         string target;
         if (answer == install) target = defaultExe;
         else if (answer == choose)
@@ -245,6 +251,11 @@ public sealed class MainForm : Form
                 InitialDirectory = Path.GetDirectoryName(Path.GetDirectoryName(defaultExe)!)!,
             };
             if (picker.ShowDialog(this) != DialogResult.OK) return false;   // asked again next time
+            if (LauncherHome.RefuseFolder(picker.SelectedPath, OwnFolders()) is { } why)
+            {
+                HouseMessage.Show(this, why, "Install JB Theatre Tools", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return false;
+            }
             target = LauncherHome.ExeIn(picker.SelectedPath);
         }
         else
@@ -255,6 +266,15 @@ public sealed class MainForm : Form
         if (LauncherHome.Same(target, self)) { KeepLauncherHome(self); return false; }
         try
         {
+            // A newer (or the same) launcher is already there — e.g. this is an old download: open that one instead.
+            if (LauncherHome.KeepExisting(LauncherInstall.VersionOf(target), CurrentVersion()))
+            {
+                Log.Write($"install: {target} is already v{LauncherInstall.VersionOf(target)} — opening it instead of installing v{CurrentVersion()}");
+                LauncherInstall.Start(target, self);
+                _reallyQuit = true;
+                Close();
+                return true;
+            }
             LauncherInstall.Install(self, target, desktop);
             if (!LauncherHome.Same(target, defaultExe)) KeepLauncherHome(target);   // a chosen folder is home too
             LauncherInstall.Start(target, self);
@@ -268,6 +288,17 @@ public sealed class MainForm : Form
         _reallyQuit = true;   // closing, not hiding to the notification area
         Close();
         return true;
+    }
+
+    /// <summary>The launcher's own data and install folders plus every app's data folders — never a place to install to.</summary>
+    private IEnumerable<string> OwnFolders()
+    {
+        var roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        yield return Path.Combine(roaming, "JBTheatreTools");
+        yield return Path.Combine(local, "JBTheatreTools");
+        foreach (var app in _catalog.Apps)
+            foreach (var p in AppDataFolders.WindowsPaths(app.DataFolders, roaming, local)) yield return p;
     }
 
     private void KeepLauncherHome(string exe)
@@ -2353,7 +2384,7 @@ public sealed class MainForm : Form
         AppDataFolders.WindowsPaths(app.DataFolders,
                                     Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData))
-            .Where(Directory.Exists).ToList();
+            .Where(p => Directory.Exists(p) && RecycleBin.IsAvailableFor(p)).ToList();   // never a delete-for-good
 
     /// <summary>"AppData\Roaming\PSN Tools" — a data folder as the person finds it from their user folder.</summary>
     private static string ShortDataPath(string path)

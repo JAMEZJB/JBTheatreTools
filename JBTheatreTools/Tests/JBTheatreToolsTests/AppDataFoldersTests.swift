@@ -11,7 +11,8 @@ final class AppDataFoldersTests: XCTestCase {
 
     func testPathsSharedFoldersAndOddNamesAreRefused() {
         for n: String? in [nil, "", "   ", ".", "..", ".config", "PSN Tools.", " PSN Tools", "..\\Windows", "PSN/Tools", "C:",
-                           "*", "JBTheatreTools", "microsoft", "Application Support", "Documents", "Logs", String(repeating: "a", count: 65)] {
+                           "*", "JBTheatreTools", "microsoft", "Application Support", "Documents", "Logs", String(repeating: "a", count: 65),
+                           "com.apple.Safari", "COM.APPLE.x", "PSN Tools\n", "\tPSN Tools"] {
             XCTAssertFalse(AppDataFolders.isSafeName(n), n ?? "nil")
         }
     }
@@ -62,14 +63,18 @@ final class AppDataFoldersTests: XCTestCase {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let catalog = try Catalog.load(explicitPath: root.appendingPathComponent("catalog.json").path)
-        var owner: [String: String] = [:]
+        var owner: [String: String] = [:], bundleOwner: [String: String] = [:]
         for app in catalog.apps {
             XCTAssertFalse((app.dataFolders ?? []).isEmpty, app.id)
             for n in app.dataFolders ?? [] {
                 XCTAssertTrue(AppDataFolders.isSafeName(n), "\(app.id): \(n)")
                 XCTAssertNil(owner.updateValue(app.id, forKey: n.lowercased()), "\(n) listed twice")
             }
-            for id in app.bundleIds ?? [] { XCTAssertTrue(AppDataFolders.isSafeBundleId(id), "\(app.id): \(id)") }
+            for id in app.bundleIds ?? [] {
+                XCTAssertTrue(AppDataFolders.isSafeBundleId(id), "\(app.id): \(id)")
+                XCTAssertNotEqual(id.lowercased(), "com.jamesbreedon.jbtheatretools", "\(app.id) names the launcher's own id")
+                XCTAssertNil(bundleOwner.updateValue(app.id, forKey: id.lowercased()), "\(id) listed twice")
+            }
         }
     }
 }

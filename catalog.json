@@ -346,8 +346,7 @@
         "NDITools"
       ],
       "bundleIds": [
-        "com.jamesbreedon.nditools",
-        "com.jamesbreedon.nditools.full"
+        "com.jamesbreedon.nditools"
       ],
       "assets": {
         "macos": "NDITools-macOS.zip",

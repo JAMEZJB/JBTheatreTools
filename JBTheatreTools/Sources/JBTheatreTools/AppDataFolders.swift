@@ -12,10 +12,11 @@ enum AppDataFolders {
     ]
 
     /// A single, ordinary folder name: 1–64 characters, no path separators or wildcards, not "." / "..", no leading or
-    /// trailing space or dot, and not one of the shared folders above.
+    /// trailing space or dot, not one of the shared folders above, and never Apple's own (com.apple.*).
     static func isSafeName(_ name: String?) -> Bool {
-        guard let name, !name.trimmingCharacters(in: .whitespaces).isEmpty, name.count <= 64,
-              name.trimmingCharacters(in: .whitespaces) == name, !name.hasPrefix("."), !name.hasSuffix(".") else { return false }
+        guard let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, name.count <= 64,
+              name.trimmingCharacters(in: .whitespacesAndNewlines) == name, !name.hasPrefix("."), !name.hasSuffix("."),
+              !name.lowercased().hasPrefix("com.apple.") else { return false }
         if name.contains(where: { "/\\:*?\"<>|\0".contains($0) }) { return false }
         return !reserved.contains(name.lowercased())
     }

@@ -170,7 +170,10 @@ public sealed class InstallTransactionTests : IDisposable
     {
         string destination = Path.Combine(root, "occupied"); Directory.CreateDirectory(destination);
         File.WriteAllText(Path.Combine(destination, "marker"), "unchanged");
-        Assert.ThrowsAny<IOException>(() => InstallTransaction.WriteManifest(destination, "new metadata"));
+        // Moving a file over a folder: macOS/Linux say IOException, Windows says "access denied" (UnauthorizedAccessException,
+        // not an IOException). Either way nothing may change (the install path treats any exception the same way).
+        var error = Record.Exception(() => InstallTransaction.WriteManifest(destination, "new metadata"));
+        Assert.True(error is IOException or UnauthorizedAccessException, $"unexpected {error?.GetType().Name ?? "no exception"}");
         Assert.Equal("unchanged", File.ReadAllText(Path.Combine(destination, "marker")));
         Assert.Empty(Directory.GetFiles(root, ".manifest-*"));
         Assert.Equal("old metadata", File.ReadAllText(Manifest));

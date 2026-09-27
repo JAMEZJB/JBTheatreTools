@@ -28,6 +28,23 @@ public static class LauncherHome
         return Path.GetFullPath(path).StartsWith(f, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>Installing would put an older (or the same) launcher over <paramref name="existingVersion"/> — then the
+    /// copy already there is simply opened instead (a stale download must never downgrade a self-updated install).</summary>
+    public static bool KeepExisting(string? existingVersion, string myVersion) =>
+        !string.IsNullOrWhiteSpace(existingVersion) && !VersionCompare.IsNewer(myVersion, existingVersion);
+
+    /// <summary>Why a folder picked with "Choose Folder…" can't take the launcher, or null when it can: it must be a full
+    /// path, and never the launcher's own data or install folders or an app's data folder (a later Uninstall, "remove its
+    /// data" or clean-up there would take the launcher with it) — nor inside one of them.</summary>
+    public static string? RefuseFolder(string folder, IEnumerable<string> ownFolders)
+    {
+        if (string.IsNullOrWhiteSpace(folder) || !Path.IsPathFullyQualified(folder)) return "Choose a folder on a drive, not a relative path.";
+        foreach (var own in ownFolders.Where(o => !string.IsNullOrEmpty(o)))
+            if (Same(folder, own) || IsInside(folder, own))
+                return $"{folder} is where JB Theatre Tools keeps its own files or an app's data. Choose another folder.";
+        return null;
+    }
+
     public static bool Same(string a, string b) =>
         string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
 }

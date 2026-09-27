@@ -31,6 +31,9 @@ public class AppDataFoldersTests
     [InlineData("Application Support")]
     [InlineData("Documents")]
     [InlineData("Logs")]
+    [InlineData("com.apple.Safari")]
+    [InlineData("COM.APPLE.x")]
+    [InlineData("PSN Tools\n")]
     public void PathsSharedFoldersAndOddNamesAreRefused(string? name) => Assert.False(AppDataFolders.IsSafeName(name));
 
     [Fact]

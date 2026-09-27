@@ -41,4 +41,29 @@ public class LauncherHomeTests
         Assert.False(LauncherHome.IsInside(Path.Combine(Downloads + "2", "a.exe"), Downloads));
         Assert.False(LauncherHome.IsInside(Path.Combine(Downloads, "a.exe"), ""));
     }
+
+    [Theory]
+    [InlineData("1.33.0", "1.31.0", true)]          // a stale download never downgrades a self-updated install
+    [InlineData("1.31.0", "1.31.0", true)]          // same version: just open it
+    [InlineData("1.31.0-dev.4", "1.31.0-dev.3", true)]
+    [InlineData("1.31.0-dev.3", "1.31.0-dev.4", false)]
+    [InlineData("1.29.1", "1.31.0", false)]
+    [InlineData(null, "1.31.0", false)]             // nothing there (or unreadable): install
+    [InlineData("", "1.31.0", false)]
+    public void KeepsANewerOrSameExistingLauncher(string? existing, string mine, bool keep) =>
+        Assert.Equal(keep, LauncherHome.KeepExisting(existing, mine));
+
+    [Fact]
+    public void ChooseFolderRefusesRelativePathsAndOwnOrAppDataFolders()
+    {
+        var local = Path.Combine(Path.GetTempPath(), "u", "Local");
+        var own = new[] { Path.Combine(local, "JBTheatreTools"), Path.Combine(local, "PSN Tools") };
+        Assert.NotNull(LauncherHome.RefuseFolder("Tools", own));
+        Assert.NotNull(LauncherHome.RefuseFolder("", own));
+        Assert.NotNull(LauncherHome.RefuseFolder(own[0], own));
+        Assert.NotNull(LauncherHome.RefuseFolder(Path.Combine(own[0], "apps"), own));
+        Assert.NotNull(LauncherHome.RefuseFolder(Path.Combine(own[1], "x"), own));
+        Assert.Null(LauncherHome.RefuseFolder(Path.Combine(local, "Programs", "JB Theatre Tools"), own));
+        Assert.Null(LauncherHome.RefuseFolder(Path.Combine(local, "JBTheatreTools2"), own));
+    }
 }

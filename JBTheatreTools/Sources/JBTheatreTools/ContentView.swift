@@ -166,8 +166,6 @@ struct ContentView: View {
             // After an in-place update: tell the previous launcher this one is up (it then quits) and bin its old bundle.
             SelfUpdate.readAfterUpdate()
             SelfUpdate.started()
-            // Downloaded and run from Downloads (or anywhere but Applications): offer to move it where it belongs.
-            Task { await state.offerToMoveLauncher() }
             // AppKit gives the first text field (Find apps) the keyboard at launch; the launcher opens with nothing
             // focused, as it did before it had a find field (⌘F focuses it).
             DispatchQueue.main.async {
@@ -175,6 +173,9 @@ struct ContentView: View {
             }
         }
         .task {
+            // Downloaded and run from Downloads (or anywhere but Applications): offer to move it where it belongs —
+            // before the scheduler / first check start, so nothing can be installing if this copy steps aside.
+            if await state.offerToMoveLauncher() { return }
             state.startScheduler()
             // Dev harness (see main.swift): `JBTT_OPEN_SETTINGS=1` opens Settings at launch so JBTT_SNAPSHOT can capture it.
             if ProcessInfo.processInfo.environment["JBTT_OPEN_SETTINGS"] == "1" { showSettings = true }
