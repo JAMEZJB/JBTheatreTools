@@ -752,6 +752,7 @@ public sealed class MainForm : Form
         var key = InstallKey(row.App);
         row.SetState(InstallManager.Shared.InstalledVersion(key), row.Latest, row.LatestAssetId, row.Status);
         RecomputeRow(row);
+        RefreshDownloadAllButton();   // the edition the row shows is the one Download All installs
         Log.Write($"variant for {row.App.Id} → {variantId}");
     }
 
@@ -1485,16 +1486,15 @@ public sealed class MainForm : Form
 
     private bool HasFullVariants => _rows.Any(r => (r.App.Variants?.Count ?? 0) > 1);
 
-    /// <summary>Which variant slots of an app need fetching now: the default slot (and Full slots when
-    /// includeFull) whose asset exists in the latest release and isn't already installed at the latest
-    /// version. Mirrors the macOS slotsToDownload.</summary>
+    /// <summary>Which variant slots of an app need fetching now: the edition the row shows plus any installed one (every
+    /// edition when includeFull — see BatchEditions) whose asset exists in the latest release and isn't already
+    /// installed at the latest version. Mirrors the macOS slotsToDownload.</summary>
     private IEnumerable<string?> SlotsToDownload(AppRowControl row, bool includeFull)
     {
         var latest = row.LatestRelease;
         if (latest == null) yield break;
-        var variants = new List<string?> { row.App.HasVariants ? row.App.Variants?.FirstOrDefault()?.Id : null };
-        if (includeFull && row.App.Variants != null)
-            variants.AddRange(row.App.Variants.Skip(1).Select(v => (string?)v.Id));
+        var variants = BatchEditions.ForDownloadAll(row.App.Variants?.Select(v => v.Id).ToList(), SelectedVariant(row.App), includeFull,
+                                                    vid => InstallManager.Shared.InstalledVersion(row.App.InstallKey(vid)) != null);
         foreach (var vid in variants)
         {
             var name = AssetFor(row.App, vid);
@@ -1514,7 +1514,8 @@ public sealed class MainForm : Form
         if (BlockedByLock("download all")) return;
         var work = DownloadWork(includeFull);
         Log.Write($"download all{(includeFull ? " (incl. Full)" : "")}: {work.Count} slot(s)");
-        await RunSlotsAsync(work, "Download All");
+        // An app switched to Full (or an update found) while it runs is picked up before it ends.
+        await RunSlotsAsync(work, "Download All", refill: () => DownloadWork(includeFull));
     }
 
     /// <summary>The Download All work list: every slot to fetch, default editions first.</summary>
@@ -1584,7 +1585,7 @@ public sealed class MainForm : Form
         var flat = UpdateWork();
         if (flat.Count == 0) return;
         Log.Write($"update all: {flat.Count} slot(s) across {flat.Select(w => w.row).Distinct().Count()} app(s)");
-        await RunSlotsAsync(flat, "Update All");
+        await RunSlotsAsync(flat, "Update All", refill: UpdateWork);
     }
 
     /// <summary>Shows the notice banner with <paramref name="text"/>, or hides it when null.</summary>
@@ -2071,9 +2072,14 @@ public sealed class MainForm : Form
     /// slot N+1 is already downloading (network) — serially the network sat idle through every hash + extract.
     /// Downloads stay serial (venue Wi-Fi is the bottleneck) and at most two cache files exist at once. A failed
     /// slot gets one retry if the error was transient, and the batch CONTINUES; failures are summarised in one
-    /// dialog at the end (a per-slot modal used to halt the whole batch until someone clicked OK).</summary>
+    /// dialog at the end (a per-slot modal used to halt the whole batch until someone clicked OK).
+    /// <paramref name="refill"/> (Download All / Update All) is asked again whenever the list runs out: a slot it now
+    /// lists that this batch hasn't had yet — an app switched to its Full edition, an update a check found meanwhile —
+    /// is added to the end, so the batch never finishes with work the button would still offer. Each slot runs at most
+    /// once per batch (a failure isn't re-added).</summary>
     private async Task<List<(string Name, string Version)>> RunSlotsAsync(List<(AppRowControl row, string? vid, string? tag)> work,
-                                                                         string title, bool unattended = false)
+                                                                         string title, bool unattended = false,
+                                                                         Func<List<(AppRowControl row, string? vid, string? tag)>>? refill = null)
     {
         var done = new List<(string Name, string Version)>();
         if (_batchRunning) { Log.Write($"{title}: another batch is running — not started"); return done; }
@@ -2085,6 +2091,21 @@ public sealed class MainForm : Form
         // The list is fixed when the batch starts, but the person can keep working: each slot is re-checked just before
         // its turn (and before its look-ahead download starts) so the batch never undoes or repeats what they did.
         var installedAtStart = work.Select(w => InstallManager.Shared.InstalledVersion(w.row.App.InstallKey(w.vid))).ToList();
+        var had = work.Select(w => w.row.App.InstallKey(w.vid)).ToHashSet();
+        // Appends what refill now lists that this batch hasn't had; true when anything was added.
+        bool TopUp()
+        {
+            if (refill == null || token.IsCancellationRequested || Locked) return false;
+            int before = work.Count;
+            foreach (var w in refill())
+            {
+                if (!had.Add(w.row.App.InstallKey(w.vid))) continue;
+                work.Add(w);
+                installedAtStart.Add(InstallManager.Shared.InstalledVersion(w.row.App.InstallKey(w.vid)));
+            }
+            if (work.Count > before) Log.Write($"{title}: {work.Count - before} more slot(s) added while it ran");
+            return work.Count > before;
+        }
         string? SkipReason(int i)
         {
             var (row, vid, tag) = work[i];
@@ -2099,7 +2120,7 @@ public sealed class MainForm : Form
         Task<Downloaded?>? next = null;
         try
         {
-            for (int i = 0; i < work.Count; i++)
+            for (int i = 0; i < work.Count || TopUp(); i++)
             {
                 if (token.IsCancellationRequested) break;
                 var (row, vid, tag) = work[i];
@@ -2120,6 +2141,7 @@ public sealed class MainForm : Form
                 var current = next ?? DownloadSlotAsync(row, tag, vid, interactive: false, unattended, token);
                 var d = await current;                                   // download N done (or failed + recorded)
                 next = null;
+                if (i + 1 >= work.Count) TopUp();   // the list ran out: anything new becomes N+1
                 if (i + 1 < work.Count && !token.IsCancellationRequested && SkipReason(i + 1) == null)   // start download N+1 now…
                 {
                     var (nrow, nvid, ntag) = work[i + 1];

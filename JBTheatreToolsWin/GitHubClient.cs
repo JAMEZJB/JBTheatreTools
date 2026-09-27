@@ -233,15 +233,34 @@ public sealed class GitHubClient : IDisposable
         return resp;
     }
 
+    /// <summary>How long a download may go without receiving anything — no answer to the request, or no data mid-file —
+    /// before it counts as dropped. Without it a connection that went quiet (venue Wi-Fi, a sleeping laptop's socket)
+    /// left the row on "Downloading…" for good and held up a whole Download All behind it.</summary>
+    private static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(60);
+
     /// <summary>Downloads a release asset to <paramref name="dest"/>. Cancelling <paramref name="cancellationToken"/>
-    /// stops the transfer and removes the partial file (the caller sees an <see cref="OperationCanceledException"/>).</summary>
+    /// stops the transfer and removes the partial file (the caller sees an <see cref="OperationCanceledException"/>).
+    /// A download that stalls for <see cref="StallTimeout"/> throws an <see cref="IOException"/> — a transient error
+    /// a batch retries once.</summary>
     public async Task DownloadAssetAsync(string owner, string repo, long assetId, string dest,
                                          IProgress<double>? progress = null, CancellationToken cancellationToken = default)
     {
         var url = $"{_apiBase}/repos/{owner}/{repo}/releases/assets/{assetId}";
-        using var resp = await SendFollowingRedirectsAsync(url, "application/octet-stream",
-                                                           HttpCompletionOption.ResponseHeadersRead,
-                                                           cancellationToken).ConfigureAwait(false);
+        // One watchdog for the whole transfer, re-armed whenever data arrives; the caller's cancel still wins.
+        using var stall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        stall.CancelAfter(StallTimeout);
+        HttpResponseMessage response;
+        try
+        {
+            response = await SendFollowingRedirectsAsync(url, "application/octet-stream",
+                                                         HttpCompletionOption.ResponseHeadersRead,
+                                                         stall.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new IOException($"The download didn't start — no answer for {StallTimeout.TotalSeconds:0} seconds.");
+        }
+        using var resp = response;
         if (!resp.IsSuccessStatusCode)
             throw new GitHubException(GitHubErrorKind.Http, $"Download failed: HTTP {(int)resp.StatusCode}.");
 
@@ -260,13 +279,20 @@ public sealed class GitHubClient : IDisposable
             // ConfigureAwait(false) throughout the loop: each of the ~5,000+ chunk continuations for a Full
             // edition otherwise bounced through the WinForms message pump (progress still marshals correctly —
             // Progress<T> captured the UI context when it was created).
-            await using (var src = await resp.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
+            await using (var src = await resp.Content.ReadAsStreamAsync(stall.Token).ConfigureAwait(false))
             await using (var dst = File.Create(part))
             {
                 var buffer = new byte[81920];
-                int n;
-                while ((n = await src.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+                while (true)
                 {
+                    stall.CancelAfter(StallTimeout);
+                    int n;
+                    try { n = await src.ReadAsync(buffer, stall.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        throw new IOException($"The download stalled — nothing received for {StallTimeout.TotalSeconds:0} seconds.");
+                    }
+                    if (n == 0) break;
                     await dst.WriteAsync(buffer.AsMemory(0, n), cancellationToken).ConfigureAwait(false);
                     received += n;
                     if (total > 0)
