@@ -201,6 +201,9 @@ public sealed class MainForm : Form
             _list.Focus();
             // After an in-place update: tell the previous launcher this one is up (it then closes), and remove its old exe.
             LauncherUpdate.Started();
+            LauncherInstall.AfterInstall();   // the first start after installing itself: the downloaded copy goes
+            RefreshDownloadAllButton();   // lays the header out (status line included) before any question covers it
+            if (OfferToInstallLauncher()) return;   // installed itself: the installed copy takes over
             PrepareLauncherWhatsNew();
             ApplyLock();
             _scheduler.Start();
@@ -211,6 +214,67 @@ public sealed class MainForm : Form
                 await CheckLauncherUpdateAsync();
             }
         };
+    }
+
+    // --- Installing the launcher itself (it's a portable exe, often first run from Downloads) ---
+
+    /// <summary>Running from anywhere but the default place (and not a copy the person installed or chose to keep):
+    /// offers Install (the per-user programs folder), Choose Folder… or Keep Here. True when it installed itself and
+    /// this copy is closing in favour of the installed one.</summary>
+    private bool OfferToInstallLauncher()
+    {
+        var self = Environment.ProcessPath;
+        if (self == null || !LauncherHome.ShouldOffer(self, LauncherInstall.DefaultExe, _settings.LauncherHomes)) return false;
+        var defaultExe = LauncherInstall.DefaultExe;
+        bool fromDownloads = LauncherHome.IsInside(self, LauncherInstall.DownloadsDir);
+        var text = $"JB Theatre Tools is running from {ShortDataPath(Path.GetDirectoryName(self)!)}. Install it on this PC so it's "
+                   + $"easy to find again?\n\nIt goes in your apps folder ({ShortDataPath(Path.GetDirectoryName(defaultExe)!)}) with a "
+                   + "Start menu shortcut, and no administrator is needed. Your settings and apps stay as they are"
+                   + (fromDownloads ? ", and the downloaded copy goes to the Recycle Bin." : ".");
+        const DialogResult install = DialogResult.Yes, choose = DialogResult.Retry, keep = DialogResult.No;
+        var answer = HouseMessage.AskWithOption(this, "Install JB Theatre Tools", text,
+            new[] { ("Install", install), ("Choose Folder…", choose), ("Keep Here", keep) }, install, DialogResult.Cancel,
+            MessageBoxIcon.Question, install, destructive: false, ("Also add a desktop shortcut", null), out bool desktop);
+        string target;
+        if (answer == install) target = defaultExe;
+        else if (answer == choose)
+        {
+            using var picker = new FolderBrowserDialog
+            {
+                Description = "Choose where to install JB Theatre Tools", UseDescriptionForTitle = true, ShowNewFolderButton = true,
+                InitialDirectory = Path.GetDirectoryName(Path.GetDirectoryName(defaultExe)!)!,
+            };
+            if (picker.ShowDialog(this) != DialogResult.OK) return false;   // asked again next time
+            target = LauncherHome.ExeIn(picker.SelectedPath);
+        }
+        else
+        {
+            if (answer == keep) { KeepLauncherHome(self); Log.Write($"install: keeping the launcher at {self}"); }
+            return false;   // the close box: asked again next time
+        }
+        if (LauncherHome.Same(target, self)) { KeepLauncherHome(self); return false; }
+        try
+        {
+            LauncherInstall.Install(self, target, desktop);
+            if (!LauncherHome.Same(target, defaultExe)) KeepLauncherHome(target);   // a chosen folder is home too
+            LauncherInstall.Start(target, self);
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"install: FAILED to {target}: {ex.Message}");
+            HouseMessage.Show(this, ex.Message, "Couldn't install JB Theatre Tools", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
+        _reallyQuit = true;   // closing, not hiding to the notification area
+        Close();
+        return true;
+    }
+
+    private void KeepLauncherHome(string exe)
+    {
+        if (_settings.LauncherHomes.Any(h => LauncherHome.Same(h, exe))) return;
+        _settings.LauncherHomes.Add(exe);
+        _settings.Save();
     }
 
     // --- UI construction ---

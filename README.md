@@ -127,6 +127,13 @@ cleanup failure does not discard the new install. Old files that cannot be remov
 the first time (it's ad-hoc signed, not notarized). Right-click the app → **Open** → **Open** once; after
 that it launches normally. Apps you install **through** JB Theatre Tools are unaffected.
 
+**Where the launcher lives:** run it from wherever you downloaded it and it offers a proper home. On Windows:
+**Install** (your per-user apps folder, `AppData\Local\Programs\JB Theatre Tools`, with a Start menu shortcut
+and optionally a desktop one; no administrator needed; a copy in Downloads then goes to the Recycle Bin),
+**Choose Folder…**, or **Keep Here**. On macOS: **Move to Applications** (your own `~/Applications` when you can't
+write to `/Applications`; the downloaded copy goes to the Bin), **Choose Folder…**, or **Keep Here**. A copy that
+is already in place — or one you chose to keep — isn't asked again. Settings and installed apps don't move.
+
 ## Auth
 
 The catalog repos are **private**, so downloads need authentication. By default the launcher uses

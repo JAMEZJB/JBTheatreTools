@@ -2738,6 +2738,119 @@ final class AppState: ObservableObject {
 
     /// Starts the new launcher (already in place) and steps aside once it's up. Waits while installs run; if the new
     /// build quits — or macOS won't open it — this version is put back. Never swaps again (see `launcherPendingRestart`).
+    // MARK: - Moving the launcher itself into Applications
+
+    /// Running from anywhere but Applications (and not a copy the person moved to a folder of their choosing or chose to
+    /// keep): offers Move to Applications, Choose Folder… or Keep Here. On a move, the moved copy is opened and this one
+    /// quits. Dev harness: `JBTT_AUTO_MOVE=move|keep` answers for you, `JBTT_APPLICATIONS_DIR` stands in for
+    /// Applications and `JBTT_BIN_DIR` for the Bin (a test must never touch the real ones).
+    private static var moveOffered = false
+
+    func offerToMoveLauncher() async {
+        guard !Self.moveOffered else { return }   // once per run, not for every new window (⌘N)
+        Self.moveOffered = true
+        let env = ProcessInfo.processInfo.environment
+        // The other dev-harness runs (snapshots, loop watch, automatic Download All / update) aren't asked.
+        let harness = ["JBTT_SNAPSHOT", "JBTT_LOOP_WATCH", "JBTT_AUTO_DOWNLOAD_ALL", "JBTT_AUTO_SELF_UPDATE", "JBTT_SCROLL_BENCH"]
+        if env["JBTT_AUTO_MOVE"] == nil, harness.contains(where: { env[$0] != nil }) { return }
+        let bundle = Bundle.main.bundleURL.resolvingSymlinksInPath()
+        let here = LauncherHome.originalOfTranslocated(bundle) ?? bundle
+        let kept = UserDefaults.standard.stringArray(forKey: LauncherHome.keptKey) ?? []
+        guard LauncherHome.shouldOffer(bundlePath: here.path, homePath: NSHomeDirectory(), kept: kept,
+                                       testApplications: env["JBTT_APPLICATIONS_DIR"]) else { return }
+        let applications = LauncherHome.applicationsFolder()
+        let own = applications.path != "/Applications" && env["JBTT_APPLICATIONS_DIR"] == nil
+        enum Answer { case move, choose, keep }
+        let answer: Answer
+        if let auto = env["JBTT_AUTO_MOVE"] {
+            answer = auto == "keep" ? .keep : .move
+        } else {
+            let alert = NSAlert()
+            alert.messageText = "Move JB Theatre Tools to Applications?"
+            alert.informativeText = "It's running from \(Self.shortPath(here.deletingLastPathComponent())). In "
+                + (own ? "your own Applications folder" : "Applications")
+                + " it's in Launchpad and Spotlight with your other apps. Your settings and apps stay as they are, and this "
+                + "copy goes to the Bin."
+            alert.addButton(withTitle: "Move to Applications")
+            alert.addButton(withTitle: "Choose Folder…")
+            alert.addButton(withTitle: "Keep Here")
+            let response: NSApplication.ModalResponse
+            if let window = NSApp.windows.first(where: { $0.isVisible && $0.canBecomeKey }) {
+                NSApp.activate(ignoringOtherApps: true)
+                response = await withCheckedContinuation { cont in alert.beginSheetModal(for: window) { cont.resume(returning: $0) } }
+            } else {
+                response = alert.runModal()
+            }
+            answer = response == .alertFirstButtonReturn ? .move : response == .alertSecondButtonReturn ? .choose : .keep
+        }
+        var folder = applications
+        switch answer {
+        case .keep:
+            UserDefaults.standard.set(kept + [here.path], forKey: LauncherHome.keptKey)
+            AppLog.shared.log("move: keeping the launcher at \(here.path)")
+            return
+        case .choose:
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.canCreateDirectories = true
+            panel.prompt = "Move Here"
+            panel.message = "Choose where to keep JB Theatre Tools"
+            panel.directoryURL = applications
+            guard panel.runModal() == .OK, let picked = panel.url else { return }   // asked again next time
+            folder = picked
+        case .move:
+            break
+        }
+        let bin: (URL) throws -> Void = { url in
+            if let testBin = env["JBTT_BIN_DIR"], !testBin.isEmpty {
+                let to = URL(fileURLWithPath: testBin).appendingPathComponent("\(url.lastPathComponent)-\(UUID().uuidString.prefix(6))")
+                try FileManager.default.moveItem(at: url, to: to)
+            } else {
+                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+            }
+        }
+        let dest: URL, target = folder
+        do {
+            dest = try await Task.detached(priority: .userInitiated) {
+                try LauncherHome.move(bundle, original: here, into: target, toBin: bin)
+            }.value
+        } catch {
+            AppLog.shared.log("move: FAILED to \(folder.path): \(error.localizedDescription)")
+            Self.inform("Couldn't move JB Theatre Tools", error.localizedDescription)
+            return
+        }
+        if LauncherHome.shouldOffer(bundlePath: dest.path, homePath: NSHomeDirectory(), kept: kept,
+                                    testApplications: env["JBTT_APPLICATIONS_DIR"]) {
+            UserDefaults.standard.set(kept + [dest.path], forKey: LauncherHome.keptKey)   // a chosen folder is home too
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.createsNewApplicationInstance = true
+        config.activates = true
+        // A dev-harness run hands its JBTT_ settings on (an app opened by macOS doesn't inherit the environment).
+        config.environment = env.filter { $0.key.hasPrefix("JBTT_") }
+        // Not awaited: with this copy's own bundle just moved to the Bin, macOS opens the new copy but never answers
+        // the call. Watch for the moved copy to be running instead (up to 15 s), then step aside.
+        NSWorkspace.shared.openApplication(at: dest, configuration: config) { _, error in
+            if let error { AppLog.shared.log("move: couldn't open \(dest.path): \(error.localizedDescription)") }
+        }
+        let me = ProcessInfo.processInfo.processIdentifier
+        var up = false
+        for _ in 0..<60 {
+            up = NSWorkspace.shared.runningApplications.contains {
+                $0.processIdentifier != me && $0.bundleURL?.resolvingSymlinksInPath().path == dest.resolvingSymlinksInPath().path
+            }
+            if up { break }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        if !up { Self.inform("JB Theatre Tools was moved", "It's now in \(Self.shortPath(folder)). Open it from there.") }
+        AppLog.shared.log("move: \(up ? "the moved copy is open" : "the moved copy didn't open") — quitting this one")
+        NSApp.terminate(nil)
+        // A quit this early in start-up can be dropped by AppKit (seen on macOS 14); nothing is in progress yet, so make
+        // sure this copy steps aside.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { exit(0) }
+    }
+
     func restartLauncher() async {
         guard let (tag, old) = launcherPendingRestart, !launcherDownloading else { return }
         if showLock || batchRunning || rows.contains(where: { $0.busy }) {

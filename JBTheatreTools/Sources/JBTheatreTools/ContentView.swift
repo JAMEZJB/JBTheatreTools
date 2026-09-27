@@ -166,6 +166,8 @@ struct ContentView: View {
             // After an in-place update: tell the previous launcher this one is up (it then quits) and bin its old bundle.
             SelfUpdate.readAfterUpdate()
             SelfUpdate.started()
+            // Downloaded and run from Downloads (or anywhere but Applications): offer to move it where it belongs.
+            Task { await state.offerToMoveLauncher() }
             // AppKit gives the first text field (Find apps) the keyboard at launch; the launcher opens with nothing
             // focused, as it did before it had a find field (⌘F focuses it).
             DispatchQueue.main.async {
