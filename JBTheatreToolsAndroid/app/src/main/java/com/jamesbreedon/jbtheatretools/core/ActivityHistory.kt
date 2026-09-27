@@ -97,6 +97,7 @@ object ActivityHistory {
             "downgrade" -> "Rolled back ${e.name}${v(e.from)} →${v(e.to)}"
             "reinstall" -> "Reinstalled ${e.name}${v(e.to)}"
             "uninstall" -> "Removed ${e.name}${v(e.from)}"
+            "removedata" -> "Removed the settings, logs and cache of ${e.name}" + (if (e.note != null) " (some couldn't be removed)" else "")
             "failed" -> "Couldn't install ${e.name}${v(e.to)}" + (e.note?.let { ": $it" } ?: "")
             // The system's install dialog was cancelled: nothing went wrong.
             "cancelled" -> "Cancelled installing ${e.name}${v(e.to)}"

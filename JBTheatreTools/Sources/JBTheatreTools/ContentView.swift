@@ -1067,13 +1067,7 @@ struct AppRowView: View, Equatable {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .modifier(ErrorHelp(message: row.errorMessage ?? heldHelp))   // tooltips don't reach into the drawing group
-        .confirmationDialog("Uninstall \(row.displayName)?",
-                            isPresented: $confirmingUninstall, titleVisibility: .visible) {
-            Button("Uninstall", role: .destructive) { Task { await state.uninstallAsync(row.id) } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This removes the installed app from your Mac. You can reinstall it anytime.")
-        }
+        .modifier(UninstallConfirmation(row: row, state: state, isPresented: $confirmingUninstall))
     }
 
     /// Everything the row draws from its MODEL state: grip slot · icon · text column · status pill · actions.
@@ -1768,13 +1762,7 @@ struct AppGridTile: View, Equatable {
             return moved
         } isTargeted: { isDropTarget = $0 }
         .contextMenu { AppMenuButtons(row: row, requestUninstall: { confirmingUninstall = true }) }
-        .confirmationDialog("Uninstall \(row.displayName)?",
-                            isPresented: $confirmingUninstall, titleVisibility: .visible) {
-            Button("Uninstall", role: .destructive) { Task { await state.uninstallAsync(row.id) } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This removes the installed app from your Mac. You can reinstall it anytime.")
-        }
+        .modifier(UninstallConfirmation(row: row, state: state, isPresented: $confirmingUninstall))
         .help(tooltip)
     }
 
@@ -1838,5 +1826,47 @@ struct AppGridTile: View, Equatable {
             t += " — click to install"
         }
         return t
+    }
+}
+
+/// The Uninstall confirmation (list row and grid tile). When this is the app's last installed edition and it keeps
+/// settings, logs or caches of its own, a second button also moves those to the Bin.
+private struct UninstallConfirmation: ViewModifier {
+    @ObservedObject var row: AppState.Row
+    let state: AppState
+    @Binding var isPresented: Bool
+    /// What's on disk, read once as the dialog opens — in the render that presents it, so its buttons are right from
+    /// the start (a dialog doesn't take new buttons once it's up). A reference box: filling it doesn't re-render.
+    private final class Footprint { var value: (paths: [URL], bytes: Int64)?; var read = false }
+    @State private var cache = Footprint()
+
+    private var footprint: (paths: [URL], bytes: Int64)? {
+        guard isPresented else { cache.read = false; cache.value = nil; return nil }
+        if !cache.read { cache.value = state.dataFootprint(row.id); cache.read = true }
+        return cache.value
+    }
+
+    func body(content: Content) -> some View {
+        let footprint = self.footprint
+        return content
+            .confirmationDialog("Uninstall \(row.displayName)?", isPresented: $isPresented, titleVisibility: .visible) {
+                Button("Uninstall", role: .destructive) { Task { await state.uninstallAsync(row.id) } }
+                if footprint != nil {
+                    Button("Uninstall and Remove Its Data", role: .destructive) {
+                        Task { await state.uninstallAsync(row.id, removeData: true) }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(Self.message(footprint))
+            }
+    }
+
+    private static func message(_ footprint: (paths: [URL], bytes: Int64)?) -> String {
+        let base = "This removes the installed app from your Mac. You can reinstall it anytime."
+        guard let footprint else { return base }
+        let size = footprint.bytes > 0 ? " (\(ByteSize.format(footprint.bytes)))" : ""
+        return base + "\n\n“Uninstall and Remove Its Data” also moves its settings, logs and cache\(size) to the Bin. "
+            + "Files you saved are kept."
     }
 }

@@ -72,6 +72,11 @@ public sealed class CatalogApp
     /// with more than one entry, the row shows a variant toggle and install resolves the selected one.</summary>
     [JsonPropertyName("variants")] public List<AppVariant>? Variants { get; set; }
 
+    /// <summary>Folder names the app keeps its own settings, logs and caches under (outside its install folder) —
+    /// %APPDATA%\&lt;name&gt; and %LOCALAPPDATA%\&lt;name&gt; here, the Library folders on a Mac (see AppDataFolders).
+    /// Uninstalling the app's last edition offers to remove them.</summary>
+    [JsonPropertyName("dataFolders")] public List<string>? DataFolders { get; set; }
+
     /// <summary>True when this app ships more than one variant → the row shows a Light/Full toggle.</summary>
     public bool HasVariants => (Variants?.Count ?? 0) > 1;
 

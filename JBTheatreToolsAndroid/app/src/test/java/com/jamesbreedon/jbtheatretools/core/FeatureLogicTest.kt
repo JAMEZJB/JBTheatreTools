@@ -177,6 +177,9 @@ class FeatureLogicTest {
         assertEquals("Reinstalled DMX Tools v1.0.0", ActivityHistory.describe(ActivityEvent(t, "d", "DMX Tools", "reinstall", "1.0.0", "1.0.0")))
         assertEquals("Removed DMX Tools v1.0.0", ActivityHistory.describe(ActivityEvent(t, "d", "DMX Tools", "uninstall", "1.0.0")))
         assertEquals("Removed DMX Tools", ActivityHistory.describe(ActivityEvent(t, "d", "DMX Tools", "uninstall")))
+        assertEquals("Removed the settings, logs and cache of DMX Tools", ActivityHistory.describe(ActivityEvent(t, "d", "DMX Tools", "removedata")))
+        assertEquals("Removed the settings, logs and cache of DMX Tools (some couldn't be removed)",
+                     ActivityHistory.describe(ActivityEvent(t, "d", "DMX Tools", "removedata", null, null, "in use")))
         assertEquals("Couldn't install DMX Tools v1.1.0: offline", ActivityHistory.describe(ActivityEvent(t, "d", "DMX Tools", "failed", null, "1.1.0", "offline")))
         // A cancelled install dialog is recorded as cancelled — not as a failure.
         assertEquals("Cancelled installing DMX Tools v1.1.0", ActivityHistory.describe(ActivityEvent(t, "d", "DMX Tools", "cancelled", null, "1.1.0")))

@@ -276,6 +276,9 @@ public class ActivityHistoryTests
         Assert.Equal("Reinstalled DMX Tools v1.0.0", ActivityHistory.Describe(new(T, "d", "DMX Tools", "reinstall", "1.0.0", "1.0.0")));
         Assert.Equal("Removed DMX Tools v1.0.0", ActivityHistory.Describe(new(T, "d", "DMX Tools", "uninstall", "1.0.0")));
         Assert.Equal("Removed DMX Tools", ActivityHistory.Describe(new(T, "d", "DMX Tools", "uninstall")));
+        Assert.Equal("Removed the settings, logs and cache of DMX Tools", ActivityHistory.Describe(new(T, "d", "DMX Tools", "removedata")));
+        Assert.Equal("Removed the settings, logs and cache of DMX Tools (some couldn't be removed)",
+                     ActivityHistory.Describe(new(T, "d", "DMX Tools", "removedata", null, null, "in use")));
         Assert.Equal("Couldn't install DMX Tools v1.1.0: offline", ActivityHistory.Describe(new(T, "d", "DMX Tools", "failed", null, "1.1.0", "offline")));
     }
 

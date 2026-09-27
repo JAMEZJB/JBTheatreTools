@@ -167,6 +167,9 @@ final class FeatureLogicTests: XCTestCase {
         XCTAssertEqual(ActivityHistory.describe(ev("reinstall", "1.0.0", "1.0.0")), "Reinstalled DMX Tools v1.0.0")
         XCTAssertEqual(ActivityHistory.describe(ev("uninstall", "1.0.0")), "Removed DMX Tools v1.0.0")
         XCTAssertEqual(ActivityHistory.describe(ev("uninstall")), "Removed DMX Tools")
+        XCTAssertEqual(ActivityHistory.describe(ev("removedata")), "Removed the settings, logs and cache of DMX Tools")
+        XCTAssertEqual(ActivityHistory.describe(ev("removedata", nil, nil, "in use")),
+                       "Removed the settings, logs and cache of DMX Tools (some couldn't be removed)")
         XCTAssertEqual(ActivityHistory.describe(ev("failed", nil, "1.1.0", "offline")), "Couldn't install DMX Tools v1.1.0: offline")
         let now = date("2026-09-25T18:00:00Z")
         XCTAssertEqual(ActivityHistory.when(date("2026-09-25T14:02:00Z"), now: now, calendar: utc), "Today 14:02")

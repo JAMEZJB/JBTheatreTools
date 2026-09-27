@@ -2205,8 +2205,24 @@ public sealed class MainForm : Form
     private async void Uninstall(AppRowControl row)
     {
         if (BlockedByLock($"uninstall {row.App.Id}")) return;
-        if (HouseMessage.Show(this, $"Uninstall {row.DisplayName}?", "Uninstall",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Question, destructive: true) != DialogResult.Yes) return;
+        // An open app can't be removed (its exe is in use — the files stayed behind while the row said "uninstalled").
+        var open = InstallManager.Shared.RunningInstances(InstallKey(row.App));
+        foreach (var p in open) p.Dispose();
+        if (open.Length > 0)
+        {
+            HouseMessage.Show(this, $"{row.DisplayName} is open. Close it, then uninstall it.", "Uninstall",
+                              MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        // Removing the app's LAST edition may also remove its settings, logs and caches (Light and Full share them).
+        var dataPaths = OtherEditionInstalled(row.App, InstallKey(row.App)) ? new List<string>() : ExistingDataPaths(row.App);
+        long dataBytes = dataPaths.Count == 0 ? 0 : await Task.Run(() => dataPaths.Sum(FolderBytes));
+        (string, string?)? option = dataPaths.Count == 0 ? null :
+            ($"Also remove its settings, logs and cache{(dataBytes > 0 ? $" ({ByteSize.Format(dataBytes)})" : "")}",
+             "Moved to the Recycle Bin: " + string.Join(", ", dataPaths.Select(ShortDataPath)) + ". Files you saved are kept.");
+        if (HouseMessage.AskWithOption(this, "Uninstall", $"Uninstall {row.DisplayName}?",
+                new[] { ("Yes", DialogResult.Yes), ("No", DialogResult.No) }, DialogResult.No, DialogResult.No,
+                MessageBoxIcon.Question, DialogResult.Yes, destructive: true, option, out bool removeData) != DialogResult.Yes) return;
         // Re-check after the dialog: an install (or show lock) may have started while it was open.
         if (row.IsBusy || BlockedByLock($"uninstall {row.App.Id}")) return;
         // Uninstalls the SELECTED variant's slot only (a sibling variant, if installed, stays). The delete runs
@@ -2232,6 +2248,19 @@ public sealed class MainForm : Form
             row.SetState(null, row.Latest, row.LatestAssetId, status);
             row.SetResolvedName(null);
             Log.Write($"uninstalled {row.App.Id}");
+            // Only once the app itself is gone, and only if no other edition was installed meanwhile.
+            if (removeData && !OtherEditionInstalled(row.App, key))
+            {
+                row.SetPhase("Removing settings…", indeterminate: true);
+                var failed = await Task.Run(() => RemoveDataFolders(dataPaths));
+                row.SetPhase(null);
+                History.Add(key, row.App.Name, "removedata", null, null,
+                            failed.Count == 0 ? null : string.Join("; ", failed.Select(f => f.Path)));
+                if (failed.Count > 0)
+                    HouseMessage.Show(this, $"{name} was uninstalled, but some of its files couldn't be removed:\n\n" +
+                                      string.Join("\n", failed.Select(f => $"• {ShortDataPath(f.Path)} — {f.Reason}")),
+                                      "Uninstall", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
         catch (Exception ex)
         {
@@ -2246,6 +2275,50 @@ public sealed class MainForm : Form
             row.SetBusy(false);
             RefreshDownloadAllButton();
         }
+    }
+
+    /// <summary>True when an edition of <paramref name="app"/> other than <paramref name="key"/> is installed.</summary>
+    private static bool OtherEditionInstalled(CatalogApp app, string key)
+    {
+        IEnumerable<string?> vids = app.HasVariants && app.Variants != null ? app.Variants.Select(v => (string?)v.Id) : new string?[] { null };
+        return vids.Select(app.InstallKey).Any(k => k != key && InstallManager.Shared.InstalledVersion(k) != null);
+    }
+
+    /// <summary>The app's own settings / log / cache folders (catalog dataFolders) that exist on this PC.</summary>
+    private static List<string> ExistingDataPaths(CatalogApp app) =>
+        AppDataFolders.WindowsPaths(app.DataFolders,
+                                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData))
+            .Where(Directory.Exists).ToList();
+
+    /// <summary>"AppData\Roaming\PSN Tools" — a data folder as the person finds it from their user folder.</summary>
+    private static string ShortDataPath(string path)
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return path.StartsWith(home + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ? Path.GetRelativePath(home, path) : path;
+    }
+
+    private static long FolderBytes(string dir)
+    {
+        try
+        {
+            return new DirectoryInfo(dir).EnumerateFiles("*", new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint })
+                .Sum(f => f.Length);
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>Moves each folder to the Recycle Bin; returns the ones that couldn't be moved (and why).</summary>
+    private static List<(string Path, string Reason)> RemoveDataFolders(IEnumerable<string> paths)
+    {
+        var failed = new List<(string, string)>();
+        foreach (var p in paths)
+        {
+            if (!Directory.Exists(p)) continue;
+            try { RecycleBin.Move(p); Log.Write($"uninstall: moved {p} to the Recycle Bin"); }
+            catch (Exception ex) { failed.Add((p, ex.Message)); Log.Write($"uninstall: couldn't remove {p}: {ex.Message}"); }
+        }
+        return failed;
     }
 
     private void Launch(AppRowControl row)

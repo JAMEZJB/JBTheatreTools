@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64 (plus optional per-arch macOS keys macos-arm64 / macos-x64, which the macOS launcher prefers over the universal `macos` key when present). macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Twenty-four apps (two — NETGEAR and MikroTik — are shown only with the Development builds switch on until they have a release) (NDI Tools, PDF Tools, Image Tools and Surtitle Tools each ship two variants — a default and a batteries-included 'Full' — chosen by a per-row toggle; each app entry may carry an optional `variants` array [{id,label,assets}], and the Full variant uses the per-arch macOS keys macos-arm64 / macos-x64. Convert is date-tagged (build-YYYYMMDD, rolling) rather than semver, so it resolves against the latest release); Each app entry may carry optional `whatsNew` + `whatsNewVersion` strings (a one-line what's-new for its current release, shown under the app in both launchers; omitted for apps with no release yet). asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships).",
+  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64 (plus optional per-arch macOS keys macos-arm64 / macos-x64, which the macOS launcher prefers over the universal `macos` key when present). macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Twenty-four apps (two — NETGEAR and MikroTik — are shown only with the Development builds switch on until they have a release) (NDI Tools, PDF Tools, Image Tools and Surtitle Tools each ship two variants — a default and a batteries-included 'Full' — chosen by a per-row toggle; each app entry may carry an optional `variants` array [{id,label,assets}], and the Full variant uses the per-arch macOS keys macos-arm64 / macos-x64. Convert is date-tagged (build-YYYYMMDD, rolling) rather than semver, so it resolves against the latest release); Each app entry may carry optional `whatsNew` + `whatsNewVersion` strings (a one-line what's-new for its current release, shown under the app in both launchers; omitted for apps with no release yet). asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships). Each app entry also lists `dataFolders` (the folder names it keeps its own settings, logs and caches under: %APPDATA% and %LOCALAPPDATA% on Windows; Application Support, Logs and Caches in ~/Library on macOS) and `bundleIds` (macOS: its WebKit data, caches, saved window state and preferences), so uninstalling its last edition can offer to remove them. Check both against the app's own paths when it changes them.",
   "downloadServer": "https://jbtheatretools.jamesbreedon.com/ghapi",
   "categories": [
     "Show control",
@@ -30,6 +30,13 @@
       "whatsNewVersion": "v2.1.2",
       "owner": "JAMEZJB",
       "repo": "HeloControl",
+      "dataFolders": [
+        "HELO Control",
+        "HeloControl"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.helocontrol"
+      ],
       "assets": {
         "macos": "HeloControl-macOS.zip",
         "windows-x64": "HeloControl-Windows-x64.exe",
@@ -45,6 +52,12 @@
       "whatsNewVersion": "v1.7.1",
       "owner": "JAMEZJB",
       "repo": "CiscoSwitchTools",
+      "dataFolders": [
+        "Cisco Switch Tools"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.ciscoswitchtools"
+      ],
       "assets": {
         "macos": "Cisco.Switch.Tools.macOS.universal2.zip",
         "windows-x64": "Cisco.Switch.Tools.x64.exe",
@@ -58,6 +71,12 @@
       "category": "Networking",
       "owner": "JAMEZJB",
       "repo": "NetgearSwitchTools",
+      "dataFolders": [
+        "NETGEAR Switch Tools"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.netgearswitchtools"
+      ],
       "assets": {
         "macos": "NetgearSwitchTools-macOS.zip",
         "windows-x64": "NetgearSwitchTools-Windows-x64.exe",
@@ -71,6 +90,12 @@
       "category": "Networking",
       "owner": "JAMEZJB",
       "repo": "MikroTikRouterTools",
+      "dataFolders": [
+        "MikroTik Router Tools"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.mikrotikroutertools"
+      ],
       "assets": {
         "macos": "MikroTikRouterTools-macOS.zip",
         "windows-x64": "MikroTikRouterTools-Windows-x64.exe",
@@ -86,6 +111,12 @@
       "whatsNewVersion": "v2.1.2",
       "owner": "JAMEZJB",
       "repo": "CiscoBrotherLabels",
+      "dataFolders": [
+        "Cisco Brother Labels"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.ciscobrotherlabels"
+      ],
       "assets": {
         "macos": "CiscoBrotherLabels-macOS.zip",
         "windows-x64": "CiscoBrotherLabels-Windows-x64.exe",
@@ -101,6 +132,12 @@
       "whatsNewVersion": "v2.1.2",
       "owner": "JAMEZJB",
       "repo": "ShowMachinesInventory",
+      "dataFolders": [
+        "Machine Inventory"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.machineinventory"
+      ],
       "assets": {
         "macos": "MachineInventory-macOS.zip",
         "windows-x64": "MachineInventory-Windows-x64.exe",
@@ -116,6 +153,12 @@
       "whatsNewVersion": "v1.8.2",
       "owner": "JAMEZJB",
       "repo": "NetworkPortMap",
+      "dataFolders": [
+        "Build Port Map"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.networkportmap"
+      ],
       "assets": {
         "macos": "NetworkPortMap-macOS.zip",
         "windows-x64": "NetworkPortMap-Windows-x64.exe",
@@ -131,6 +174,13 @@
       "whatsNewVersion": "v2.1.2",
       "owner": "JAMEZJB",
       "repo": "ProjectorControl",
+      "dataFolders": [
+        "ProjectorControl",
+        "Projector Control"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.projectorcontrol"
+      ],
       "assets": {
         "macos": "ProjectorControl-macOS.zip",
         "windows-x64": "ProjectorControl-Windows-x64.exe",
@@ -146,6 +196,12 @@
       "whatsNewVersion": "v1.13.2",
       "owner": "JAMEZJB",
       "repo": "ShowDashboard",
+      "dataFolders": [
+        "ShowDashboard"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.showdashboard"
+      ],
       "assets": {
         "macos": "ShowDashboard-macOS.zip",
         "windows-x64": "ShowDashboard-Windows-x64.exe",
@@ -161,6 +217,13 @@
       "whatsNewVersion": "v1.22.2",
       "owner": "JAMEZJB",
       "repo": "ShowHandbook",
+      "dataFolders": [
+        "ShowHandbook"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.showhandbook",
+        "com.jamesbreedon.showhandbook.full"
+      ],
       "assets": {
         "macos": "ShowHandbook-macOS.zip",
         "windows-x64": "ShowHandbook-Windows-x64.exe",
@@ -195,6 +258,13 @@
       "whatsNewVersion": "v1.6.1",
       "owner": "JAMEZJB",
       "repo": "PSNTools",
+      "dataFolders": [
+        "PSN Tools"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.psntools",
+        "com.jamesbreedon.psntools.full"
+      ],
       "assets": {
         "macos": "PSNTools-macOS.zip",
         "windows-x64": "PSNTools-Windows-x64.exe",
@@ -230,6 +300,12 @@
       "whatsNewVersion": "v1.3.3",
       "owner": "JAMEZJB",
       "repo": "DMXTools",
+      "dataFolders": [
+        "DMX Tools"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.dmxtools"
+      ],
       "assets": {
         "macos": "DMXTools-macOS.zip",
         "windows-x64": "DMXTools-Windows-x64.exe",
@@ -245,6 +321,12 @@
       "whatsNewVersion": "v0.5.2",
       "owner": "JAMEZJB",
       "repo": "DeskConvert",
+      "dataFolders": [
+        "Desk Convert"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.deskconvert"
+      ],
       "assets": {
         "macos": "DeskConvert-macOS.zip",
         "windows-x64": "DeskConvert-Windows-x64.exe",
@@ -260,6 +342,13 @@
       "whatsNewVersion": "v0.3.3",
       "owner": "JAMEZJB",
       "repo": "NDITools",
+      "dataFolders": [
+        "NDITools"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.nditools",
+        "com.jamesbreedon.nditools.full"
+      ],
       "assets": {
         "macos": "NDITools-macOS.zip",
         "windows-x64": "NDITools-Windows-x64.exe",
@@ -295,6 +384,12 @@
       "whatsNewVersion": "v0.6.2",
       "owner": "JAMEZJB",
       "repo": "PowerCalc",
+      "dataFolders": [
+        "PowerCalc"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.powercalc"
+      ],
       "assets": {
         "macos": "PowerCalc-macOS.zip",
         "windows-x64": "PowerCalc-Windows-x64.exe",
@@ -310,6 +405,13 @@
       "whatsNewVersion": "v0.3.3",
       "owner": "JAMEZJB",
       "repo": "ShowControlTools",
+      "dataFolders": [
+        "ShowControlTools",
+        "Show Control Tools"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.showcontrol"
+      ],
       "assets": {
         "macos": "ShowControlTools-macOS.zip",
         "windows-x64": "ShowControlTools-Windows-x64.exe",
@@ -325,6 +427,12 @@
       "whatsNewVersion": "v0.4.1",
       "owner": "JAMEZJB",
       "repo": "ShowNetScanner",
+      "dataFolders": [
+        "ShowNet Scanner"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.shownetscanner"
+      ],
       "assets": {
         "macos": "ShowNetScanner-macOS.zip",
         "windows-x64": "ShowNetScanner-Windows-x64.exe",
@@ -340,6 +448,12 @@
       "whatsNewVersion": "v1.5.2",
       "owner": "JAMEZJB",
       "repo": "TimecodeTools",
+      "dataFolders": [
+        "TimecodeTools"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.timecodetools"
+      ],
       "assets": {
         "macos": "TimecodeTools-macOS.zip",
         "windows-x64": "TimecodeTools-Windows-x64.exe",
@@ -355,6 +469,13 @@
       "whatsNewVersion": "v0.9.1",
       "owner": "JAMEZJB",
       "repo": "PDFTools",
+      "dataFolders": [
+        "PDF Tools"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.pdftools",
+        "com.jamesbreedon.pdftools.full"
+      ],
       "assets": {
         "macos": "PDFTools-macOS.zip",
         "windows-x64": "PDFTools-Windows-x64.exe"
@@ -388,6 +509,13 @@
       "whatsNewVersion": "v0.6.1",
       "owner": "JAMEZJB",
       "repo": "ImageTools",
+      "dataFolders": [
+        "Image Tools"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.imagetools",
+        "com.jamesbreedon.imagetools.full"
+      ],
       "assets": {
         "macos": "ImageTools-macOS.zip",
         "windows-x64": "ImageTools-Windows-x64.exe",
@@ -423,6 +551,13 @@
       "whatsNewVersion": "v0.5.2",
       "owner": "JAMEZJB",
       "repo": "SurtitleTools",
+      "dataFolders": [
+        "Surtitle Tools"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.surtitletools",
+        "com.jamesbreedon.surtitletools.full"
+      ],
       "assets": {
         "macos": "SurtitleTools-macOS.zip",
         "windows-x64": "SurtitleTools-Windows-x64.exe",
@@ -456,6 +591,13 @@
       "category": "Documents & media",
       "owner": "JAMEZJB",
       "repo": "Convert",
+      "dataFolders": [
+        "Convert to it!",
+        "p2r3-convert-updater"
+      ],
+      "bundleIds": [
+        "com.p2r3.convert"
+      ],
       "assets": {
         "macos": "convert-macOS.zip",
         "windows-x64": "convert-Windows-x64.exe",
@@ -471,6 +613,12 @@
       "whatsNewVersion": "v0.3.3",
       "owner": "JAMEZJB",
       "repo": "RenameTools",
+      "dataFolders": [
+        "Rename Tools"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.renametools"
+      ],
       "assets": {
         "macos": "RenameTools-macOS.zip",
         "windows-x64": "RenameTools-Windows-x64.exe",
@@ -486,6 +634,12 @@
       "whatsNewVersion": "v0.2.3",
       "owner": "JAMEZJB",
       "repo": "RepoRadar",
+      "dataFolders": [
+        "Repo Radar"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.reporadar"
+      ],
       "assets": {
         "macos": "RepoRadar-macOS.zip",
         "windows-x64": "RepoRadar-Windows-x64.exe",

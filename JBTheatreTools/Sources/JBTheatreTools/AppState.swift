@@ -1780,9 +1780,15 @@ final class AppState: ObservableObject {
     /// UI entry point: the removal (a one-dir Full edition is thousands of files, 300–450 MB — seconds of unlink)
     /// runs off the main actor with the row busy, then the row is updated. `uninstall(_:)` below stays
     /// synchronous for the CLI.
-    func uninstallAsync(_ id: String) async {
+    func uninstallAsync(_ id: String, removeData: Bool = false) async {
         guard let row = rows.first(where: { $0.id == id }), !blockedByLock("uninstall \(id)"), !launcherDownloading else { return }
         let key = installKey(for: row.app)
+        // Its settings can't be removed from under it while it runs (it would write them straight back).
+        if removeData, InstallManager.shared.runningInstance(key) != nil {
+            Self.inform("\(row.displayName) is open", "Quit it, then uninstall it.")
+            return
+        }
+        let dataPaths = removeData ? (dataFootprint(id)?.paths ?? []) : []
         let fromVersion = InstallManager.shared.installedVersion(key)
         let name = row.displayName
         // Registered like an install: a batch can't start downloading this slot, and Launch waits while it's removed.
@@ -1800,6 +1806,79 @@ final class AppState: ObservableObject {
         endBusy(id)
         if failure == nil, let fromVersion { HistoryStore.add(app: key, name: name, action: "uninstall", from: fromVersion) }
         applyUninstallOutcome(id, failure: failure)
+        // Only once the app itself is gone, and only if no other edition was installed meanwhile.
+        guard failure == nil, !dataPaths.isEmpty, !otherEditionInstalled(row.app, key) else { return }
+        let failed = await Task.detached(priority: .userInitiated) { Self.removeDataItems(dataPaths) }.value
+        HistoryStore.add(app: key, name: row.app.name, action: "removedata",
+                         note: failed.isEmpty ? nil : failed.map(\.path.path).joined(separator: "; "))
+        if !failed.isEmpty {
+            Self.inform("Some of \(row.app.name)'s files couldn't be removed",
+                        failed.map { "• \(Self.shortPath($0.path)) — \($0.reason)" }.joined(separator: "\n"))
+        }
+    }
+
+    /// True when an edition of `app` other than `key` is installed (Light and Full share their settings).
+    private func otherEditionInstalled(_ app: CatalogApp, _ key: String) -> Bool {
+        let vids: [String?] = app.hasVariants ? (app.variants ?? []).map { $0.id } : [nil]
+        return vids.map { app.installKey(variantId: $0) }.contains { $0 != key && InstallManager.shared.installedVersion($0) != nil }
+    }
+
+    /// The app's own settings / logs / caches that exist on this Mac — nil unless uninstalling the row's edition would
+    /// leave no edition installed (and there's something to remove). Shown in the Uninstall confirmation.
+    func dataFootprint(_ id: String) -> (paths: [URL], bytes: Int64)? {
+        guard let row = rows.first(where: { $0.id == id }) else { return nil }
+        guard !otherEditionInstalled(row.app, installKey(for: row.app)) else { return nil }
+        let fm = FileManager.default
+        let library = fm.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+        let paths = AppDataFolders.macPaths(folders: row.app.dataFolders, bundleIds: row.app.bundleIds, library: library)
+            .filter { fm.fileExists(atPath: $0.path) }
+        guard !paths.isEmpty else { return nil }
+        return (paths, paths.reduce(0) { $0 + Self.itemBytes($1) })
+    }
+
+    nonisolated private static func itemBytes(_ url: URL) -> Int64 {
+        let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .isSymbolicLinkKey]
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return 0 }
+        if !isDir.boolValue { return Int64((try? url.resourceValues(forKeys: Set(keys)))?.totalFileAllocatedSize ?? 0) }
+        var total: Int64 = 0
+        let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys, options: [], errorHandler: { _, _ in true })
+        while let f = walker?.nextObject() as? URL {
+            total += Int64((try? f.resourceValues(forKeys: Set(keys)))?.totalFileAllocatedSize ?? 0)
+        }
+        return total
+    }
+
+    /// Moves each item to the Bin (recoverable); returns the ones that couldn't be moved and why. `toBin` is injected by
+    /// tests — they must never touch the real Bin.
+    nonisolated static func removeDataItems(_ items: [URL],
+                                            toBin: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) })
+        -> [(path: URL, reason: String)] {
+        var failed: [(path: URL, reason: String)] = []
+        for item in items where FileManager.default.fileExists(atPath: item.path) {
+            do { try toBin(item); AppLog.shared.log("uninstall: moved \(item.path) to the Bin") }
+            catch { failed.append((item, error.localizedDescription)); AppLog.shared.log("uninstall: couldn't remove \(item.path): \(error.localizedDescription)") }
+        }
+        return failed
+    }
+
+    /// "Library/Application Support/PSN Tools" — an item as the person finds it from their home folder.
+    nonisolated static func shortPath(_ url: URL) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path + "/"
+        return url.path.hasPrefix(home) ? String(url.path.dropFirst(home.count)) : url.path
+    }
+
+    /// A plain notice (an NSAlert over the launcher window when it's up).
+    private static func inform(_ title: String, _ text: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.addButton(withTitle: "OK")
+        if let window = NSApp.windows.first(where: { $0.isVisible && $0.canBecomeKey }) {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
     }
 
     private func applyUninstallOutcome(_ id: String, failure: String?) {

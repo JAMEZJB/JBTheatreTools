@@ -65,6 +65,12 @@ struct CatalogApp: Decodable, Identifiable, Sendable {
     /// against the SELECTED variant's assets. The first variant is the default.
     let variants: [AppVariant]?
 
+    /// Folder names the app keeps its own settings, logs and caches under (Application Support, Logs, Caches here;
+    /// %APPDATA% / %LOCALAPPDATA% on Windows) and its bundle ids (WebKit data, caches, saved state, preferences) —
+    /// see AppDataFolders. Uninstalling the app's last edition offers to remove them.
+    var dataFolders: [String]? = nil
+    var bundleIds: [String]? = nil
+
     /// True when this app ships more than one variant → the launcher shows a Light/Full toggle.
     var hasVariants: Bool { (variants?.count ?? 0) > 1 }
 

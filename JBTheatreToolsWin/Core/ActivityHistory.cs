@@ -99,6 +99,7 @@ public static class ActivityHistory
             "downgrade" => $"Rolled back {e.Name}{V(e.From)} →{V(e.To)}",
             "reinstall" => $"Reinstalled {e.Name}{V(e.To)}",
             "uninstall" => $"Removed {e.Name}{V(e.From)}",
+            "removedata" => $"Removed the settings, logs and cache of {e.Name}" + (e.Note != null ? " (some couldn't be removed)" : ""),
             "failed" => $"Couldn't install {e.Name}{V(e.To)}" + (e.Note != null ? $": {e.Note}" : ""),
             _ => $"{e.Action} {e.Name}{V(e.To)}",
         };

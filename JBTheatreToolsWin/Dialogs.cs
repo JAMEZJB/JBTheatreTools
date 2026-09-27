@@ -44,11 +44,26 @@ internal static class HouseMessage
     public static DialogResult Ask(IWin32Window? owner, string caption, string text, (string Label, DialogResult Result)[] choices,
                                    DialogResult defaultResult, DialogResult cancelResult, MessageBoxIcon icon = MessageBoxIcon.None,
                                    DialogResult? primaryResult = null, bool destructive = false)
+        => AskWithOption(owner, caption, text, choices, defaultResult, cancelResult, icon, primaryResult, destructive, null, out _);
+
+    /// <summary><see cref="Ask"/> with a tick box under the message (unticked to start), e.g. "Also delete its settings".
+    /// <paramref name="option"/> is the box's label and an optional smaller line under it (what ticking it covers).</summary>
+    public static DialogResult AskWithOption(IWin32Window? owner, string caption, string text, (string Label, DialogResult Result)[] choices,
+                                             DialogResult defaultResult, DialogResult cancelResult, MessageBoxIcon icon,
+                                             DialogResult? primaryResult, bool destructive, (string Label, string? Detail)? option,
+                                             out bool optionChecked)
     {
         var ownerControl = owner as Control ?? (owner != null ? Control.FromHandle(owner.Handle) : null);
         int dpi = ownerControl?.DeviceDpi ?? 96;
         using var form = new MessageForm(caption, text, choices, defaultResult, cancelResult, icon, dpi, Theme.CurrentDark,
-                                         primaryResult ?? defaultResult, destructive);
+                                         primaryResult ?? defaultResult, destructive, option);
+        var result = ShowForm(form, owner, ownerControl);
+        optionChecked = form.OptionChecked;
+        return result;
+    }
+
+    private static DialogResult ShowForm(Form form, IWin32Window? owner, Control? ownerControl)
+    {
         // An owner that isn't on screen (the window hidden to the notification area, or not shown yet) can't host it.
         if (ownerControl is { IsHandleCreated: true, Visible: true })
             return form.ShowDialog(owner);
@@ -67,12 +82,16 @@ internal static class HouseMessage
     {
         private readonly List<Font> _fonts = new();
         private readonly DialogResult _cancelResult;
+        private readonly HouseCheckBox? _option;
         private readonly int _dpi;
+
+        /// <summary>The tick box's state when the dialog closed (false when it has none).</summary>
+        public bool OptionChecked => _option?.Checked == true;
         private int S(int v) => Theme.Px(v, _dpi);
 
         public MessageForm(string caption, string text, (string Label, DialogResult Result)[] choices,
                            DialogResult defaultResult, DialogResult cancelResult, MessageBoxIcon icon, int dpi, bool dark,
-                           DialogResult primaryResult, bool destructive)
+                           DialogResult primaryResult, bool destructive, (string Label, string? Detail)? option = null)
         {
             _dpi = dpi;
             _cancelResult = cancelResult;
@@ -132,7 +151,31 @@ internal static class HouseMessage
                     e.Handled = true;
                 }
             };
-            int bodyH = Math.Max(message.Bottom, pad + (mark != null ? glyph : 0)) + pad;
+            int contentBottom = message.Bottom;
+            if (option is { } opt)
+            {
+                // The tick box under the message, its detail (what it covers) in the secondary colour under that.
+                _option = new HouseCheckBox { Text = opt.Label, Font = Font, ForeColor = Theme.Fg(dark), BackColor = Theme.Surface(dark) };
+                var pref = _option.GetPreferredSize(new Size(textW, 0));
+                _option.Bounds = new Rectangle(textLeft, contentBottom + S(14), textW, pref.Height);
+                Controls.Add(_option);
+                contentBottom = _option.Bottom;
+                if (!string.IsNullOrEmpty(opt.Detail))
+                {
+                    var small = F(Theme.PtSmall);
+                    int indent = S(24);   // under the label, past the box
+                    var dm = TextRenderer.MeasureText(opt.Detail, small, new Size(textW - indent, int.MaxValue), flags);
+                    var detail = new Label
+                    {
+                        Text = opt.Detail, AutoSize = false, UseMnemonic = false, Font = small, ForeColor = Theme.Sub(dark),
+                        Bounds = new Rectangle(textLeft + indent, contentBottom + S(4), textW - indent, dm.Height),
+                    };
+                    Controls.Add(detail);
+                    contentBottom = detail.Bottom;
+                }
+                AccessibleDescription = $"{text} {opt.Label}";
+            }
+            int bodyH = Math.Max(contentBottom, pad + (mark != null ? glyph : 0)) + pad;
             if (mark is { } m)
             {
                 var badge = new MessageGlyph(m.glyph, m.tint, F(Theme.PtBody, HouseWeight.SemiBold))
@@ -171,8 +214,9 @@ internal static class HouseMessage
                 b.Location = new Point(x - b.Width, (footerH - b.Height) / 2);
                 x = b.Left - S(8);
             }
-            // Buttons first in the tab order, the default one focused (as the stock box does).
+            // Buttons first in the tab order, the default one focused (as the stock box does); the tick box after them.
             for (int i = 0; i < buttons.Count; i++) buttons[i].TabIndex = i;
+            if (_option != null) _option.TabIndex = buttons.Count;
             Controls.Add(footer);
             ActiveControl = buttons.FirstOrDefault(b => b.DialogResult == defaultResult);
 

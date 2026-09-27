@@ -77,6 +77,7 @@ enum ActivityHistory {
         case "downgrade": return "Rolled back \(e.name)\(v(e.from)) →\(v(e.to))"
         case "reinstall": return "Reinstalled \(e.name)\(v(e.to))"
         case "uninstall": return "Removed \(e.name)\(v(e.from))"
+        case "removedata": return "Removed the settings, logs and cache of \(e.name)" + (e.note != nil ? " (some couldn't be removed)" : "")
         case "failed": return "Couldn't install \(e.name)\(v(e.to))" + (e.note.map { ": \($0)" } ?? "")
         default: return "\(e.action) \(e.name)\(v(e.to))"
         }
