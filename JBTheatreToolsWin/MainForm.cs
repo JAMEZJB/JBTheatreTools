@@ -719,6 +719,21 @@ public sealed class MainForm : Form
         RescaleAll();
     }
 
+    /// <summary>Appearance "System" follows Windows live: when the light/dark app mode changes (WM_SETTINGCHANGE with
+    /// "ImmersiveColorSet") the window re-themes, as the mac launcher follows macOS. It used to read the mode once, at
+    /// start-up and when Settings closed.</summary>
+    protected override void WndProc(ref Message m)
+    {
+        base.WndProc(ref m);
+        const int WM_SETTINGCHANGE = 0x001A;
+        if (m.Msg == WM_SETTINGCHANGE && m.LParam != IntPtr.Zero && _settings.Appearance == "system"
+            && Marshal.PtrToStringUni(m.LParam) == "ImmersiveColorSet")
+        {
+            // After the broadcast has been handled; only when the mode really changed (the message comes often).
+            BeginInvoke(new Action(() => { if (!IsDisposed && Theme.IsDark(_settings.Appearance) != Theme.CurrentDark) ApplyTheme(); }));
+        }
+    }
+
     private void LoadCatalog()
     {
         try
@@ -2554,22 +2569,19 @@ public sealed class MainForm : Form
             ClearCache: () => Task.Run(() => InstallManager.Shared.ClearCache()),
             CopyDiagnostics: CopyDiagnostics));
         dlg.ApplyTheme(Theme.IsDark(_settings.Appearance));
-        if (dlg.ShowDialog(this) == DialogResult.OK)
-        {
-            Versions.DevChannel = _settings.DevChannel;
-            _settings.Save();
-            ApplyTheme();
-            ApplyRowOrder();   // covers "Reset App Order" (and is a cheap no-op otherwise)
-            if (_settings.InstallToApplications != prevInstallLoc)
-                ReconcileInstallLocation(_settings.InstallToApplications);
-            _ = RefreshAllAsync();
-        }
-        // Settings edits the live settings object even when the dialog is closed with its X: keep the show lock and
-        // the tray icon truthful either way (both are cheap to re-apply) — and the lock saved, since the command line
-        // reads it from disk.
+        // Settings has no Cancel: every control edits the live settings object as it changes (as the mac sheet does), so
+        // closing it with its X is the same as Done. (Only Done used to apply and save them: after the X the window
+        // kept its old appearance, order and hidden apps while the edits sat unsaved in memory until some later save.)
+        dlg.ShowDialog(this);
+        Versions.DevChannel = _settings.DevChannel;
+        _settings.Save();   // the command line reads show lock and holds from disk
+        ApplyTheme();
+        ApplyRowOrder();   // covers "Reset App Order" and "Show Hidden Apps" (and is a cheap no-op otherwise)
+        if (_settings.InstallToApplications != prevInstallLoc)
+            ReconcileInstallLocation(_settings.InstallToApplications);
+        _ = RefreshAllAsync();
         if (_settings.ShowLock != prevLock)
         {
-            _settings.Save();
             Log.Write($"show lock {(_settings.ShowLock ? "on" : "off")} (settings)");
             if (_settings.ShowLock) StopEverything();
         }
@@ -2813,7 +2825,7 @@ public sealed class MainForm : Form
         menu.Items.Add(import);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Copy diagnostics", null, (_, _) => CopyDiagnostics(this));
-        menu.Items.Add("Open log", null, (_, _) => Log.Open());
+        menu.Items.Add("Open Log", null, (_, _) => Log.Open());
         HouseMenu.Apply(menu, DeviceDpi);
         menu.Show(_moreBtn, new Point(0, _moreBtn.Height + S(4)));
     }

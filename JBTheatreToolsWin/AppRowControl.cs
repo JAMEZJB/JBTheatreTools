@@ -291,7 +291,7 @@ public sealed class AppRowControl : UserControl
         _more.Text = "⋯";
         _more.AccessibleName = $"More actions for {app.Name}";
         _tip.SetToolTip(_more, "Variant, reorder, other versions & uninstall");
-        _more.Click += (_, _) => ShowMoreMenu();
+        _more.Click += (_, _) => ShowMoreMenu(fromButton: true);
 
         _cancel.Text = "Cancel";
         _cancel.AutoSize = true;
@@ -552,7 +552,11 @@ public sealed class AppRowControl : UserControl
         _more.AccessibleName = $"More actions for {DisplayName}";
     }
 
-    private void ShowMoreMenu()
+    /// <param name="fromButton">Opened by the ⋯ button (a click, or Space / Enter on it): the menu drops from the
+    /// button, right-aligned to its right edge, so it stays inside the window and appears where the keyboard user is.
+    /// A right-click opens it at the pointer. (The ⋯ menu used to open at the pointer too — past the window's right
+    /// edge, and wherever the mouse happened to be when the button was pressed from the keyboard.)</param>
+    private void ShowMoreMenu(bool fromButton = false)
     {
         var menu = new ContextMenuStrip();
         DialogKit.DisposeWhenClosed(menu, this);
@@ -683,7 +687,7 @@ public sealed class AppRowControl : UserControl
             desk.Click += (_, _) => ShortcutToggleRequested?.Invoke(this, true, !hasDesk);
             menu.Items.Add(desk);
             bool hasStart = HasStartMenuShortcut?.Invoke(this) ?? false;
-            var start = new ToolStripMenuItem(hasStart ? "Remove Start Menu shortcut" : "Add Start Menu shortcut");
+            var start = new ToolStripMenuItem(hasStart ? "Remove Start menu shortcut" : "Add Start menu shortcut");
             start.Click += (_, _) => ShortcutToggleRequested?.Invoke(this, false, !hasStart);
             menu.Items.Add(start);
 
@@ -693,7 +697,10 @@ public sealed class AppRowControl : UserControl
             menu.Items.Add(uninstall);
         }
         HouseMenu.Apply(menu, DeviceDpi);
-        menu.Show(Cursor.Position);
+        if (fromButton && _more.Visible)
+            menu.Show(_more, new Point(_more.Width, _more.Height + S(2)), ToolStripDropDownDirection.BelowLeft);
+        else
+            menu.Show(Cursor.Position);
     }
 
     /// <summary>Show lock on/off for this row (MainForm drives it for every row).</summary>

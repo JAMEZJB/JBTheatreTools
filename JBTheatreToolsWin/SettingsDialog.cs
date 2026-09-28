@@ -336,6 +336,10 @@ public sealed class SettingsDialog : Form
         // Un-hides everything; MainForm re-applies when the dialog closes.
         _showHidden.Click += (_, _) => { _settings.HiddenApps.Clear(); _showHidden.Enabled = false; _showHidden.Text = "Show Hidden Apps"; LayoutBar(); };
         AcceptButton = _done;
+        // Enter in a secret field with something typed in it saves it (the mac Save button's Return shortcut); anywhere
+        // else Enter is Done. Done used to take it from the field too, closing Settings with the passphrase unsaved.
+        BindSubmit(_token, _save);
+        BindSubmit(_serverPass, _serverSave);
 
         BuildSections();
         SetShown(_viewRelease, false);
@@ -375,6 +379,16 @@ public sealed class SettingsDialog : Form
             try { await RefreshStorageAsync(); UpdateCacheButton(); }
             catch (Exception ex) { Log.Write($"settings: storage failed: {ex.Message}"); }
         };
+    }
+
+    /// <summary>While <paramref name="box"/> has the focus and holds text, Enter presses <paramref name="save"/>
+    /// (the dialog's AcceptButton follows the field); otherwise Enter is Done.</summary>
+    private void BindSubmit(TextBox box, HouseButton save)
+    {
+        void Sync() => AcceptButton = box.Focused && box.Text.Trim().Length > 0 ? save : _done;
+        box.GotFocus += (_, _) => Sync();
+        box.LostFocus += (_, _) => Sync();
+        box.TextChanged += (_, _) => Sync();
     }
 
     // ── Sections ───────────────────────────────────────────────────────────────────────────────────────────────

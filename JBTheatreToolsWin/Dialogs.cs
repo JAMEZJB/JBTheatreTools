@@ -632,6 +632,7 @@ internal sealed class ImportPreviewDialog : Form
             BorderStyle = BorderStyle.None, BackColor = Theme.Surface(dark), ForeColor = Theme.Fg(dark),
             Text = $"From {source}\r\n\r\n" + summary.Replace("\n", "\r\n"),
         };
+        text.HandleCreated += (_, _) => HouseDraw.NativeTheme(text, dark);   // a dark scrollbar in dark mode, as the readers
         _layout.Text = "Also use this file's list layout (pinned, hidden and order of apps and sections)";
         _hasLayout = hasLayout;
         _layout.Visible = hasLayout;
@@ -652,6 +653,9 @@ internal sealed class ImportPreviewDialog : Form
         buttons.Controls.Add(ok);
         AcceptButton = ok;
         CancelButton = cancel;
+        // House confirm rule: the safe choice (Cancel) starts with the focus, so a stray Enter doesn't start a batch of
+        // installs. It used to start in the read-only summary — a blinking caret, and Enter pressed Install.
+        Load += (_, _) => ActiveControl = cancel;
         Controls.Add(DialogKit.Padded(text, dark));
         Controls.Add(_layout);
         Controls.Add(buttons);
