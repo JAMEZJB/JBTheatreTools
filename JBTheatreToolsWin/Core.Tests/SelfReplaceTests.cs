@@ -156,6 +156,7 @@ public class SelfReplaceTests : IDisposable
     }
 
     /// <summary>A stand-in "new launcher": a shell script (Unix test runs) that signals it started, or quits.</summary>
+    [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]   // every caller returns early on Windows
     private string Script(string name, string body)
     {
         var p = Write(name, "#!/bin/sh\n" + body + "\n");
