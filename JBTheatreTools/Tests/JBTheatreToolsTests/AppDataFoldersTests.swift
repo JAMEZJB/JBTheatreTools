@@ -57,6 +57,23 @@ final class AppDataFoldersTests: XCTestCase {
         XCTAssertEqual(failed.map(\.path), [b])
     }
 
+    /// `claudeSince` names the FIRST TAG that has a connector. Dev builds carry the connector first, so a dev tag
+    /// (v1.7.0-dev.1) must count — a bare core (v1.7.0) sorts AFTER its own dev builds and silently hid every app's
+    /// connector from Stagehand (2026-09-30). Each value must itself pass the gate it defines.
+    func testCatalogClaudeSinceCountsItsOwnTag() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let catalog = try Catalog.load(explicitPath: root.appendingPathComponent("catalog.json").path)
+        for app in catalog.apps {
+            guard let since = app.claudeSince else { continue }
+            XCTAssertTrue(Connectors.hasConnector(app, installed: since), "\(app.id): \(since)")
+            let core = since.split(separator: "-").first.map(String.init) ?? since
+            // the first dev build of that version must already count (a bare "v1.7.0" fails this)
+            XCTAssertTrue(Connectors.hasConnector(app, installed: core + "-dev.1"), "\(app.id): \(core)-dev.1 must count")
+            XCTAssertTrue(Connectors.hasConnector(app, installed: core), "\(app.id): the release \(core) counts too")
+        }
+    }
+
     /// Every catalog app names at least one data folder, all of them pass the rules, and no two apps share one.
     func testCatalogDataEntries() throws {
         // The repo-root catalog.json (the one both launchers bundle), found from this file's path.

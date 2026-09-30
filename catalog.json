@@ -42,7 +42,7 @@
         "windows-x64": "HeloControl-Windows-x64.exe",
         "windows-arm64": "HeloControl-Windows-arm64.exe"
       },
-      "claudeSince": "v2.2.0"
+      "claudeSince": "v2.2.0-dev.1"
     },
     {
       "id": "ciscoswitchtools",
@@ -64,7 +64,7 @@
         "windows-x64": "Cisco.Switch.Tools.x64.exe",
         "windows-arm64": "Cisco.Switch.Tools.arm64.exe"
       },
-      "claudeSince": "v1.9.0"
+      "claudeSince": "v1.9.0-dev.1"
     },
     {
       "id": "netgearswitchtools",
@@ -84,7 +84,7 @@
         "windows-x64": "NetgearSwitchTools-Windows-x64.exe",
         "windows-arm64": "NetgearSwitchTools-Windows-arm64.exe"
       },
-      "claudeSince": "v0.2.0"
+      "claudeSince": "v0.2.0-dev.1"
     },
     {
       "id": "mikrotikroutertools",
@@ -104,7 +104,7 @@
         "windows-x64": "MikroTikRouterTools-Windows-x64.exe",
         "windows-arm64": "MikroTikRouterTools-Windows-arm64.exe"
       },
-      "claudeSince": "v0.2.0"
+      "claudeSince": "v0.2.0-dev.1"
     },
     {
       "id": "ciscobrotherlabels",
@@ -126,7 +126,7 @@
         "windows-x64": "CiscoBrotherLabels-Windows-x64.exe",
         "windows-arm64": "CiscoBrotherLabels-Windows-arm64.exe"
       },
-      "claudeSince": "v2.2.0"
+      "claudeSince": "v2.2.0-dev.1"
     },
     {
       "id": "machineinventory",
@@ -148,7 +148,7 @@
         "windows-x64": "MachineInventory-Windows-x64.exe",
         "windows-arm64": "MachineInventory-Windows-arm64.exe"
       },
-      "claudeSince": "v2.2.0"
+      "claudeSince": "v2.2.0-dev.1"
     },
     {
       "id": "networkportmap",
@@ -170,7 +170,7 @@
         "windows-x64": "NetworkPortMap-Windows-x64.exe",
         "windows-arm64": "NetworkPortMap-Windows-arm64.exe"
       },
-      "claudeSince": "v1.9.0"
+      "claudeSince": "v1.9.0-dev.1"
     },
     {
       "id": "projectorcontrol",
@@ -193,7 +193,7 @@
         "windows-x64": "ProjectorControl-Windows-x64.exe",
         "windows-arm64": "ProjectorControl-Windows-arm64.exe"
       },
-      "claudeSince": "v2.3.0"
+      "claudeSince": "v2.3.0-dev.1"
     },
     {
       "id": "showdashboard",
@@ -215,7 +215,7 @@
         "windows-x64": "ShowDashboard-Windows-x64.exe",
         "windows-arm64": "ShowDashboard-Windows-arm64.exe"
       },
-      "claudeSince": "v1.15.0"
+      "claudeSince": "v1.15.0-dev.1"
     },
     {
       "id": "showhandbook",
@@ -257,7 +257,7 @@
           }
         }
       ],
-      "claudeSince": "v1.23.0"
+      "claudeSince": "v1.23.0-dev.1"
     },
     {
       "id": "psntools",
@@ -300,7 +300,7 @@
           }
         }
       ],
-      "claudeSince": "v1.7.0"
+      "claudeSince": "v1.7.0-dev.1"
     },
     {
       "id": "dmxtools",
@@ -322,7 +322,7 @@
         "windows-x64": "DMXTools-Windows-x64.exe",
         "windows-arm64": "DMXTools-Windows-arm64.exe"
       },
-      "claudeSince": "v1.5.0"
+      "claudeSince": "v1.5.0-dev.1"
     },
     {
       "id": "deskconvert",
@@ -344,7 +344,7 @@
         "windows-x64": "DeskConvert-Windows-x64.exe",
         "windows-arm64": "DeskConvert-Windows-arm64.exe"
       },
-      "claudeSince": "v0.6.0"
+      "claudeSince": "v0.6.0-dev.1"
     },
     {
       "id": "nditools",
@@ -386,7 +386,7 @@
           }
         }
       ],
-      "claudeSince": "v0.4.0"
+      "claudeSince": "v0.4.0-dev.1"
     },
     {
       "id": "powercalc",
@@ -408,7 +408,7 @@
         "windows-x64": "PowerCalc-Windows-x64.exe",
         "windows-arm64": "PowerCalc-Windows-arm64.exe"
       },
-      "claudeSince": "v0.7.0"
+      "claudeSince": "v0.7.0-dev.1"
     },
     {
       "id": "showcontroltools",
@@ -431,7 +431,7 @@
         "windows-x64": "ShowControlTools-Windows-x64.exe",
         "windows-arm64": "ShowControlTools-Windows-arm64.exe"
       },
-      "claudeSince": "v0.4.0"
+      "claudeSince": "v0.4.0-dev.1"
     },
     {
       "id": "shownetscanner",
@@ -453,7 +453,7 @@
         "windows-x64": "ShowNetScanner-Windows-x64.exe",
         "windows-arm64": "ShowNetScanner-Windows-arm64.exe"
       },
-      "claudeSince": "v0.5.0"
+      "claudeSince": "v0.5.0-dev.1"
     },
     {
       "id": "timecodetools",
@@ -475,7 +475,7 @@
         "windows-x64": "TimecodeTools-Windows-x64.exe",
         "windows-arm64": "TimecodeTools-Windows-arm64.exe"
       },
-      "claudeSince": "v1.6.0"
+      "claudeSince": "v1.6.0-dev.1"
     },
     {
       "id": "pdftools",
@@ -516,7 +516,7 @@
           }
         }
       ],
-      "claudeSince": "v0.10.0"
+      "claudeSince": "v0.10.0-dev.1"
     },
     {
       "id": "imagetools",
@@ -559,7 +559,7 @@
           }
         }
       ],
-      "claudeSince": "v0.7.0"
+      "claudeSince": "v0.7.0-dev.1"
     },
     {
       "id": "surtitletools",
@@ -602,7 +602,7 @@
           }
         }
       ],
-      "claudeSince": "v0.6.0"
+      "claudeSince": "v0.6.0-dev.1"
     },
     {
       "id": "convert",
@@ -645,7 +645,7 @@
         "windows-x64": "RenameTools-Windows-x64.exe",
         "windows-arm64": "RenameTools-Windows-arm64.exe"
       },
-      "claudeSince": "v0.4.0"
+      "claudeSince": "v0.4.0-dev.1"
     },
     {
       "id": "reporadar",
@@ -667,7 +667,7 @@
         "windows-x64": "RepoRadar-Windows-x64.exe",
         "windows-arm64": "RepoRadar-Windows-arm64.exe"
       },
-      "claudeSince": "v0.3.0"
+      "claudeSince": "v0.3.0-dev.1"
     },
     {
       "id": "stagehand",
@@ -676,7 +676,7 @@
       "category": "Planning & admin",
       "owner": "JAMEZJB",
       "repo": "Stagehand",
-      "claudeSince": "v0.1.0",
+      "claudeSince": "v0.1.0-dev.1",
       "dataFolders": [
         "Stagehand"
       ],
