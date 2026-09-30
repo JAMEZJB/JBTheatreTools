@@ -290,7 +290,7 @@ public sealed class AppRowControl : UserControl
 
         _more.Text = "⋯";
         _more.AccessibleName = $"More actions for {app.Name}";
-        _tip.SetToolTip(_more, "Variant, reorder, other versions & uninstall");
+        _tip.SetToolTip(_more, "Edition, reorder, other versions & uninstall");
         _more.Click += (_, _) => ShowMoreMenu(fromButton: true);
 
         _cancel.Text = "Cancel";
@@ -622,7 +622,7 @@ public sealed class AppRowControl : UserControl
         {
             menu.Items.Add(new ToolStripSeparator());
             var sel = SelectedVariantQuery?.Invoke(this);
-            var variant = new ToolStripMenuItem("Variant");
+            var variant = new ToolStripMenuItem("Edition");
             foreach (var v in App.Variants)
             {
                 var vid = v.Id;

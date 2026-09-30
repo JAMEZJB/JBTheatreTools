@@ -59,7 +59,7 @@ public static class Theme
     public static Color Fg(bool dark) => dark ? C(0xE8EAEE) : C(0x16181C);
     public static Color Sub(bool dark) => dark ? C(0x9AA1AB) : C(0x5F6670);
     /// <summary>Tertiary text — meta lines, panel headings, the credit line.</summary>
-    public static Color Muted(bool dark) => dark ? C(0x6C737D) : C(0x8B929C);
+    public static Color Muted(bool dark) => dark ? C(0x868D97) : C(0x676E78);   // kit v2.2.1 --text-3 (4.5:1 on both grounds)
 
     // ── identity + semantics ─────────────────────────────────────────────────────────────────────
     /// <summary>Suite accent: purple #AF52DE light / #C77BF0 dark. Reserved for identity, the primary
@@ -75,6 +75,9 @@ public static class Theme
     public static Color Ok => CurrentDark ? C(0x3FB950) : C(0x1F9D4C);
     public static Color Warn => CurrentDark ? C(0xF0883E) : C(0xC2610B);
     public static Color Danger => CurrentDark ? C(0xF85149) : C(0xD3312B);
+    /// <summary>The FILL of a destructive button (kit v2.2.1 --danger-fill): white text on it passes 4.5:1 in both
+    /// themes. <see cref="Danger"/> stays the red for text on the page.</summary>
+    public static Color DangerFill => CurrentDark ? C(0xDA3633) : C(0xD3312B);
     public static Color Info => CurrentDark ? C(0x58A6FF) : C(0x1F6FD6);
 
     // ── derived ───────────────────────────────────────────────────────────────────────────────────

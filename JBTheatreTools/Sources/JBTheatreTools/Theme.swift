@@ -46,7 +46,7 @@ extension Color {
     // ── text ───────────────────────────────────────────────────────────────────────────────────────
     static let jbText = JBTokens.dynamic(light: 0x16181C, dark: 0xE8EAEE)
     static let jbText2 = JBTokens.dynamic(light: 0x5F6670, dark: 0x9AA1AB)
-    static let jbText3 = JBTokens.dynamic(light: 0x8B929C, dark: 0x6C737D)
+    static let jbText3 = JBTokens.dynamic(light: 0x676E78, dark: 0x868D97)   // kit v2.2.1 --text-3 (4.5:1)
 
     // ── identity + semantics ──────────────────────────────────────────────────────────────────────
     /// Suite accent: purple #AF52DE light / #C77BF0 dark. Reserved for identity, the primary action,

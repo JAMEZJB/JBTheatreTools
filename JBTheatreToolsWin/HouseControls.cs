@@ -386,7 +386,7 @@ public sealed class HouseButton : Button
                 fg = Theme.OnAccent;
                 break;
             case HouseRole.Danger:
-                fill = _pressed ? Theme.Blend(Theme.Danger, back, 0.8) : _hover ? Theme.Blend(Theme.Fg(dark), Theme.Danger, 0.06) : Theme.Danger;
+                fill = _pressed ? Theme.Blend(Theme.DangerFill, back, 0.8) : _hover ? Theme.Blend(Theme.Fg(dark), Theme.DangerFill, 0.06) : Theme.DangerFill;
                 fg = Color.White;
                 break;
             case HouseRole.Secondary:
