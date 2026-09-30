@@ -53,6 +53,7 @@ extension CLI {
                 case .failed: tag = "FAILED"
                 case .skipped: tag = "SKIPPED"
                 case .retry: tag = "AGAIN"
+                case .empty: tag = "EMPTY"
                 }
                 print("  \(tag.padding(toLength: 8, withPad: " ", startingAt: 0)) \(l.name)")
                 for d in l.detail { print("           \(d)") }

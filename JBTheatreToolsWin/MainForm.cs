@@ -1126,8 +1126,18 @@ public sealed class MainForm : Form
 
     /// <summary>Reads the suite show lock from claude.json. At start: either side locked → both locked (never unlock
     /// silently). Later: a change made in Stagehand or an app's own switch is taken as it is (the user chose it there).</summary>
+    /// <summary>Apps whose own Show lock is on (claude.json): a row pill, and Update All / automatic updates leave them alone.</summary>
+    private HashSet<string> _lockedApps = new();
+    private bool AppLocked(string id) => _lockedApps.Contains(id);
+
     private void AdoptClaudeShowLock(bool initial)
     {
+        var apps = ClaudeSettingsFile.AppShowLocks();
+        if (!apps.SetEquals(_lockedApps))
+        {
+            _lockedApps = apps;
+            if (!initial) { ApplyLock(); RefreshDownloadAllButton(); }
+        }
         var shared = ClaudeSettingsFile.SuiteShowLock();
         if (initial)
         {
@@ -1150,7 +1160,7 @@ public sealed class MainForm : Form
     private void ApplyLock()
     {
         _lockBanner.Visible = Locked;
-        foreach (var r in _rows) r.SetLocked(Locked);
+        foreach (var r in _rows) { r.SetLocked(Locked); r.SetAppLocked(AppLocked(r.App.Id)); }
         RefreshDownloadAllButton();
     }
 
@@ -1633,7 +1643,7 @@ public sealed class MainForm : Form
             if (name == null || rel == null || !rel.Assets.Any(a => a.Name == name)) continue;   // no asset for this arch → skip
             var installed = InstallManager.Shared.InstalledVersion(row.App.InstallKey(vid));
             // A held app is only ever fetched when that edition isn't installed at all.
-            if (installed == null || (!IsHeld(row.App.Id) && Versions.IsNewer(rel.TagName, installed))) yield return vid;
+            if (installed == null || (!IsHeld(row.App.Id) && !AppLocked(row.App.Id) && Versions.IsNewer(rel.TagName, installed))) yield return vid;
         }
     }
 
@@ -1694,7 +1704,8 @@ public sealed class MainForm : Form
     private IEnumerable<string?> SlotsToUpdate(AppRowControl row)
     {
         var latest = row.LatestRelease;
-        if (latest == null || IsHeld(row.App.Id)) yield break;   // held: Update All / auto-update leave it alone
+        // Held, or its own Show lock on: Update All / auto-update leave it alone (the operator can still update its row).
+        if (latest == null || IsHeld(row.App.Id) || AppLocked(row.App.Id)) yield break;
         var variants = new List<string?> { row.App.HasVariants ? row.App.Variants?.FirstOrDefault()?.Id : null };
         if (row.App.Variants != null) variants.AddRange(row.App.Variants.Skip(1).Select(v => (string?)v.Id));
         foreach (var vid in variants)
@@ -2783,7 +2794,15 @@ public sealed class MainForm : Form
         AppDetailsDialog? dlg = null;
         dlg = new AppDetailsDialog(details, Theme.IsDark(_settings.Appearance),
             installed == null ? null : () => Task.Run(() => InstallManager.Shared.SizeOnDisk(key)),
-            Versions.Offered(row.Releases).Count > 0 ? () => ShowReleaseNotes(row, (IWin32Window?)dlg ?? this) : null);
+            Versions.Offered(row.Releases).Count > 0 ? () => ShowReleaseNotes(row, (IWin32Window?)dlg ?? this) : null,
+            (AppLocked(row.App.Id), on =>
+            {
+                ClaudeSettingsFile.SetAppShowLock(row.App.Id, on);
+                _lockedApps = ClaudeSettingsFile.AppShowLocks();
+                ApplyLock();
+                RefreshDownloadAllButton();
+                Log.Write($"show lock for {row.App.Id} {(on ? "on" : "off")}");
+            }));
         using (dlg) dlg.ShowDialog(this);
     }
 
@@ -2884,29 +2903,12 @@ public sealed class MainForm : Form
         ShowNotice(AuthClient.HasCredentials(_settings, _catalog.DownloadServer) ? null : NoCredsMsg);
     }
 
-    /// <summary>Opens Stagehand, or offers to install it first (Not Now has Enter).</summary>
-    private async void OpenStagehand(IWin32Window owner)
+    /// <summary>Opens Stagehand (Settings and the More menu offer it only once it's installed — it's in the list like any
+    /// app).</summary>
+    private void OpenStagehand(IWin32Window owner)
     {
-        try
-        {
-            var row = _rows.FirstOrDefault(r => r.App.Id == StagehandId);
-            if (row == null) return;
-            if (InstallManager.Shared.InstalledVersion(StagehandId) != null) { Launch(row); return; }
-            if (Locked)
-            {
-                HouseMessage.Show(owner, "Stagehand isn't installed, and nothing installs during show lock. Turn show lock off to install it.",
-                    "Open Stagehand", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-            if (HouseMessage.Ask(owner, "Install Stagehand?",
-                    "Stagehand sets which of your apps Claude can use and what it may do in each. It installs like any other app in the list.",
-                    new[] { ("Not Now", DialogResult.Cancel), ("Install", DialogResult.OK) },
-                    defaultResult: DialogResult.Cancel, cancelResult: DialogResult.Cancel, MessageBoxIcon.Question,
-                    primaryResult: DialogResult.OK) != DialogResult.OK) return;
-            await InstallSlotAsync(row, null, null);
-            if (InstallManager.Shared.InstalledVersion(StagehandId) != null) Launch(row);
-        }
-        catch (Exception ex) { Log.Write($"open Stagehand: {ex.Message}"); }
+        if (_rows.FirstOrDefault(r => r.App.Id == StagehandId) is { } row && InstallManager.Shared.InstalledVersion(StagehandId) != null)
+            Launch(row);
     }
 
     // ── More menu: show lock, activity, setup files, diagnostics ──────────────────────────────
@@ -2924,7 +2926,8 @@ public sealed class MainForm : Form
         menu.Items.Add(lockItem);
         menu.Items.Add(new ToolStripSeparator());
         if (_catalog.Apps.Any(a => a.Id == StagehandId))
-            menu.Items.Add("Open Stagehand", null, (_, _) => OpenStagehand(this));
+            menu.Items.Add(new ToolStripMenuItem("Open Stagehand", null, (_, _) => OpenStagehand(this))
+                { Enabled = InstallManager.Shared.InstalledVersion(StagehandId) != null });
         var history = new ToolStripMenuItem("Activity…") { ShortcutKeyDisplayString = "Ctrl+H" };
         history.Click += async (_, _) => await ShowHistoryAsync();
         menu.Items.Add(history);

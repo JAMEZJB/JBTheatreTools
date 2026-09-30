@@ -694,7 +694,9 @@ final class AppState: ObservableObject {
     /// variant — so an installed Full edition was never updated unless its toggle happened to be on.
     private func slotsToUpdate(_ app: CatalogApp) -> [String?] {
         // A held app is left alone by Update All, automatic updates and notifications.
-        guard !isHeld(app.id), let row = rows.first(where: { $0.id == app.id }), row.latestRelease != nil else { return [] }
+        // An app with its own Show lock on is left alone too (the operator can still update it from its row).
+        guard !isHeld(app.id), !isAppLocked(app.id), let row = rows.first(where: { $0.id == app.id }),
+              row.latestRelease != nil else { return [] }
         var variants: [String?] = [app.hasVariants ? app.variants?.first?.id : nil]
         if let vs = app.variants { variants += vs.dropFirst().map { $0.id } }
         return variants.filter { vid in
@@ -1341,7 +1343,7 @@ final class AppState: ObservableObject {
             let installed = InstallManager.shared.installedVersion(app.installKey(variantId: vid))
             // A held app is only ever fetched when that edition isn't installed at all.
             guard let installed else { return true }
-            return !isHeld(app.id) && Self.versionIsNewer(latest.tagName, than: installed)
+            return !isHeld(app.id) && !isAppLocked(app.id) && Self.versionIsNewer(latest.tagName, than: installed)
         }
     }
 
@@ -2118,9 +2120,24 @@ final class AppState: ObservableObject {
         for task in downloadTasks.values { task.cancel() }
     }
 
+    /// Apps whose own Show lock is on in claude.json (a row pill; Update All and automatic updates leave them alone).
+    @Published private(set) var lockedApps: Set<String> = []
+
+    func isAppLocked(_ id: String) -> Bool { lockedApps.contains(id) }
+
+    /// The app details' "Show lock" switch: this app only, shared with the app's own switch and Stagehand.
+    func setAppShowLock(_ id: String, _ on: Bool) {
+        ClaudeSettingsFile.setAppShowLock(id, on)
+        lockedApps = ClaudeSettingsFile.appShowLocks()
+        bumpRows()
+        AppLog.shared.log("show lock for \(id) \(on ? "on" : "off")")
+    }
+
     /// Reads the suite show lock from claude.json. At start: either side locked → both locked (never unlock silently).
     /// Later: a change made in Stagehand or an app's own switch is taken as it is (it was the user's choice there).
     func adoptClaudeShowLock(initial: Bool) {
+        let apps = ClaudeSettingsFile.appShowLocks()
+        if apps != lockedApps { lockedApps = apps; bumpRows() }
         let shared = ClaudeSettingsFile.suiteShowLock()
         if initial {
             if shared == true { setShowLock(true, fromClaudeFile: true) }
@@ -2136,26 +2153,10 @@ final class AppState: ObservableObject {
     var stagehandInCatalog: Bool { rows.contains { $0.id == Self.stagehandId } }
     var stagehandInstalled: Bool { InstallManager.shared.installedVersion(Self.stagehandId) != nil }
 
-    /// Opens Stagehand, or offers to install it first (Not Now is the default).
+    /// Opens Stagehand (Settings and the More menu offer it only once it's installed — it's in the list like any app).
     func openStagehand() {
-        guard stagehandInCatalog else { return }
-        if stagehandInstalled { launch(Self.stagehandId); return }
-        if showLock {
-            inform("Show Lock Is On", "Stagehand isn't installed, and nothing installs during show lock. Turn show lock off to install it.")
-            return
-        }
-        let alert = NSAlert()
-        alert.messageText = "Install Stagehand?"
-        alert.informativeText = "Stagehand sets which of your apps Claude can use and what it may do in each. It installs like any other app in the list."
-        alert.addButton(withTitle: "Not Now")
-        let installButton = alert.addButton(withTitle: "Install")
-        installButton.keyEquivalent = ""
-        alert.buttons[0].keyEquivalent = "\r"
-        guard alert.runModal() == .alertSecondButtonReturn else { return }
-        Task {
-            await install(Self.stagehandId)
-            if stagehandInstalled { launch(Self.stagehandId) }
-        }
+        guard stagehandInstalled else { return }
+        launch(Self.stagehandId)
     }
 
     /// The model-level guard behind every install / update / removal path (the UI hides them too).

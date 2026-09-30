@@ -32,6 +32,41 @@ public static class ClaudeSettingsFile
         catch (Exception) { return false; }
     }
 
+    /// <summary>Apps whose own Show lock is on (their in-window switch, Stagehand, or the launcher's app details).</summary>
+    public static HashSet<string> AppShowLocks(string? path = null)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            var p = path ?? DefaultPath;
+            if (File.Exists(p) && SuiteBackup.ParseObject(File.ReadAllBytes(p)) is { } d && SuiteBackup.Int(d["schema"]) == 1
+                && d["apps"] is JsonObject apps)
+                foreach (var (id, v) in apps) if (SuiteBackup.Bool(v?["showLock"]) == true) set.Add(id);
+        }
+        catch (Exception) { }
+        return set;
+    }
+
+    /// <summary>One app's own Show lock (the launcher's app details), keeping the rest of the file. Never throws.</summary>
+    public static bool SetAppShowLock(string appId, bool on, string? path = null)
+    {
+        try
+        {
+            var p = path ?? DefaultPath;
+            JsonObject d = new() { ["schema"] = 1, ["enabled"] = false, ["showLock"] = false, ["apps"] = new JsonObject() };
+            if (File.Exists(p) && SuiteBackup.ParseObject(File.ReadAllBytes(p)) is { } old && SuiteBackup.Int(old["schema"]) == 1) d = old;
+            if (d["apps"] is not JsonObject apps) d["apps"] = apps = new JsonObject();
+            if (apps[appId] is not JsonObject app) apps[appId] = app = new JsonObject();
+            app["showLock"] = on;
+            for (int attempt = 0; ; attempt++)
+            {
+                try { SuiteBackup.AtomicWrite(p, SuiteBackup.Json(d)); return true; }
+                catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException) && attempt < 40) { Thread.Sleep(50); }
+            }
+        }
+        catch (Exception) { return false; }
+    }
+
     private static void Write(bool on, string p)
     {
         JsonObject d = new() { ["schema"] = 1, ["enabled"] = false, ["showLock"] = false, ["apps"] = new JsonObject() };
@@ -49,6 +84,13 @@ public static class ClaudeSettingsFile
             catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException) && attempt < 40) { Thread.Sleep(50); }
         }
     }
+}
+
+/// <summary>The words every show lock switch uses (the apps', Stagehand's and the launcher's), so they read the same.</summary>
+public static class ShowLockWords
+{
+    public const string Sentence = "While show lock is on, Claude can't control live equipment or do anything that can't be undone. You're never blocked.";
+    public const string Held = "Updates are held until show lock is off.";
 }
 
 /// <summary><c>connectors.json</c> — for every installed app whose build is a Claude connector (<c>&lt;app&gt; --mcp</c>),

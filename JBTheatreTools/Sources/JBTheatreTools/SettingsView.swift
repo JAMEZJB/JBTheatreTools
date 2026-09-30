@@ -340,47 +340,50 @@ struct SettingsView: View {
     /// Show lock, what happens when updates are found, install location, storage and support.
     @ViewBuilder
     private var secondaryColumn: some View {
-        GroupBox(label: panelLabel("Show lock", "lock.fill")) {
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle("Show lock", isOn: Binding(get: { state.showLock }, set: { state.requestShowLock($0) }))
-                Text("During a show: installs, updates and uninstalls are paused (and automatic updates wait). Launching still works. ⌘L turns it on and off.")
-                    .font(JBFont.small).foregroundStyle(Color.jbText2)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("It also stops Claude from using live equipment or deleting anything in your apps.")
-                    .font(JBFont.small).foregroundStyle(Color.jbText2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-
         GroupBox(label: panelLabel("Claude", "sparkles")) {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Which apps Claude can use, and what it may do in each, is set in Stagehand.")
-                    .font(JBFont.small).foregroundStyle(Color.jbText2)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button(state.stagehandInstalled ? "Open Stagehand" : "Install Stagehand\u{2026}") { state.openStagehand() }
-                    .tint(.selectorBlue)
-                    .disabled(!state.stagehandInCatalog)
-            }
-            .padding(8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-
-        GroupBox(label: panelLabel("Back up & restore", "externaldrive")) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 10) {
-                    Button("Back Up All Apps\u{2026}") { startBackup() }
-                        .tint(.selectorBlue)
-                    Button(openingBackup ? "Opening\u{2026}" : "Restore All Apps\u{2026}") { startRestore() }
-                        .tint(.selectorBlue)
-                        .disabled(state.showLock || state.batchRunning || openingBackup)
-                }
-                Text("Save every app's settings, and this launcher's, in one file \u{2014} then restore them here or on a new show computer.")
+                Toggle("Show lock for every app", isOn: Binding(get: { state.showLock }, set: { state.requestShowLock($0) }))
+                Text(ShowLockWords.sentence)
                     .font(JBFont.small).foregroundStyle(Color.jbText2)
                     .fixedSize(horizontal: false, vertical: true)
                 if state.showLock {
-                    Text("Restoring is paused while show lock is on.").font(JBFont.small).foregroundStyle(Color.jbInfo)
+                    Text(ShowLockWords.held).font(JBFont.small).foregroundStyle(Color.jbInfo)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("In this launcher, installs and uninstalls wait too; launching still works. ⌘L turns it on and off.")
+                    .font(JBFont.small).foregroundStyle(Color.jbText2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Divider()
+                HStack(spacing: 10) {
+                    Button("Open Stagehand") { state.openStagehand() }
+                        .tint(.selectorBlue)
+                        .disabled(!state.stagehandInstalled)
+                    if !state.stagehandInstalled {
+                        Text("Install Stagehand first").font(JBFont.small).foregroundStyle(Color.jbText2)
+                    }
+                }
+                Text("Stagehand sets which apps Claude can use and what it may do in each.")
+                    .font(JBFont.small).foregroundStyle(Color.jbText2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+
+        GroupBox(label: panelLabel("Settings backup", "externaldrive")) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    Button("Back up all apps\u{2026}") { startBackup() }
+                        .tint(.selectorBlue)
+                    Button(openingBackup ? "Opening\u{2026}" : "Restore all apps\u{2026}") { startRestore() }
+                        .tint(.selectorBlue)
+                        .disabled(state.showLock || state.batchRunning || openingBackup)
+                }
+                Text("Save every app's settings, and this launcher's, in one backup \u{2014} then restore them here or on a new show computer.")
+                    .font(JBFont.small).foregroundStyle(Color.jbText2)
+                    .fixedSize(horizontal: false, vertical: true)
+                if state.showLock {
+                    Text("Restoring waits until show lock is off.").font(JBFont.small).foregroundStyle(Color.jbInfo)
                 }
                 if let e = restoreError {
                     Text(e).font(JBFont.small).foregroundStyle(Color.jbDanger)

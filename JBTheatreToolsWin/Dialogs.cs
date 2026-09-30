@@ -524,7 +524,8 @@ internal sealed class AppDetailsDialog : Form
 {
     private readonly Label _size = new();
 
-    public AppDetailsDialog(AppDetails d, bool dark, Func<Task<long>>? sizeOnDisk, Action? showReleaseNotes)
+    public AppDetailsDialog(AppDetails d, bool dark, Func<Task<long>>? sizeOnDisk, Action? showReleaseNotes,
+                            (bool On, Action<bool> Set)? showLock = null)
     {
         Text = d.Name;
         DialogKit.Style(this, dark, new Size(540, 460), sizable: false);
@@ -576,6 +577,20 @@ internal sealed class AppDetailsDialog : Form
         if (d.Held) Row("Updates", "Held at this version — Update All leaves it alone");
         Row("Previous version", d.Previous);
         Row("Runs as", d.RunsAs);
+        if (showLock is { } sl)
+        {
+            // This app's own Show lock — the same switch as in the app's window and in Stagehand.
+            var box = new HouseCheckBox { Text = "Show lock", Checked = sl.On, AutoSize = true, Margin = new Padding(0, 10, 0, 2) };
+            box.CheckedChanged += (_, _) => sl.Set(box.Checked);
+            var words = new Label { Text = ShowLockWords.Sentence, AutoSize = true, MaximumSize = new Size(470, 0), UseMnemonic = false,
+                                    ForeColor = Theme.Sub(dark), Margin = new Padding(0, 0, 0, 4) };
+            table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            table.Controls.Add(box);
+            table.SetColumnSpan(box, 2);
+            table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            table.Controls.Add(words);
+            table.SetColumnSpan(words, 2);
+        }
 
         var buttons = DialogKit.ButtonRow();
         var close = DialogKit.Button("Close", DialogResult.Cancel);

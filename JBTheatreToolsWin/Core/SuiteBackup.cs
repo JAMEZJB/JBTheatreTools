@@ -120,7 +120,7 @@ public static class SuiteBackup
     /// settings when asked. A line per app; throws only when nothing at all could be saved.</summary>
     public static async Task<List<BackupLine>> BackUpAllAsync(IReadOnlyList<(BackupTarget Target, BackupSlot Slot)> chosen,
         bool includeLauncher, ILauncherPrefs prefs, ILauncherSecrets secrets, string launcherVersion, bool includeSecrets,
-        string? passphrase, string dest, Action<string>? progress = null)
+        string? passphrase, string dest, Action<string, string>? progress = null)
     {
         var staging = Path.Combine(Path.GetTempPath(), "jbtt-backup-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(staging);
@@ -131,7 +131,7 @@ public static class SuiteBackup
             var pass = string.IsNullOrEmpty(passphrase) ? null : passphrase;
             foreach (var (target, slot) in chosen)
             {
-                progress?.Invoke($"Backing up {target.Name}…");
+                progress?.Invoke(target.Id, "Backing up…");
                 var file = $"{target.Id}.{SettingsExt}";
                 var path = Path.Combine(staging, file);
                 var args = new List<string> { "--settings-export", path };
@@ -150,8 +150,8 @@ public static class SuiteBackup
                     entries.Add(new BundleApp(target.Id, target.Name, slot.Version, file, slot.Edition));
                     var note = new List<string>();
                     if (o.Secrets > 0)
-                        note.Add($"{o.Secrets} saved password{(o.Secrets == 1 ? "" : "s")}, {(o.Protected ? "protected by the passphrase" : "not protected")}");
-                    lines.Add(new BackupLine(target.Id, target.Name, LineState.Ok, note));
+                        note.Add($"{o.Secrets} saved password{(o.Secrets == 1 ? "" : "s")}, {(o.Protected ? "locked with the passphrase" : "not protected")}");
+                    lines.Add(new BackupLine(target.Id, target.Name, o.Empty ? LineState.Empty : LineState.Ok, note));
                 }
                 else
                 {
@@ -164,7 +164,7 @@ public static class SuiteBackup
             string? launcherFile = null;
             if (includeLauncher)
             {
-                progress?.Invoke("Backing up JB Theatre Tools…");
+                progress?.Invoke(LauncherId, "Backing up…");
                 try
                 {
                     var doc = LauncherSettings.Document(prefs, secrets, launcherVersion, includeSecrets, pass);
@@ -172,7 +172,7 @@ public static class SuiteBackup
                     launcherFile = LauncherFile;
                     int n = Int(doc["secrets"]?["count"]) ?? 0;
                     lines.Add(new BackupLine(LauncherId, LauncherName, LineState.Ok, n == 0 ? new() :
-                        new() { $"{n} saved password{(n == 1 ? "" : "s")}, {(pass != null ? "protected by the passphrase" : "not protected")}" }));
+                        new() { $"{n} saved password{(n == 1 ? "" : "s")}, {(pass != null ? "locked with the passphrase" : "not protected")}" }));
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -183,7 +183,7 @@ public static class SuiteBackup
                 throw new Failure(FailureKind.Other, "Nothing could be backed up, so no file was saved.");
             var manifest = new BundleManifest(IsoNow(), Source(), launcherVersion, entries, launcherFile);
             AtomicWrite(Path.Combine(staging, ManifestFile), Json(manifest.ToJson()));
-            progress?.Invoke("Saving the backup…");
+            progress?.Invoke("", "Saving the backup…");
             SuiteBundle.Write(staging, dest);
             return lines;
         }
@@ -246,7 +246,7 @@ public sealed record BackupApp(string Id, string Name, IReadOnlyList<(string Key
 public sealed record BackupSlot(string InstallKey, string Version, string? Edition, string Executable);
 public sealed record BackupTarget(string Id, string Name, IReadOnlyList<BackupSlot> Slots);
 
-public enum LineState { Ok, Attention, Unsupported, Failed, Skipped, Retry }
+public enum LineState { Ok, Attention, Unsupported, Failed, Skipped, Retry, Empty }
 public sealed record BackupLine(string Id, string Name, LineState State, List<string> Detail);
 
 // ── The launcher's own settings (launcher.jbtt-settings) ─────────────────────────────────────────────
@@ -672,7 +672,7 @@ public sealed record AppProbe(AppProbeState State, List<string> Items, int Secre
 }
 
 public enum ExportState { Ok, Unsupported, Failed }
-public sealed record ExportOutcome(ExportState State, int Secrets, bool Protected, string? Message);
+public sealed record ExportOutcome(ExportState State, int Secrets, bool Protected, string? Message, bool Empty = false);
 
 public enum ImportState { Ok, Passphrase, AppOpen, Unsupported, Failed }
 public sealed record ImportOutcome(ImportState State, List<string> Attention, List<string> Warnings, bool RestartNeeded,
@@ -757,7 +757,8 @@ public static class SettingsCli
 
     public static ExportOutcome Export(CliRun r)
     {
-        if (r.Ok) return new ExportOutcome(ExportState.Ok, SuiteBackup.Int(r.Result?["secrets"]) ?? 0, SuiteBackup.Bool(r.Result?["protected"]) == true, null);
+        if (r.Ok) return new ExportOutcome(ExportState.Ok, SuiteBackup.Int(r.Result?["secrets"]) ?? 0, SuiteBackup.Bool(r.Result?["protected"]) == true, null,
+                                           Empty: r.Result?["items"] is JsonArray { Count: 0 });
         if (r.LaunchError != null) return new ExportOutcome(ExportState.Failed, 0, false, $"It couldn't be started ({r.LaunchError}).");
         if ((r.TimedOut && r.Result == null) || LooksUnsupported(r)) return new ExportOutcome(ExportState.Unsupported, 0, false, null);
         return new ExportOutcome(ExportState.Failed, 0, false, Err(r));

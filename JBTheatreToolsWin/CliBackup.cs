@@ -62,7 +62,7 @@ public static partial class Cli
                 var tag = l.State switch
                 {
                     LineState.Ok => "OK", LineState.Attention => "CHECK", LineState.Unsupported => "NOT YET",
-                    LineState.Skipped => "SKIPPED", LineState.Retry => "AGAIN", _ => "FAILED",
+                    LineState.Skipped => "SKIPPED", LineState.Retry => "AGAIN", LineState.Empty => "EMPTY", _ => "FAILED",
                 };
                 Console.WriteLine($"  {Pad(tag, 8)} {l.Name}");
                 foreach (var d in l.Detail) Console.WriteLine($"           {d}");

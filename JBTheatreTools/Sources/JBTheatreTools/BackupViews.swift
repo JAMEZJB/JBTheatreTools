@@ -2,7 +2,9 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-// Settings → "Back Up All Apps…" / "Restore All Apps…" (see SettingsBackup.swift for the work itself).
+// Settings → Settings backup: "Back up all apps…" / "Restore all apps…" (the work itself is SettingsBackup.swift).
+// House rules: the action is the filled button; Cancel is the safe choice and Esc; Return presses nothing in a
+// passphrase field (no default button).
 
 extension SuiteBackup {
     static var bundleType: UTType { UTType(filenameExtension: bundleExt) ?? .data }
@@ -11,6 +13,100 @@ extension SuiteBackup {
     static var documentsFolder: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs.appendingPathComponent("JB Theatre Tools", isDirectory: true)
+    }
+}
+
+/// The one-line words for a result, backup or restore.
+enum BackupWords {
+    static func backup(_ l: SuiteBackupLine) -> String {
+        switch l.state {
+        case .ok, .attention: return "Saved"
+        case .empty: return "Nothing to back up"
+        case .unsupported: return "Not backed up \u{2014} this app's version can't back up its settings yet; update it"
+        case .failed: return "Failed \u{2014} " + (l.detail.first ?? "it stopped with an error")
+        case .skipped, .retry: return "Not backed up"
+        }
+    }
+
+    static func restore(_ l: SuiteBackupLine) -> String {
+        switch l.state {
+        case .ok, .empty: return "Restored"
+        case .attention: return "Restored \u{2014} check these in Settings:"
+        case .unsupported: return "Not restored \u{2014} this app's version can't restore settings yet; update it, then try again"
+        case .failed: return "Failed \u{2014} " + (l.detail.first ?? "it stopped with an error")
+        case .skipped: return "Skipped" + (l.detail.first.map { " \u{2014} " + $0 } ?? "")
+        case .retry: return "Not restored yet \u{2014} " + (l.detail.first ?? "try again")
+        }
+    }
+
+    /// The lines under the title (the ones already in the title aren't repeated).
+    static func detail(_ l: SuiteBackupLine) -> [String] {
+        switch l.state {
+        case .failed, .skipped, .retry: return Array(l.detail.dropFirst())
+        case .unsupported: return []
+        default: return l.detail
+        }
+    }
+
+    static func color(_ s: SuiteBackupLine.State) -> Color {
+        switch s {
+        case .ok, .empty: return .jbOk
+        case .attention, .retry: return .jbWarn
+        case .unsupported, .skipped: return .jbText3
+        case .failed: return .jbDanger
+        }
+    }
+
+    static func symbol(_ s: SuiteBackupLine.State) -> String {
+        switch s {
+        case .ok, .empty: return "checkmark.circle.fill"
+        case .attention: return "exclamationmark.circle.fill"
+        case .unsupported, .skipped: return "minus.circle"
+        case .failed: return "xmark.octagon.fill"
+        case .retry: return "arrow.clockwise.circle"
+        }
+    }
+}
+
+/// A rounded panel around a scrolling list, like the Settings panels.
+private struct ListPanel<Content: View>: View {
+    @ViewBuilder var content: Content
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) { content }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous).fill(Color.jbSurface))
+        .overlay(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous).strokeBorder(Color.jbLine))
+    }
+}
+
+private func titledRow(_ title: String, _ detail: String, detailColor: Color = .jbText2) -> some View {
+    VStack(alignment: .leading, spacing: 1) {
+        Text(title).font(JBFont.bodyMedium).foregroundStyle(Color.jbText)
+        Text(detail).font(JBFont.small).foregroundStyle(detailColor).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// One result line: a mark, "<App> — <words>", and anything to check under it.
+struct BackupResultRow: View {
+    let line: SuiteBackupLine
+    let words: String
+    let detail: [String]
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: BackupWords.symbol(line.state)).foregroundStyle(BackupWords.color(line.state)).frame(width: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(line.name) \u{2014} \(words)").font(JBFont.bodyMedium).foregroundStyle(Color.jbText)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(Array(detail.enumerated()), id: \.offset) { _, d in
+                    Text(d).font(JBFont.small).foregroundStyle(Color.jbText2)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }
+            }
+        }
     }
 }
 
@@ -27,8 +123,8 @@ final class BackupAllModel: ObservableObject {
     }
     enum Phase: Equatable {
         case choosing
-        case running(String)
-        case done(lines: [SuiteBackupLine], file: URL?)
+        case running
+        case done(lines: [SuiteBackupLine], file: URL)
     }
 
     @Published var rows: [Row] = []
@@ -37,6 +133,8 @@ final class BackupAllModel: ObservableObject {
     @Published var passphrase = ""
     @Published var confirm = ""
     @Published var phase: Phase = .choosing
+    /// While it runs: what each app is doing ("Backing up…"), by id ("" = the file itself).
+    @Published var progress: [String: String] = [:]
     @Published var error: String?
     let launcherSecrets: Int
 
@@ -47,7 +145,7 @@ final class BackupAllModel: ObservableObject {
 
     var checking: Bool { rows.contains { $0.probe == nil } }
 
-    /// Asks every installed app what it would save — three at a time, so a Back up doesn't start every app at once.
+    /// Asks every installed app what it would save — three at a time, so a backup doesn't start every app at once.
     func probeAll() async {
         let targets = rows.map(\.target)
         await withTaskGroup(of: (String, BackupSlot?, AppBackupProbe).self) { group in
@@ -80,19 +178,14 @@ final class BackupAllModel: ObservableObject {
         }
     }
 
-    var passphraseProblem: String? {
-        guard includeSecrets, !passphrase.isEmpty || !confirm.isEmpty else { return nil }
-        if passphrase.contains(where: \.isNewline) { return "A passphrase can't contain line breaks." }
-        return passphrase == confirm ? nil : "The two passphrases don't match."
-    }
+    var mismatch: Bool { includeSecrets && passphrase != confirm && !(passphrase.isEmpty && confirm.isEmpty) }
 
-    var canBackUp: Bool {
-        !checking && (includeLauncher || rows.contains { $0.chosen }) && passphraseProblem == nil
-    }
+    var canBackUp: Bool { !checking && (includeLauncher || rows.contains { $0.chosen }) && !mismatch }
 
     func backUp(version: String) async {
+        guard canBackUp else { return }
         let panel = NSSavePanel()
-        panel.title = "Back Up All Apps"
+        panel.title = "Back up all apps"
         panel.nameFieldStringValue = SuiteBackup.bundleFileName()
         panel.allowedContentTypes = [SuiteBackup.bundleType]
         panel.canCreateDirectories = true
@@ -103,14 +196,16 @@ final class BackupAllModel: ObservableObject {
             guard r.chosen, let slot = r.slot else { return nil }
             return (r.target, slot)
         }
-        phase = .running("Starting\u{2026}")
+        progress = Dictionary(uniqueKeysWithValues: chosen.map { ($0.target.id, "Waiting") })
+        if includeLauncher { progress[SuiteBackup.launcherId] = "Waiting" }
+        phase = .running
         error = nil
         let pass = includeSecrets && !passphrase.isEmpty ? passphrase : nil
         do {
             let lines = try await SuiteBackup.backUpAll(
                 chosen, includeLauncher: includeLauncher, prefs: UserDefaults.standard, secrets: KeychainLauncherSecrets(),
                 launcherVersion: version, includeSecrets: includeSecrets, passphrase: pass, dest: dest,
-                progress: { msg in Task { @MainActor in self.phase = .running(msg) } })
+                progress: { id, msg in Task { @MainActor in self.progress[id] = msg } })
             passphrase = ""
             confirm = ""
             AppLog.shared.log("backed up \(chosen.count) app(s)\(includeLauncher ? " + the launcher" : "") to \(dest.lastPathComponent)")
@@ -130,66 +225,50 @@ struct BackupAllView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Back Up All Apps").font(JBFont.title).foregroundStyle(Color.jbText)
+            Text("Back up all apps").font(JBFont.title).foregroundStyle(Color.jbText)
             switch model.phase {
             case .choosing: choosing
-            case .running(let msg): running(msg)
-            case .done(let lines, let file): BackupResultList(lines: lines, intro: file.map { "Saved \($0.lastPathComponent)." })
-                HStack {
-                    if let file {
-                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([file]) }
-                            .buttonStyle(.jbSecondary)
-                    }
-                    Spacer()
-                    Button("Done") { dismiss() }.buttonStyle(.jbPrimary).keyboardShortcut(.defaultAction)
-                }
+            case .running: running
+            case .done(let lines, let file): done(lines, file)
             }
         }
         .padding(22)
-        .frame(width: 560, height: 520, alignment: .topLeading)
+        .frame(width: 560, height: 540, alignment: .topLeading)
         .background(Color.jbGround)
         .tint(.jbAccent)
         .task { await model.probeAll() }
     }
 
     @ViewBuilder private var choosing: some View {
-        Text("Saves each app's settings, and this launcher's, into one file you can restore on this Mac or a new show computer. Nothing is changed.")
+        Text("Each app saves its own settings into one backup you can restore here or on a new show computer. Nothing is changed.")
             .font(JBFont.small).foregroundStyle(Color.jbText2).fixedSize(horizontal: false, vertical: true)
-        ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle(isOn: $model.includeLauncher) {
-                    rowLabel("JB Theatre Tools", "This launcher's settings: list order, pins, editions, updates, appearance")
-                }
-                ForEach($model.rows) { $row in
-                    Toggle(isOn: $row.chosen) { rowLabel(row.target.name, detail(row)) }
-                        .disabled(!isReady(row))
-                }
-                if model.rows.isEmpty {
-                    Text("No apps are installed, so only the launcher's settings can be backed up.")
-                        .font(JBFont.small).foregroundStyle(Color.jbText2)
-                }
+        ListPanel {
+            ForEach($model.rows) { $row in
+                Toggle(isOn: $row.chosen) { titledRow(row.target.name, detail(row)) }
+                    .disabled(!isReady(row))
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            Toggle(isOn: $model.includeLauncher) {
+                titledRow("JB Theatre Tools (this launcher)", "List order, pins, editions, update and appearance settings")
+            }
         }
-        .background(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous).fill(Color.jbSurface))
-        .overlay(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous).strokeBorder(Color.jbLine))
         if model.secretCount > 0 {
             Toggle("Include saved passwords (\(model.secretCount))", isOn: $model.includeSecrets)
                 .font(JBFont.body)
             if model.includeSecrets {
-                HStack {
+                HStack(alignment: .top) {
                     SecureField("Passphrase (optional)", text: $model.passphrase).textFieldStyle(.roundedBorder)
-                    SecureField("Confirm passphrase", text: $model.confirm).textFieldStyle(.roundedBorder)
+                    VStack(alignment: .leading, spacing: 3) {
+                        SecureField("Confirm passphrase", text: $model.confirm).textFieldStyle(.roundedBorder)
+                        if model.mismatch {
+                            Text("The passphrases don't match.").font(JBFont.small).foregroundStyle(Color.jbDanger)
+                        }
+                    }
                 }
                 Text(model.passphrase.isEmpty
                      ? "Leave blank to save the passwords unprotected \u{2014} anyone with the file can read them."
-                     : "You'll need this passphrase to restore the passwords. It isn't saved anywhere.")
+                     : "The passwords are locked with this passphrase. Without it they can't be restored; the rest of the settings still can.")
                     .font(JBFont.small).foregroundStyle(model.passphrase.isEmpty ? Color.jbWarn : Color.jbText2)
                     .fixedSize(horizontal: false, vertical: true)
-                if let p = model.passphraseProblem {
-                    Text(p).font(JBFont.small).foregroundStyle(Color.jbDanger)
-                }
             }
         }
         if let e = model.error {
@@ -201,23 +280,38 @@ struct BackupAllView: View {
                 Text("Checking which apps can back up\u{2026}").font(JBFont.small).foregroundStyle(Color.jbText2)
             }
             Spacer()
-            // House rule: the action is filled, the safe choice has Return.
-            Button("Cancel") { dismiss() }.buttonStyle(.jbSecondary).keyboardShortcut(.defaultAction)
-            Button("Back Up\u{2026}") { Task { await model.backUp(version: state.currentVersion) } }
+            Button("Cancel") { dismiss() }.buttonStyle(.jbSecondary).keyboardShortcut(.cancelAction)
+            Button("Back up\u{2026}") { Task { await model.backUp(version: state.currentVersion) } }
                 .buttonStyle(.jbPrimary)
                 .disabled(!model.canBackUp)
         }
-        .onExitCommand { dismiss() }
     }
 
-    private func running(_ msg: String) -> some View {
-        VStack(spacing: 12) {
-            Spacer()
-            ProgressView().controlSize(.small)
-            Text(msg).font(JBFont.body).foregroundStyle(Color.jbText2)
-            Spacer()
+    @ViewBuilder private var running: some View {
+        ListPanel {
+            ForEach(model.rows.filter { model.progress[$0.id] != nil }) { row in
+                titledRow(row.target.name, model.progress[row.id] ?? "")
+            }
+            if let p = model.progress[SuiteBackup.launcherId] { titledRow("JB Theatre Tools (this launcher)", p) }
         }
-        .frame(maxWidth: .infinity)
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(model.progress[""] ?? "Backing up\u{2026}").font(JBFont.small).foregroundStyle(Color.jbText2)
+        }
+    }
+
+    @ViewBuilder private func done(_ lines: [SuiteBackupLine], _ file: URL) -> some View {
+        ListPanel {
+            ForEach(lines) { l in BackupResultRow(line: l, words: BackupWords.backup(l), detail: BackupWords.detail(l)) }
+        }
+        Text("Saved \(file.lastPathComponent)").font(JBFont.body).foregroundStyle(Color.jbText)
+            .fixedSize(horizontal: false, vertical: true)
+        HStack {
+            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([file]) }
+                .buttonStyle(.jbSecondary)
+            Spacer()
+            Button("Done") { dismiss() }.buttonStyle(.jbPrimary).keyboardShortcut(.defaultAction)
+        }
     }
 
     private func isReady(_ row: BackupAllModel.Row) -> Bool {
@@ -229,75 +323,10 @@ struct BackupAllView: View {
         switch row.probe {
         case nil: return "Checking\u{2026}"
         case .ready(let items, let n)?:
-            let what = items.isEmpty ? "Nothing saved yet" : items.joined(separator: ", ")
+            let what = items.isEmpty ? "Nothing to back up yet" : items.joined(separator: ", ")
             return n > 0 ? "\(what) \u{00B7} \(n) saved password\(n == 1 ? "" : "s")" : what
         case .unsupported?: return SettingsCLIClassify.unsupportedMessage
         case .failed(let m)?: return m
-        }
-    }
-
-    private func rowLabel(_ title: String, _ detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(title).font(JBFont.bodyMedium).foregroundStyle(Color.jbText)
-            Text(detail).font(JBFont.small).foregroundStyle(Color.jbText2).fixedSize(horizontal: false, vertical: true)
-        }
-    }
-}
-
-/// The combined result: one line per app, with what to check.
-struct BackupResultList: View {
-    let lines: [SuiteBackupLine]
-    let intro: String?
-
-    var body: some View {
-        if let intro { Text(intro).font(JBFont.body).foregroundStyle(Color.jbText) }
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(lines) { line in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Image(systemName: symbol(line.state)).foregroundStyle(color(line.state)).frame(width: 16)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("\(line.name) \u{2014} \(title(line.state))").font(JBFont.bodyMedium).foregroundStyle(Color.jbText)
-                            ForEach(Array(line.detail.enumerated()), id: \.offset) { _, d in
-                                Text(d).font(JBFont.small).foregroundStyle(Color.jbText2)
-                                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .background(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous).fill(Color.jbSurface))
-        .overlay(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous).strokeBorder(Color.jbLine))
-    }
-
-    private func title(_ s: SuiteBackupLine.State) -> String {
-        switch s {
-        case .ok: return "done"
-        case .attention: return "done, check these in its Settings"
-        case .unsupported: return "not yet"
-        case .failed: return "failed"
-        case .skipped: return "skipped"
-        case .retry: return "not done yet"
-        }
-    }
-    private func symbol(_ s: SuiteBackupLine.State) -> String {
-        switch s {
-        case .ok: return "checkmark.circle.fill"
-        case .attention: return "exclamationmark.circle.fill"
-        case .unsupported, .skipped: return "minus.circle"
-        case .failed: return "xmark.octagon.fill"
-        case .retry: return "arrow.clockwise.circle"
-        }
-    }
-    private func color(_ s: SuiteBackupLine.State) -> Color {
-        switch s {
-        case .ok: return .jbOk
-        case .attention, .retry: return .jbWarn
-        case .unsupported, .skipped: return .jbText3
-        case .failed: return .jbDanger
         }
     }
 }
@@ -357,14 +386,13 @@ final class RestoreAllModel: ObservableObject {
 
     deinit { try? FileManager.default.removeItem(at: opened.folder) }
 
-    var source: String {
+    var from: String {
         let m = opened.manifest
-        var parts = [m.source["machine"] ?? "another computer"]
-        if let os = m.source["os"] { parts.append(os) }
-        if let d = ISO8601DateFormatter().date(from: m.created) {
-            parts.append(d.formatted(date: .abbreviated, time: .shortened))
-        }
-        return parts.joined(separator: " \u{00B7} ")
+        return [m.source["machine"] ?? "another computer", m.source["os"]].compactMap { $0 }.joined(separator: " \u{00B7} ")
+    }
+
+    var made: String? {
+        ISO8601DateFormatter().date(from: opened.manifest.created).map { $0.formatted(date: .abbreviated, time: .shortened) }
     }
 
     var hasSecrets: Bool {
@@ -405,17 +433,17 @@ final class RestoreAllModel: ObservableObject {
             let row = rows[idx]
             let name = row.catalogApp?.name ?? row.app.name
             guard row.info.readable, row.info.appId == row.app.id else {
-                setLine(SuiteBackupLine(id: row.id, name: name, state: .failed, detail: ["This part of the backup can't be read."]))
+                setLine(SuiteBackupLine(id: row.id, name: name, state: .failed, detail: ["this part of the backup can't be read"]))
                 continue
             }
             guard let app = row.catalogApp else {
-                setLine(SuiteBackupLine(id: row.id, name: name, state: .skipped, detail: ["This app isn't in this launcher's list."]))
+                setLine(SuiteBackupLine(id: row.id, name: name, state: .skipped, detail: ["it isn't in this launcher's list"]))
                 continue
             }
             var target = row.target
             if target == nil {
                 guard row.installFirst else {
-                    setLine(SuiteBackupLine(id: row.id, name: name, state: .skipped, detail: ["Not installed here, so it was skipped."]))
+                    setLine(SuiteBackupLine(id: row.id, name: name, state: .skipped, detail: ["not installed here"]))
                     continue
                 }
                 phase = .running("Installing \(name)\u{2026}")
@@ -426,27 +454,30 @@ final class RestoreAllModel: ObservableObject {
                 rows[idx].target = target
                 guard target != nil else {
                     setLine(SuiteBackupLine(id: row.id, name: name, state: .failed,
-                                            detail: ["It couldn't be installed, so its settings weren't restored. Install it from the list, then restore again."]))
+                                            detail: ["it couldn't be installed. Install it from the list, then restore again."]))
                     continue
                 }
             }
             guard let target else { continue }
             if target.slots.contains(where: { InstallManager.shared.runningInstance($0.installKey) != nil }) {
                 rows[idx].open = true
-                setLine(SuiteBackupLine(id: row.id, name: name, state: .retry,
-                                        detail: ["\(name) is open. Quit it, then press Try Again."]))
+                setLine(SuiteBackupLine(id: row.id, name: name, state: .retry, detail: ["it's open. Quit it, then press Try Again."]))
                 continue
             }
             phase = .running("Restoring \(name)\u{2026}")
             let outcome = await SuiteBackup.restoreApp(file: row.file, slots: target.slots, passphrase: pass,
                                                        restoreSecrets: restoreSecrets)
             if case .passphrase(_, let message) = outcome {
-                // Nothing changed for this app; ask again and carry on from here.
+                // Nothing changed for this app: stay on the sheet with the error under the field.
                 passError = message
                 phase = lines.isEmpty ? .choosing : .done
                 return
             }
             AppLog.shared.log("restore \(row.id): \(outcome)")
+            if case .appOpen = outcome {
+                setLine(SuiteBackupLine(id: row.id, name: name, state: .retry, detail: ["it's open. Quit it, then press Try Again."]))
+                continue
+            }
             setLine(SuiteBackup.line(id: row.id, name: name, outcome))
         }
         if includeLauncher, let data = launcherData, !finished.contains(SuiteBackup.launcherId) {
@@ -475,8 +506,11 @@ struct RestoreAllView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Restore All Apps").font(JBFont.title).foregroundStyle(Color.jbText)
-            Text("From \(model.source)").font(JBFont.small).foregroundStyle(Color.jbText2)
+            Text("Restore all apps?").font(JBFont.title).foregroundStyle(Color.jbText)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("From \(model.from)").font(JBFont.small).foregroundStyle(Color.jbText2)
+                if let made = model.made { Text("Made \(made)").font(JBFont.small).foregroundStyle(Color.jbText2) }
+            }
             switch model.phase {
             case .choosing: choosing
             case .running(let msg):
@@ -491,93 +525,88 @@ struct RestoreAllView: View {
             }
         }
         .padding(22)
-        .frame(width: 560, height: 540, alignment: .topLeading)
+        .frame(width: 560, height: 560, alignment: .topLeading)
         .background(Color.jbGround)
         .tint(.jbAccent)
     }
 
     @ViewBuilder private var choosing: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach($model.rows) { $row in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle(isOn: $row.include) {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(row.catalogApp?.name ?? row.app.name).font(JBFont.bodyMedium).foregroundStyle(Color.jbText)
-                                Text(status(row)).font(JBFont.small)
-                                    .foregroundStyle(row.open ? Color.jbWarn : Color.jbText2)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                        if row.include, row.target == nil, row.catalogApp != nil {
-                            Toggle("Install it first", isOn: $row.installFirst)
-                                .font(JBFont.small).padding(.leading, 20)
-                        }
+        ListPanel {
+            ForEach($model.rows) { $row in
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle(isOn: $row.include) {
+                        titledRow(row.catalogApp?.name ?? row.app.name, status(row), detailColor: row.open ? .jbWarn : .jbText2)
                     }
-                }
-                if model.launcherInfo != nil {
-                    Toggle(isOn: $model.includeLauncher) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("JB Theatre Tools").font(JBFont.bodyMedium).foregroundStyle(Color.jbText)
-                            Text("This launcher's settings \u{2014} restored last").font(JBFont.small).foregroundStyle(Color.jbText2)
+                    if row.include, row.target == nil, row.catalogApp != nil {
+                        Picker("", selection: $row.installFirst) {
+                            Text("Install first").tag(true)
+                            Text("Skip").tag(false)
                         }
+                        .pickerStyle(.segmented)   // a two-way switch, like Light / Dark
+                        .labelsHidden()
+                        .fixedSize()
+                        .padding(.leading, 20)
                     }
                 }
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            if model.launcherInfo != nil {
+                Toggle(isOn: $model.includeLauncher) {
+                    titledRow("JB Theatre Tools (this launcher)", "Its own settings \u{2014} restored last")
+                }
+            }
         }
-        .background(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous).fill(Color.jbSurface))
-        .overlay(RoundedRectangle(cornerRadius: JBRadius.panel, style: .continuous).strokeBorder(Color.jbLine))
         if model.hasSecrets {
             Toggle("Restore saved passwords", isOn: $model.restoreSecrets).font(JBFont.body)
         }
-        if model.needsPassphrase {
-            SecureField("Backup passphrase", text: $model.passphrase).textFieldStyle(.roundedBorder)
-        }
-        if let e = model.passError {
-            Text(e).font(JBFont.small).foregroundStyle(Color.jbDanger).fixedSize(horizontal: false, vertical: true)
-        }
-        Text("Each app keeps a copy of its current settings first, so its own Settings can undo the restore.")
+        if model.needsPassphrase { passphraseField }
+        Text("Each app's current settings are copied first; Undo is in that app's Settings \u{2192} Settings backup.")
             .font(JBFont.small).foregroundStyle(Color.jbText2).fixedSize(horizontal: false, vertical: true)
+        if state.showLock {
+            Text("Restoring waits until show lock is off.").font(JBFont.small).foregroundStyle(Color.jbInfo)
+        }
         Spacer(minLength: 0)
         HStack {
-            Button("Check Again") { model.refreshOpen() }.buttonStyle(.jbSecondary)
-                .opacity(model.rows.contains { $0.open } ? 1 : 0)
+            if model.rows.contains(where: { $0.open }) {
+                Button("Check Again") { model.refreshOpen() }.buttonStyle(.jbSecondary)
+            }
             Spacer()
-            Button("Cancel") { dismiss() }.buttonStyle(.jbSecondary).keyboardShortcut(.defaultAction)
+            Button("Cancel") { dismiss() }.buttonStyle(.jbSecondary).keyboardShortcut(.cancelAction)
             Button("Restore") { Task { await model.run(state: state) } }
                 .buttonStyle(.jbPrimary)
                 .disabled(!model.canRestore || state.showLock)
         }
-        .onExitCommand { dismiss() }
+    }
+
+    @ViewBuilder private var passphraseField: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            SecureField("Backup passphrase", text: $model.passphrase).textFieldStyle(.roundedBorder)
+            if let e = model.passError {
+                Text(e).font(JBFont.small).foregroundStyle(Color.jbDanger).fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     @ViewBuilder private var done: some View {
-        BackupResultList(lines: model.lines, intro: nil)
-        if let e = model.passError {
-            SecureField("Backup passphrase", text: $model.passphrase).textFieldStyle(.roundedBorder)
-            Text(e).font(JBFont.small).foregroundStyle(Color.jbDanger)
+        ListPanel {
+            ForEach(model.lines) { l in BackupResultRow(line: l, words: BackupWords.restore(l), detail: BackupWords.detail(l)) }
         }
+        if model.passError != nil { passphraseField }
         HStack {
             Spacer()
             if model.hasRetry || model.passError != nil {
                 Button("Try Again") { Task { await model.run(state: state) } }
                     .buttonStyle(.jbSecondary)
-                    .disabled(model.passError != nil && model.passphrase.isEmpty)
+                    .disabled((model.needsPassphrase && model.passphrase.isEmpty) || state.showLock)
             }
             Button("Done") { dismiss() }.buttonStyle(.jbPrimary).keyboardShortcut(.defaultAction)
         }
     }
 
     private func status(_ row: RestoreAllModel.Row) -> String {
-        let from = row.app.version.isEmpty ? "" : "Backed up from \(row.app.version). "
-        if !row.info.readable { return "This part of the backup can't be read." }
-        if row.catalogApp == nil { return from + "Not in this launcher's list \u{2014} it will be skipped." }
-        if row.target == nil {
-            return from + (row.installFirst ? "Not installed \u{2014} it will be installed first." : "Not installed \u{2014} it will be skipped.")
-        }
-        if row.open { return "Open \u{2014} quit it before restoring." }
-        return from + "Installed."
+        if !row.info.readable { return "This part of the backup can't be read" }
+        if row.catalogApp == nil { return "Not in this launcher's list \u{2014} it will be skipped" }
+        if row.target == nil { return "Not installed" }
+        if row.open { return "Open \u{2014} quit it first" }
+        return "Will restore"
     }
 }

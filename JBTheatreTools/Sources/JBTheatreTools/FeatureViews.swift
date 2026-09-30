@@ -152,6 +152,13 @@ struct AppDetailsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     detailRows
+                    // This app's own Show lock — the same switch as in the app's window and in Stagehand.
+                    Toggle("Show lock", isOn: Binding(get: { state.isAppLocked(row.id) },
+                                                      set: { state.setAppShowLock(row.id, $0) }))
+                        .font(JBFont.body)
+                        .padding(.top, 4)
+                    Text(ShowLockWords.sentence).font(JBFont.small).foregroundStyle(Color.jbText2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             HStack(spacing: 8) {

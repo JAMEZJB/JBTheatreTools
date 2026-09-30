@@ -78,9 +78,11 @@ public sealed class SettingsDialog : Form
     private readonly HouseButton _clearCache = new() { AutoSize = true };
     private readonly HouseButton _diag = new() { AutoSize = true };
     private readonly HouseButton _openStagehand = new() { AutoSize = true };
-    private readonly HouseButton _backUpAll = new() { Text = "Back Up All Apps…", AutoSize = true };
-    private readonly HouseButton _restoreAll = new() { Text = "Restore All Apps…", AutoSize = true };
+    private readonly HouseButton _backUpAll = new() { Text = "Back up all apps…", AutoSize = true };
+    private readonly HouseButton _restoreAll = new() { Text = "Restore all apps…", AutoSize = true };
     private readonly Label _restoreLocked = new();
+    private readonly Label _lockHeld = new();
+    private readonly Label _stagehandMissing = new();
     private readonly SettingsExtras? _extras;
 
     // Bottom bar.
@@ -285,7 +287,7 @@ public sealed class SettingsDialog : Form
         _tray.CheckedChanged += (_, _) => _settings.AlwaysShowTray = _tray.Checked;
 
         // --- Show lock ---
-        _showLock.Text = "Pause installs, updates and uninstalls";
+        _showLock.Text = "Show lock for every app";
         _showLock.Checked = _settings.ShowLock;
         _showLock.CheckedChanged += (_, _) =>
         {
@@ -337,10 +339,13 @@ public sealed class SettingsDialog : Form
         _diag.Text = "Copy Diagnostics";
         _diag.Click += (_, _) => _extras?.CopyDiagnostics(this);
 
-        // --- Claude (set in Stagehand) ---
-        _openStagehand.Text = _extras?.StagehandInstalled?.Invoke() == true ? "Open Stagehand" : "Install Stagehand…";
-        _openStagehand.Enabled = _extras?.OpenStagehand != null;
+        // --- Claude: show lock for every app (shared with Stagehand and the apps) + Open Stagehand ---
+        _lockHeld.Text = ShowLockWords.Held;
+        _openStagehand.Text = "Open Stagehand";
+        bool stagehand = _extras?.StagehandInstalled?.Invoke() == true;
+        _openStagehand.Enabled = stagehand && _extras?.OpenStagehand != null;
         _openStagehand.Click += (_, _) => _extras?.OpenStagehand?.Invoke(this);
+        _stagehandMissing.Text = "Install Stagehand first";
 
         // --- Back up & restore ---
         _backUpAll.Enabled = _extras?.BackUpAll != null;
@@ -349,8 +354,10 @@ public sealed class SettingsDialog : Form
         {
             if (_extras?.RestoreAll?.Invoke(this) == true) { DialogResult = DialogResult.OK; Close(); }   // the main window re-reads everything
         };
-        _restoreLocked.Text = "Restoring is paused while show lock is on.";
+        _restoreLocked.Text = "Restoring waits until show lock is off.";
         _restoreLocked.ForeColor = Theme.Info;
+        _lockHeld.ForeColor = Theme.Info;
+        _stagehandMissing.ForeColor = Theme.Sub(Theme.CurrentDark);
         UpdateRestoreButton();
         _showLock.CheckedChanged += (_, _) => { UpdateRestoreButton(); LayoutAll(); };
 
@@ -438,14 +445,16 @@ public sealed class SettingsDialog : Form
         _left.Add(NewSection("Quick launch", Full(_tray),
             Full(Hint("Right-click the icon to launch any installed app, or check for updates."))));
 
-        _right.Add(NewSection("Show lock", Full(_showLock),
-            Full(Hint("For show time: launching still works, nothing changes underneath you. Ctrl+L in the main window.")),
-            Full(Hint("It also stops Claude from using live equipment or deleting anything in your apps."))));
-        _right.Add(NewSection("Claude",
-            Full(Hint("Which apps Claude can use, and what it may do in each, is set in Stagehand.")),
-            Row(null, _openStagehand)));
-        _right.Add(NewSection("Back up & restore", Row(null, _backUpAll, _restoreAll),
-            Full(Hint("Save every app's settings, and this launcher's, in one file — then restore them here or on a new show computer.")),
+        _right.Add(NewSection("Claude", Full(_showLock),
+            Full(Hint(ShowLockWords.Sentence)),
+            Full(_lockHeld, () => _settings.ShowLock),
+            Full(Hint("In this launcher, installs and uninstalls wait too; launching still works. Ctrl+L in the main window.")),
+            Rule(),
+            Row(null, _openStagehand),
+            Full(_stagehandMissing, () => !_openStagehand.Enabled),
+            Full(Hint("Stagehand sets which apps Claude can use and what it may do in each."))));
+        _right.Add(NewSection("Settings backup", Row(null, _backUpAll, _restoreAll),
+            Full(Hint("Save every app's settings, and this launcher's, in one backup — then restore them here or on a new show computer.")),
             Full(_restoreLocked, () => _settings.ShowLock)));
         _right.Add(NewSection("When updates are found", Full(_notify), Full(_autoInstall),
             Full(Hint("Held apps and apps that are open are left alone, and nothing installs during show lock."))));
@@ -459,7 +468,7 @@ public sealed class SettingsDialog : Form
                                     _storageInstalled, _storageCache, _storageNote });
         foreach (var l in new[] { _tokenState, _serverState, _serverHint, _serverRelay, _tokenHelp, _updateHint, _intervalLabel,
                                   _versionLabel, _checkResult, _closeHint, _installHint, _storageInstalledLabel, _storageInstalled,
-                                  _storageCacheLabel, _storageCache, _storageNote, _restoreLocked })
+                                  _storageCacheLabel, _storageCache, _storageNote, _restoreLocked, _lockHeld, _stagehandMissing })
         {
             l.AutoSize = false;
             l.UseMnemonic = false;
@@ -940,6 +949,8 @@ public sealed class SettingsDialog : Form
         _serverPassField.ApplyTheme(dark);
         foreach (var l in _subLabels) l.ForeColor = Theme.Sub(dark);
         _restoreLocked.ForeColor = Theme.Info;
+        _lockHeld.ForeColor = Theme.Info;
+        _stagehandMissing.ForeColor = Theme.Sub(dark);
         _tokenLink.LinkColor = _tokenLink.ActiveLinkColor = _tokenLink.VisitedLinkColor = Theme.Accent;
         HouseDraw.NativeTheme(_scroll, dark);
         UpdateIntervalEnabled();

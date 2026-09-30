@@ -294,6 +294,7 @@ struct ContentView: View {
             Divider()
             if state.stagehandInCatalog {
                 Button { state.openStagehand() } label: { Label("Open Stagehand", systemImage: "sparkles") }
+                    .disabled(!state.stagehandInstalled)
             }
             Button { state.showActivity() } label: { Label("Activity…", systemImage: "clock.arrow.circlepath") }
             Button { state.exportSetup() } label: { Label("Export Setup…", systemImage: "square.and.arrow.up") }
@@ -758,7 +759,8 @@ struct ReorderableList: View {
         if let row = state.rows.first(where: { $0.id == id }) {
             AppRowView(row: row, cursor: cursor, draggingId: $draggingId, order: $order,
                        isPinned: state.isPinned(id), selectedVariantId: state.selectedVariantId(row.app),
-                       isHeld: state.isHeld(id), locked: state.showLock, filtering: state.isFiltering)
+                       isHeld: state.isHeld(id), locked: state.showLock, filtering: state.isFiltering,
+                       appLocked: state.isAppLocked(id))
                 .equatable()   // body runs only when `row` publishes or these inputs change
                 .background(
                     GeometryReader { geo in
@@ -999,12 +1001,14 @@ struct AppRowView: View, Equatable {
     let isHeld: Bool
     let locked: Bool
     let filtering: Bool
+    /// The app's own Show lock is on (claude.json) — the row shows "Show lock on", like under the every-app lock.
+    var appLocked = false
 
     /// Only these decide whether a PARENT re-render needs this row's body; the row's own `@ObservedObject`
     /// publishes (busy/status/installed…) still re-render it regardless.
     static func == (a: AppRowView, b: AppRowView) -> Bool {
         a.row === b.row && a.cursor === b.cursor && a.isPinned == b.isPinned && a.selectedVariantId == b.selectedVariantId
-            && a.isHeld == b.isHeld && a.locked == b.locked && a.filtering == b.filtering
+            && a.isHeld == b.isHeld && a.locked == b.locked && a.filtering == b.filtering && a.appLocked == b.appLocked
     }
     @State private var hovering = false
     @State private var confirmingUninstall = false
@@ -1072,7 +1076,7 @@ struct AppRowView: View, Equatable {
         .overlay { if isDragging { dropSlot } }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .modifier(ErrorHelp(message: row.errorMessage ?? heldHelp))   // tooltips don't reach into the drawing group
+        .modifier(ErrorHelp(message: row.errorMessage ?? lockHelp ?? heldHelp))   // tooltips don't reach into the drawing group
         .modifier(UninstallConfirmation(row: row, state: state, isPresented: $confirmingUninstall))
     }
 
@@ -1085,6 +1089,7 @@ struct AppRowView: View, Equatable {
             AppIconImage(id: row.id, displayName: row.displayName, size: 38)
             infoColumn
             Spacer(minLength: 8)
+            if locked || appLocked { lockPill }
             statusBadge
             actions
         }
@@ -1306,6 +1311,24 @@ struct AppRowView: View, Equatable {
     private var whatsNewLabel: String {
         if let v = row.whatsNewVersion, !v.isEmpty { return "New in \(v):" }
         return "What's new:"
+    }
+
+    /// "Show lock on": Claude can't control live equipment or undo-proof actions in this app (warn orange, never yellow).
+    private var lockPill: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "lock.fill").font(.system(size: 9, weight: .semibold))
+            Text("Show lock on")
+        }
+        .font(JBFont.label)
+        .padding(.horizontal, 9).padding(.vertical, 3)
+        .background(Color.jbWarn.opacity(0.15))
+        .foregroundStyle(Color.jbWarn)
+        .clipShape(Capsule())
+    }
+
+    private var lockHelp: String? {
+        if locked { return "Show lock is on for every app" }
+        return appLocked ? "Show lock is on for this app" : nil
     }
 
     @ViewBuilder

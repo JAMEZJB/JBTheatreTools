@@ -91,7 +91,7 @@ internal sealed class CredentialLauncherSecrets : ILauncherSecrets
     }
 }
 
-/// <summary>A scrolling column of tick boxes, each with a smaller line under it.</summary>
+/// <summary>A scrolling column of tick boxes, each with a smaller line under it (and, for some, a control under that).</summary>
 internal sealed class ChoiceList : FlowLayoutPanel
 {
     private readonly List<(HouseCheckBox Box, Label Detail)> _rows = new();
@@ -120,6 +120,13 @@ internal sealed class ChoiceList : FlowLayoutPanel
         return (box, line);
     }
 
+    /// <summary>A control of its own under the last row (e.g. Install first | Skip), indented like its detail line.</summary>
+    public void AddUnder(Control c)
+    {
+        c.Margin = new Padding(24, 0, 0, 6);
+        Controls.Add(c);
+    }
+
     /// <summary>Widths follow the panel (the text wraps); heights follow the text.</summary>
     public void Fit()
     {
@@ -141,47 +148,77 @@ internal sealed class ChoiceList : FlowLayoutPanel
 /// <summary>The combined result: one line per app and what to check, in a read-only reader.</summary>
 internal static class BackupResults
 {
-    public static void Show(RichTextBox reader, IEnumerable<BackupLine> lines, string? intro)
+    public static string BackupWords(BackupLine l) => l.State switch
+    {
+        LineState.Ok or LineState.Attention => "Saved",
+        LineState.Empty => "Nothing to back up",
+        LineState.Unsupported => "Not backed up — this app's version can't back up its settings yet; update it",
+        LineState.Failed => "Failed — " + (l.Detail.FirstOrDefault() ?? "it stopped with an error"),
+        _ => "Not backed up",
+    };
+
+    public static string RestoreWords(BackupLine l) => l.State switch
+    {
+        LineState.Ok or LineState.Empty => "Restored",
+        LineState.Attention => "Restored — check these in Settings:",
+        LineState.Unsupported => "Not restored — this app's version can't restore settings yet; update it, then try again",
+        LineState.Failed => "Failed — " + (l.Detail.FirstOrDefault() ?? "it stopped with an error"),
+        LineState.Skipped => "Skipped" + (l.Detail.FirstOrDefault() is { } d ? " — " + d : ""),
+        _ => "Not restored yet — " + (l.Detail.FirstOrDefault() ?? "try again"),
+    };
+
+    /// <summary>The lines under the title (the ones already in the title aren't repeated).</summary>
+    private static IEnumerable<string> Detail(BackupLine l) => l.State switch
+    {
+        LineState.Failed or LineState.Skipped or LineState.Retry => l.Detail.Skip(1),
+        LineState.Unsupported => Array.Empty<string>(),
+        _ => l.Detail,
+    };
+
+    public static void Show(RichTextBox reader, IEnumerable<BackupLine> lines, Func<BackupLine, string> words, string? outro)
     {
         reader.Clear();
         bool dark = Theme.CurrentDark;
         using var bold = Theme.Ui(Theme.PtBody, semibold: true);
         using var body = Theme.Ui(Theme.PtSmall);
-        if (intro != null) DialogKit.Append(reader, intro + "\n\n", bold, Theme.Fg(dark));
         foreach (var l in lines)
         {
-            var (mark, what, color) = l.State switch
+            var (mark, color) = l.State switch
             {
-                LineState.Ok => ("✓", "done", Theme.Ok),
-                LineState.Attention => ("!", "done, check these in its Settings", Theme.Warn),
-                LineState.Unsupported => ("–", "not yet", Theme.Muted(dark)),
-                LineState.Skipped => ("–", "skipped", Theme.Muted(dark)),
-                LineState.Retry => ("↻", "not done yet", Theme.Warn),
-                _ => ("×", "failed", Theme.Danger),
+                LineState.Ok or LineState.Empty => ("✓", Theme.Ok),
+                LineState.Attention => ("!", Theme.Warn),
+                LineState.Unsupported or LineState.Skipped => ("–", Theme.Muted(dark)),
+                LineState.Retry => ("↻", Theme.Warn),
+                _ => ("×", Theme.Danger),
             };
             DialogKit.Append(reader, mark + "  ", bold, color);
-            DialogKit.Append(reader, $"{l.Name} — {what}\n", bold, Theme.Fg(dark));
-            foreach (var d in l.Detail) DialogKit.Append(reader, "     " + d + "\n", body, Theme.Sub(dark));
+            DialogKit.Append(reader, $"{l.Name} — {words(l)}\n", bold, Theme.Fg(dark));
+            foreach (var d in Detail(l)) DialogKit.Append(reader, "     " + d + "\n", body, Theme.Sub(dark));
             DialogKit.Append(reader, "\n", body, Theme.Sub(dark));
         }
+        if (outro != null) DialogKit.Append(reader, outro + "\n", bold, Theme.Fg(dark));
         reader.SelectionStart = 0;
     }
 
     public static string DocumentsFolder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "JB Theatre Tools");
 }
 
-/// <summary>Settings → "Back Up All Apps…": every installed app ticked (the ones whose version can back up), the
-/// launcher's own settings, "Include saved passwords" with an optional passphrase, then a file to save.</summary>
+/// <summary>Settings → "Back up all apps…": every installed app ticked (the ones whose version can back up), the
+/// launcher's own settings, "Include saved passwords" with an optional passphrase, then a file to save. House rules:
+/// Back up… is the filled action; Cancel has the focus and Esc; Enter presses only the focused button.</summary>
 internal sealed class BackupAllDialog : Form
 {
+    private const string LauncherTitle = "JB Theatre Tools (this launcher)";
     private readonly List<(BackupTarget Target, HouseCheckBox Box, Label Detail)> _rows = new();
     private readonly Dictionary<string, (BackupSlot? Slot, AppProbe Probe)> _probes = new();
     private readonly HouseCheckBox _launcher;
+    private readonly Label _launcherDetail;
     private readonly HouseCheckBox _secrets = new();
     private readonly HouseTextField _pass = new(), _confirm = new();
+    private readonly Label _mismatch = new() { AutoSize = true, UseMnemonic = false, Margin = new Padding(0, 2, 0, 0), Text = "The passphrases don't match." };
     private readonly Label _note = new() { AutoSize = true, UseMnemonic = false, Margin = new Padding(0, 4, 0, 0) };
     private readonly Label _status = new() { AutoSize = true, UseMnemonic = false, Margin = new Padding(0, 4, 0, 0) };
-    private readonly HouseButton _backUp = DialogKit.Button("Back Up…", primary: true);
+    private readonly HouseButton _backUp = DialogKit.Button("Back up…", primary: true);
     private readonly HouseButton _cancel = DialogKit.Button("Cancel", DialogResult.Cancel);
     private readonly HouseButton _show = DialogKit.Button("Show in Explorer");
     private readonly RichTextBox _reader;
@@ -201,18 +238,15 @@ internal sealed class BackupAllDialog : Form
     {
         _settings = settings;
         _version = version;
-        Text = "Back Up All Apps";
+        Text = "Back up all apps";
         DialogKit.Style(this, dark, new Size(560, 540), sizable: true);
         var intro = new Label
         {
-            Text = "Saves each app's settings, and this launcher's, into one file you can restore on this PC or a new show computer. Nothing is changed.",
+            Text = "Each app saves its own settings into one backup you can restore here or on a new show computer. Nothing is changed.",
             Dock = DockStyle.Top, AutoSize = false, Height = 52, UseMnemonic = false, Padding = new Padding(16, 14, 14, 0),
             ForeColor = Theme.Sub(dark),
         };
         try { _launcherSecrets = new CredentialLauncherSecrets().Present().Count; } catch (Exception) { _launcherSecrets = 0; }
-        _launcher = _list.Add("JB Theatre Tools", "This launcher's settings: list order, pins, editions, updates, appearance", dark).Box;
-        _launcher.Checked = true;
-        _launcher.CheckedChanged += (_, _) => UpdateState();
         foreach (var t in targets)
         {
             var (box, detail) = _list.Add(t.Name, "Checking…", dark);
@@ -220,7 +254,9 @@ internal sealed class BackupAllDialog : Form
             box.CheckedChanged += (_, _) => UpdateState();
             _rows.Add((t, box, detail));
         }
-        if (targets.Count == 0) _list.Add("No apps are installed", "Only the launcher's settings can be backed up.", dark).Box.Enabled = false;
+        (_launcher, _launcherDetail) = _list.Add(LauncherTitle, "List order, pins, editions, update and appearance settings", dark);
+        _launcher.Checked = true;
+        _launcher.CheckedChanged += (_, _) => UpdateState();
         _reader = DialogKit.Reader(dark);
         _reader.Visible = false;
         var host = new Panel { Dock = DockStyle.Fill };
@@ -229,19 +265,23 @@ internal sealed class BackupAllDialog : Form
 
         _secrets.Visible = false;
         _secrets.CheckedChanged += (_, _) => UpdateState();
-        foreach (var (f, cue, name) in new[] { (_pass, "Passphrase (optional)", "Passphrase"), (_confirm, "Confirm passphrase", "Confirm passphrase") })
+        foreach (var (f, cue) in new[] { (_pass, "Passphrase (optional)"), (_confirm, "Confirm passphrase") })
         {
             f.Placeholder = cue;
             f.Box.UseSystemPasswordChar = true;
-            f.Box.AccessibleName = name;
+            f.Box.AccessibleName = cue;
             f.Size = new Size(240, 28);
             f.Margin = new Padding(0, 6, 8, 0);
             f.ApplyTheme(dark);
             f.Box.TextChanged += (_, _) => UpdateState();
         }
+        _mismatch.ForeColor = Theme.Danger;
+        var confirmCol = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = Padding.Empty };
+        confirmCol.Controls.Add(_confirm);
+        confirmCol.Controls.Add(_mismatch);
         var fields = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
         fields.Controls.Add(_pass);
-        fields.Controls.Add(_confirm);
+        fields.Controls.Add(confirmCol);
         _options.Controls.Add(_secrets);
         _options.Controls.Add(fields);
         _options.Controls.Add(_note);
@@ -262,8 +302,7 @@ internal sealed class BackupAllDialog : Form
         _show.Click += (_, _) => { if (_saved != null) OpenInExplorer(_saved); };
         _backUp.Click += async (_, _) => await BackUpAsync();
         _cancel.Click += (_, _) => { if (!_busy) Close(); };
-        // House rule: the action is filled; the safe choice has the focus and Enter.
-        AcceptButton = _cancel;
+        // No AcceptButton: Enter presses only the focused button (in a passphrase field it does nothing).
         CancelButton = _cancel;
         Load += (_, _) => ActiveControl = _cancel;
         FormClosing += (_, e) => { if (_busy) e.Cancel = true; };
@@ -304,7 +343,7 @@ internal sealed class BackupAllDialog : Form
             var p = result.Probe;
             row.Detail.Text = p.State switch
             {
-                AppProbeState.Ready => (p.Items.Count == 0 ? "Nothing saved yet" : string.Join(", ", p.Items))
+                AppProbeState.Ready => (p.Items.Count == 0 ? "Nothing to back up yet" : string.Join(", ", p.Items))
                                        + (p.SecretCount > 0 ? $" · {p.SecretCount} saved password{(p.SecretCount == 1 ? "" : "s")}" : ""),
                 AppProbeState.Unsupported => SuiteBackup.UnsupportedMessage,
                 _ => p.Message ?? "It couldn't be checked.",
@@ -322,9 +361,8 @@ internal sealed class BackupAllDialog : Form
         + _rows.Where(r => r.Box.Checked && _probes.TryGetValue(r.Target.Id, out var p) && p.Probe.State == AppProbeState.Ready)
                .Sum(r => _probes[r.Target.Id].Probe.SecretCount);
 
-    private string? PassProblem =>
-        !_secrets.Checked || (_pass.Box.Text.Length == 0 && _confirm.Box.Text.Length == 0) ? null
-        : _pass.Box.Text != _confirm.Box.Text ? "The two passphrases don't match." : null;
+    private bool Mismatch => _secrets.Checked && _pass.Box.Text != _confirm.Box.Text
+                             && !(_pass.Box.Text.Length == 0 && _confirm.Box.Text.Length == 0);
 
     private void UpdateState()
     {
@@ -335,16 +373,16 @@ internal sealed class BackupAllDialog : Form
         _secrets.Text = $"Include saved passwords ({n})";
         if (n == 0) _secrets.Checked = false;
         _pass.Parent!.Visible = _secrets.Checked;
+        _mismatch.Visible = Mismatch;
         _note.Visible = _secrets.Checked;
         _note.Text = _pass.Box.Text.Length == 0
             ? "Leave blank to save the passwords unprotected — anyone with the file can read them."
-            : "You'll need this passphrase to restore the passwords. It isn't saved anywhere.";
+            : "The passwords are locked with this passphrase. Without it they can't be restored; the rest of the settings still can.";
         _note.ForeColor = _pass.Box.Text.Length == 0 ? Theme.Warn : Theme.Sub(dark);
-        var problem = PassProblem;
-        _status.Visible = problem != null || Checking;
-        _status.Text = problem ?? "Checking which apps can back up…";
-        _status.ForeColor = problem != null ? Theme.Danger : Theme.Sub(dark);
-        _backUp.Enabled = !Checking && problem == null && (_launcher.Checked || _rows.Any(r => r.Box.Checked));
+        _status.Visible = Checking;
+        _status.Text = "Checking which apps can back up…";
+        _status.ForeColor = Theme.Sub(dark);
+        _backUp.Enabled = !Checking && !Mismatch && (_launcher.Checked || _rows.Any(r => r.Box.Checked));
         _options.PerformLayout();
     }
 
@@ -353,7 +391,7 @@ internal sealed class BackupAllDialog : Form
         Directory.CreateDirectory(BackupResults.DocumentsFolder);
         using var dlg = new SaveFileDialog
         {
-            Title = "Back Up All Apps", FileName = SuiteBackup.BundleFileName(), InitialDirectory = BackupResults.DocumentsFolder,
+            Title = "Back up all apps", FileName = SuiteBackup.BundleFileName(), InitialDirectory = BackupResults.DocumentsFolder,
             Filter = "JB Theatre Tools backup (*.jbtt-backup)|*.jbtt-backup", DefaultExt = SuiteBackup.BundleExt, AddExtension = true,
             OverwritePrompt = true,
         };
@@ -364,20 +402,29 @@ internal sealed class BackupAllDialog : Form
         string? pass = secrets && _pass.Box.Text.Length > 0 ? _pass.Box.Text : null;
         _busy = true;
         _backUp.Enabled = _cancel.Enabled = false;
-        _status.Visible = true;
-        _status.ForeColor = Theme.Sub(Theme.CurrentDark);
-        var progress = new Progress<string>(m => _status.Text = m);
+        _options.Visible = false;
+        // Per-app progress in the list itself.
+        foreach (var r in _rows) { r.Box.Enabled = false; if (r.Box.Checked) r.Detail.Text = "Waiting"; }
+        _launcher.Enabled = false;
+        if (_launcher.Checked) _launcherDetail.Text = "Waiting";
+        _list.Fit();
+        var progress = new Progress<(string Id, string Message)>(m =>
+        {
+            if (m.Id == SuiteBackup.LauncherId) _launcherDetail.Text = m.Message;
+            else if (_rows.FirstOrDefault(r => r.Target.Id == m.Id) is { Target: not null } row) row.Detail.Text = m.Message;
+            _list.Fit();
+        });
+        IProgress<(string, string)> report = progress;
         try
         {
             var lines = await Task.Run(() => SuiteBackup.BackUpAllAsync(chosen, _launcher.Checked, new WinLauncherPrefs(_settings),
-                new CredentialLauncherSecrets(), _version, secrets, pass, dlg.FileName, ((IProgress<string>)progress).Report));
+                new CredentialLauncherSecrets(), _version, secrets, pass, dlg.FileName, (id, msg) => report.Report((id, msg))));
             Log.Write($"backed up {chosen.Count} app(s){(_launcher.Checked ? " + the launcher" : "")} to {Path.GetFileName(dlg.FileName)}");
             _saved = dlg.FileName;
             _pass.Box.Text = _confirm.Box.Text = "";
             _list.Visible = false;
             _reader.Visible = true;
-            BackupResults.Show(_reader, lines, $"Saved {Path.GetFileName(dlg.FileName)}.");
-            _options.Visible = false;
+            BackupResults.Show(_reader, lines, BackupResults.BackupWords, $"Saved {Path.GetFileName(dlg.FileName)}");
             _backUp.Visible = false;
             _show.Visible = true;
             _cancel.Text = "Done";
@@ -390,6 +437,9 @@ internal sealed class BackupAllDialog : Form
             Log.Write($"back up all FAILED: {ex.Message}");
             _busy = false;
             _cancel.Enabled = true;
+            _options.Visible = true;
+            _launcher.Enabled = true;
+            foreach (var r in _rows) r.Box.Enabled = _probes.TryGetValue(r.Target.Id, out var p) && p.Probe.State == AppProbeState.Ready;
             UpdateState();
             _status.Visible = true;
             _status.Text = ex.Message;
@@ -398,9 +448,9 @@ internal sealed class BackupAllDialog : Form
     }
 }
 
-/// <summary>Settings → "Restore All Apps…": the apps in the backup, each installed / not installed (install it first,
-/// or skip) / open (quit it first), the launcher's own settings (restored last), passwords and the passphrase (asked
-/// once), then one combined result.</summary>
+/// <summary>Settings → "Restore all apps…": the apps in the backup, each "Will restore" / "Not installed" (Install
+/// first | Skip) / "Open — quit it first", the launcher's own settings (restored last), passwords and the passphrase
+/// (asked once), then one combined result. House rules as Back up all apps.</summary>
 internal sealed class RestoreAllDialog : Form
 {
     private sealed class Row
@@ -412,8 +462,9 @@ internal sealed class RestoreAllDialog : Form
         public BackupTarget? Target;
         public required HouseCheckBox Box;
         public required Label Detail;
-        public HouseCheckBox? InstallFirst;
+        public HouseSegmented? InstallChoice;   // 0 = Install first, 1 = Skip
         public bool Open;
+        public bool InstallFirst => InstallChoice?.SelectedIndex != 1;
     }
 
     private readonly SuiteBundle.Opened _opened;
@@ -424,8 +475,8 @@ internal sealed class RestoreAllDialog : Form
     private readonly HouseCheckBox _restoreSecrets = new() { Text = "Restore saved passwords", Checked = true };
     private readonly HouseTextField _pass = new();
     private readonly Label _error = new() { AutoSize = true, UseMnemonic = false, Margin = new Padding(0, 4, 0, 0) };
-    private readonly Label _note = new() { AutoSize = true, UseMnemonic = false, Margin = new Padding(0, 6, 0, 0),
-        Text = "Each app keeps a copy of its current settings first, so its own Settings can undo the restore." };
+    private readonly Label _note = new() { AutoSize = true, UseMnemonic = false, Margin = new Padding(0, 6, 0, 0) };
+    private const string UndoNote = "Each app's current settings are copied first; Undo is in that app's Settings → Settings backup.";
     private readonly HouseButton _restore = DialogKit.Button("Restore", primary: true);
     private readonly HouseButton _cancel = DialogKit.Button("Cancel", DialogResult.Cancel);
     private readonly HouseButton _checkAgain = DialogKit.Button("Check Again");
@@ -453,15 +504,15 @@ internal sealed class RestoreAllDialog : Form
         _settings = settings;
         _install = install;
         _locked = locked;
-        Text = "Restore All Apps";
-        DialogKit.Style(this, dark, new Size(560, 560), sizable: true);
+        Text = "Restore all apps?";
+        DialogKit.Style(this, dark, new Size(560, 580), sizable: true);
         var m = opened.Manifest;
         var from = SuiteBackup.Str(m.Source["machine"]) ?? "another computer";
         if (SuiteBackup.Str(m.Source["os"]) is { } os) from += " · " + os;
-        if (DateTime.TryParse(m.Created, System.Globalization.CultureInfo.InvariantCulture,
-                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var when))
-            from += " · " + when.ToLocalTime().ToString("d MMM yyyy HH:mm", System.Globalization.CultureInfo.CurrentCulture);
-        var intro = new Label { Text = "From " + from, Dock = DockStyle.Top, AutoSize = false, Height = 40, UseMnemonic = false,
+        var made = DateTime.TryParse(m.Created, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var when)
+            ? "\nMade " + when.ToLocalTime().ToString("d MMM yyyy HH:mm", System.Globalization.CultureInfo.CurrentCulture) : "";
+        var intro = new Label { Text = "From " + from + made, Dock = DockStyle.Top, AutoSize = false, Height = 56, UseMnemonic = false,
                                 Padding = new Padding(16, 14, 14, 0), ForeColor = Theme.Sub(dark) };
         foreach (var a in m.Apps)
         {
@@ -473,22 +524,22 @@ internal sealed class RestoreAllDialog : Form
                                 Target = targets.FirstOrDefault(t => t.Id == a.Id), Box = box, Detail = detail };
             if (row.Target == null && cat != null)
             {
-                row.InstallFirst = _list.Add("Install it first", "", dark).Box;
-                row.InstallFirst.Margin = new Padding(24, 0, 0, 4);
-                row.InstallFirst.Checked = true;
-                row.InstallFirst.CheckedChanged += (_, _) => UpdateState();
+                row.InstallChoice = new HouseSegmented(new[] { "Install first", "Skip" }, compact: true)
+                    { SelectedIndex = 0, AccessibleName = $"{cat.Name}: install first or skip" };
+                row.InstallChoice.SelectedIndexChanged += (_, _) => UpdateState();
+                _list.AddUnder(row.InstallChoice);
             }
             box.CheckedChanged += (_, _) => UpdateState();
             _rows.Add(row);
         }
-        if (m.LauncherFile != null && File.Exists(opened.PathOf(m.LauncherFile)))
+        if (m.LauncherFile != null && System.IO.File.Exists(opened.PathOf(m.LauncherFile)))
         {
             try
             {
-                var data = File.ReadAllBytes(opened.PathOf(m.LauncherFile));
+                var data = System.IO.File.ReadAllBytes(opened.PathOf(m.LauncherFile));
                 _launcherInfo = LauncherSettings.Inspect(data).Info;
                 _launcherData = data;
-                _launcher = _list.Add("JB Theatre Tools", "This launcher's settings — restored last", dark).Box;
+                _launcher = _list.Add("JB Theatre Tools (this launcher)", "Its own settings — restored last", dark).Box;
                 _launcher.Checked = true;
                 _launcher.CheckedChanged += (_, _) => UpdateState();
             }
@@ -510,6 +561,7 @@ internal sealed class RestoreAllDialog : Form
         _pass.Box.TextChanged += (_, _) => UpdateState();
         _error.ForeColor = Theme.Danger;
         _note.ForeColor = Theme.Sub(dark);
+        _note.Text = UndoNote;
         _options.Controls.Add(_restoreSecrets);
         _options.Controls.Add(_pass);
         _options.Controls.Add(_error);
@@ -529,7 +581,7 @@ internal sealed class RestoreAllDialog : Form
         _checkAgain.Click += (_, _) => { RefreshOpen(); UpdateState(); };
         _restore.Click += async (_, _) => await RunAsync();
         _cancel.Click += (_, _) => { if (!_busy) Close(); };
-        AcceptButton = _cancel;   // the safe choice has the focus and Enter; Restore is the filled action
+        // No AcceptButton: Enter presses only the focused button (in the passphrase field it does nothing).
         CancelButton = _cancel;
         Load += (_, _) => ActiveControl = _cancel;
         FormClosing += (_, e) => { if (_busy) e.Cancel = true; };
@@ -554,14 +606,13 @@ internal sealed class RestoreAllDialog : Form
         (_rows.Any(r => r.Box.Checked && r.Info.Protected) || (_launcher?.Checked == true && _launcherInfo?.Protected == true));
     private bool HasSecrets => _rows.Any(r => r.Box.Checked && r.Info.HasSecrets) || (_launcher?.Checked == true && _launcherInfo?.HasSecrets == true);
 
-    private string Status(Row r)
+    private static string Status(Row r)
     {
-        var from = r.App.Version.Length == 0 ? "" : $"Backed up from {r.App.Version}. ";
-        if (!r.Info.Readable) return "This part of the backup can't be read.";
-        if (r.Catalog == null) return from + "Not in this launcher's list — it will be skipped.";
-        if (r.Target == null) return from + (r.InstallFirst?.Checked == true ? "Not installed — it will be installed first." : "Not installed — it will be skipped.");
-        if (r.Open) return "Open — quit it before restoring.";
-        return from + "Installed.";
+        if (!r.Info.Readable) return "This part of the backup can't be read";
+        if (r.Catalog == null) return "Not in this launcher's list — it will be skipped";
+        if (r.Target == null) return "Not installed";
+        if (r.Open) return "Open — quit it first";
+        return "Will restore";
     }
 
     private void UpdateState()
@@ -572,19 +623,19 @@ internal sealed class RestoreAllDialog : Form
         {
             r.Detail.Text = Status(r);
             r.Detail.ForeColor = r.Open ? Theme.Warn : Theme.Sub(dark);
-            if (r.InstallFirst != null) r.InstallFirst.Visible = r.Box.Checked && r.Target == null;
+            if (r.InstallChoice != null) r.InstallChoice.Visible = r.Box.Checked && r.Target == null && !_done;
         }
         _list.Fit();
         _restoreSecrets.Visible = HasSecrets && !_done;
         bool canRun = !_done || _lines.Any(l => l.State == LineState.Retry) || _error.Text.Length > 0;
         _pass.Visible = NeedsPassphrase && canRun;
+        bool locked = _locked();
+        if (locked && !_done) _error.Text = "Restoring waits until show lock is off.";
         _error.Visible = _error.Text.Length > 0;
         _note.Visible = !_done;
         _checkAgain.Visible = !_done && _rows.Any(r => r.Open);
-        bool locked = _locked();
         _restore.Enabled = !locked && (_launcher?.Checked == true || _rows.Any(r => r.Box.Checked))
                            && (!NeedsPassphrase || _pass.Box.Text.Length > 0);
-        if (locked && !_done) { _error.Text = "Restoring is paused while show lock is on."; _error.Visible = true; }
         _options.PerformLayout();
     }
 
@@ -600,7 +651,7 @@ internal sealed class RestoreAllDialog : Form
         _done = true;
         _list.Visible = false;
         _reader.Visible = true;
-        BackupResults.Show(_reader, _lines, null);
+        BackupResults.Show(_reader, _lines, BackupResults.RestoreWords, null);
         bool retry = _lines.Any(l => l.State == LineState.Retry);
         _restore.Text = "Try Again";
         _restore.Visible = retry || _error.Text.Length > 0;
@@ -632,13 +683,13 @@ internal sealed class RestoreAllDialog : Form
             if (!r.Box.Checked || _finished.Contains(r.App.Id)) continue;
             var name = r.Catalog?.Name ?? r.App.Name;
             if (!r.Info.Readable || r.Info.AppId != r.App.Id)
-            { SetLine(new BackupLine(r.App.Id, name, LineState.Failed, new() { "This part of the backup can't be read." })); continue; }
+            { SetLine(new BackupLine(r.App.Id, name, LineState.Failed, new() { "this part of the backup can't be read" })); continue; }
             if (r.Catalog == null)
-            { SetLine(new BackupLine(r.App.Id, name, LineState.Skipped, new() { "This app isn't in this launcher's list." })); continue; }
+            { SetLine(new BackupLine(r.App.Id, name, LineState.Skipped, new() { "it isn't in this launcher's list" })); continue; }
             if (r.Target == null)
             {
-                if (r.InstallFirst?.Checked != true)
-                { SetLine(new BackupLine(r.App.Id, name, LineState.Skipped, new() { "Not installed here, so it was skipped." })); continue; }
+                if (!r.InstallFirst)
+                { SetLine(new BackupLine(r.App.Id, name, LineState.Skipped, new() { "not installed here" })); continue; }
                 Say($"Installing {name}…");
                 var edition = r.App.Edition != null && r.Catalog.Variants?.Any(v => v.Id == r.App.Edition) == true ? r.App.Edition : null;
                 try { await _install(r.Catalog.Id, edition); } catch (Exception ex) { Log.Write($"restore install {r.App.Id}: {ex.Message}"); }
@@ -647,7 +698,7 @@ internal sealed class RestoreAllDialog : Form
                 if (r.Target == null)
                 {
                     SetLine(new BackupLine(r.App.Id, name, LineState.Failed,
-                        new() { "It couldn't be installed, so its settings weren't restored. Install it from the list, then restore again." }));
+                        new() { "it couldn't be installed. Install it from the list, then restore again." }));
                     continue;
                 }
             }
@@ -655,21 +706,26 @@ internal sealed class RestoreAllDialog : Form
             if (target.Slots.Any(s => InstallManager.Shared.RunningInstances(s.InstallKey).Length > 0))
             {
                 r.Open = true;
-                SetLine(new BackupLine(r.App.Id, name, LineState.Retry, new() { $"{name} is open. Quit it, then press Try Again." }));
+                SetLine(new BackupLine(r.App.Id, name, LineState.Retry, new() { "it's open. Quit it, then press Try Again." }));
                 continue;
             }
             Say($"Restoring {name}…");
             var outcome = await Task.Run(() => SuiteBackup.RestoreAppAsync(r.File, target.Slots, pass, secrets));
             if (outcome.State == ImportState.Passphrase)
             {
-                // Nothing changed for this app; ask again and carry on from here.
+                // Nothing changed for this app: stay on the sheet with the error under the field.
                 _error.Text = outcome.Message ?? "That passphrase doesn't open this backup.";
                 _busy = false;
                 _cancel.Enabled = _checkAgain.Enabled = true;
-                if (_lines.Count > 0) ShowResults(); else { _note.Text = ""; UpdateState(); }
+                if (_lines.Count > 0) ShowResults(); else { _note.Text = UndoNote; UpdateState(); }
                 return;
             }
             Log.Write($"restore {r.App.Id}: {outcome.State}");
+            if (outcome.State == ImportState.AppOpen)
+            {
+                SetLine(new BackupLine(r.App.Id, name, LineState.Retry, new() { "it's open. Quit it, then press Try Again." }));
+                continue;
+            }
             SetLine(SuiteBackup.Line(r.App.Id, name, outcome));
         }
         if (_launcher?.Checked == true && _launcherData != null && !_finished.Contains(SuiteBackup.LauncherId))

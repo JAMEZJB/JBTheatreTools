@@ -130,6 +130,9 @@ public sealed class AppRowControl : UserControl
     // Light/Full picker: the house segmented control (macOS JBSegmented, compact), inline before the row's buttons.
     private readonly HouseSegmented _variant;
     private readonly PillLabel _badge = new();
+    /// <summary>"Show lock on": Claude can't control live equipment or undo-proof actions in this app (every-app or its own lock).</summary>
+    private readonly PillLabel _lockPill = new() { Text = "Show lock on", Visible = false };
+    private bool _appLocked;
     private bool _compact;
     private bool _suppressVariantEvent;
     // House buttons, compact (the mac row's .controlSize(.small)): Install/Update/Retry and Launch are the accent-filled
@@ -275,6 +278,7 @@ public sealed class AppRowControl : UserControl
         }
 
         _badge.AutoSize = true;
+        _lockPill.AutoSize = true;
 
         _install.AutoSize = true;
         _install.Click += async (_, _) =>
@@ -309,7 +313,7 @@ public sealed class AppRowControl : UserControl
         _placeholder.Paint += PaintPlaceholder;
         Controls.Add(_placeholder);   // added last → top of the z-order, so it covers the row content
 
-        Controls.AddRange(new Control[] { _icon, _name, _pin, _blurb, _version, _whatsNew, _variant, _badge, _install, _launch, _more, _cancel, _progress });
+        Controls.AddRange(new Control[] { _icon, _name, _pin, _blurb, _version, _whatsNew, _variant, _badge, _lockPill, _install, _launch, _more, _cancel, _progress });
         Resize += (_, _) => LayoutControls();
         // Drag-to-reorder: press-and-drag on the GRIP zone (left edge) starts a custom reorder (MainForm
         // drives a floating card + live reorder). Right-click opens the action menu; double-click launches.
@@ -322,7 +326,7 @@ public sealed class AppRowControl : UserControl
         }
         // Hover highlight (parity with the macOS row hover): recompute from the real cursor position on
         // every enter/leave of the row or any child, so moving across children doesn't flicker it off.
-        foreach (Control c in new Control[] { this, _icon, _name, _pin, _blurb, _version, _whatsNew, _variant, _badge, _install, _launch, _more, _cancel, _progress })
+        foreach (Control c in new Control[] { this, _icon, _name, _pin, _blurb, _version, _whatsNew, _variant, _badge, _lockPill, _install, _launch, _more, _cancel, _progress })
         {
             c.MouseEnter += (_, _) => RecomputeHover();
             c.MouseLeave += (_, _) => RecomputeHover();
@@ -368,6 +372,7 @@ public sealed class AppRowControl : UserControl
         _version.Font = F(Theme.PtLabel);                  // t-label step, sentence case (a meta line)
         _whatsNew.Font = F(Theme.PtLabel);
         _badge.Font = F(Theme.PtLabel, semibold: true);    // t-label 10.5px/600
+        _lockPill.Font = F(Theme.PtLabel, semibold: true);
         foreach (var f in old) f.Dispose();                // the controls hold the new ones now
     }
 
@@ -711,6 +716,14 @@ public sealed class AppRowControl : UserControl
         UpdateVisual();
     }
 
+    /// <summary>This app's own Show lock (claude.json): the row shows "Show lock on", as under the every-app lock.</summary>
+    public void SetAppLocked(bool on)
+    {
+        if (_appLocked == on) return;
+        _appLocked = on;
+        UpdateVisual();
+    }
+
     /// <summary>Re-reads the held state (after a hold toggle) and redraws.</summary>
     public void RefreshHeld() => UpdateVisual();
 
@@ -761,6 +774,11 @@ public sealed class AppRowControl : UserControl
         if (App.HasVariants) rx = Place(_variant, S(10));
         _badge.Size = _badge.GetPreferredSize(Size.Empty);
         rx = Place(_badge, S(8));
+        if (_lockPill.Visible)
+        {
+            _lockPill.Size = _lockPill.GetPreferredSize(Size.Empty);
+            rx = Place(_lockPill, S(6));
+        }
         _blurb.Width = Math.Max(S(40), Math.Min(blurbSize.Width + S(2), rx - x));
         // Along the bottom edge under the text column (the row's height varies with the what's-new line), clear of the
         // last text line and the hairline.
@@ -1083,6 +1101,11 @@ public sealed class AppRowControl : UserControl
         };
         if (heldUpdate) (text, color) = ("Held", Theme.Selector);
         if (_phase != null) ApplyBadge(_phase, Theme.Sub(_dark)); else ApplyBadge(text, color);   // a live phase wins
+        bool lockPill = !_compact && (_locked || _appLocked);
+        if (_lockPill.Visible != lockPill) { _lockPill.Visible = lockPill; if (!_compact) LayoutControls(); }
+        _lockPill.ForeColor = Theme.Warn;
+        _lockPill.PillBack = Color.FromArgb(38, Theme.Warn);
+        _tip.SetToolTip(_lockPill, _locked ? "Show lock is on for every app" : "Show lock is on for this app");
         _tip.SetToolTip(_badge, heldUpdate && Latest != null
             ? $"{VersionCompare.Display(Latest)} is available — held at {VersionCompare.Display(Installed!)}" : null);
 

@@ -32,6 +32,29 @@ enum ClaudeSettingsFile {
         catch { AppLog.shared.log("claude.json: couldn't save show lock (\(error.localizedDescription))") }
     }
 
+    /// Apps whose own Show lock is on (their in-window switch, Stagehand, or the launcher's app details).
+    static func appShowLocks(at url: URL = url) -> Set<String> {
+        guard let data = try? Data(contentsOf: url), let d = SuiteBackup.jsonObject(data),
+              (d["schema"] as? NSNumber)?.intValue == 1, let apps = d["apps"] as? [String: Any] else { return [] }
+        return Set(apps.compactMap { ($0.value as? [String: Any])?["showLock"] as? Bool == true ? $0.key : nil })
+    }
+
+    /// One app's own Show lock (the launcher's app details), keeping everything else in the file.
+    static func setAppShowLock(_ appId: String, _ on: Bool, at url: URL = url) {
+        var d: [String: Any] = ["schema": 1, "enabled": false, "showLock": false, "apps": [String: Any]()]
+        if let data = try? Data(contentsOf: url), let old = SuiteBackup.jsonObject(data),
+           (old["schema"] as? NSNumber)?.intValue == 1 {
+            d = old
+        }
+        var apps = d["apps"] as? [String: Any] ?? [:]
+        var app = apps[appId] as? [String: Any] ?? [:]
+        app["showLock"] = on
+        apps[appId] = app
+        d["apps"] = apps
+        do { try writePrivate(try SuiteBackup.jsonData(d), to: url) }
+        catch { AppLog.shared.log("claude.json: couldn't save \(appId)'s show lock (\(error.localizedDescription))") }
+    }
+
     /// Atomic, readable by this user only.
     static func writePrivate(_ data: Data, to url: URL) throws {
         let fm = FileManager.default
@@ -48,6 +71,12 @@ enum ClaudeSettingsFile {
             throw error
         }
     }
+}
+
+/// The words every show lock switch uses (the apps', Stagehand's and the launcher's), so they read the same.
+enum ShowLockWords {
+    static let sentence = "While show lock is on, Claude can't control live equipment or do anything that can't be undone. You're never blocked."
+    static let held = "Updates are held until show lock is off."
 }
 
 enum Connectors {

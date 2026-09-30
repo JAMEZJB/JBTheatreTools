@@ -79,10 +79,10 @@ The same features on every launcher (the few that don't apply to Android are mar
   instead. The command line does the same with `--self-update`. Android updates itself too.
 - **What's new in the launcher** — after the launcher updates itself it offers, once, the notes of every
   release since the version you had.
-- **Back up / restore every app's settings** *(desktop)* — Settings → Back Up All Apps… asks each installed app
+- **Back up / restore every app's settings** *(desktop)* — Settings → Settings backup → Back up all apps… asks each installed app
   to save its settings (`<app> --settings-export`) and adds the launcher's own, all in one
   `JB Theatre Tools backup <date>.jbtt-backup` file. Saved passwords go in only when you tick "Include saved
-  passwords", sealed with an optional passphrase (PBKDF2-SHA256 + HMAC-SHA256). Restore All Apps… shows what the
+  passwords", sealed with an optional passphrase (PBKDF2-SHA256 + HMAC-SHA256). Restore all apps… shows what the
   file holds, offers to install apps that aren't installed yet, asks you to quit apps that are open, asks for the
   passphrase once, then restores each app (each keeps a copy of its current settings first) and the launcher's own
   settings last, with one combined result. A Mac backup restores on Windows and the other way round. An app whose
@@ -90,7 +90,9 @@ The same features on every launcher (the few that don't apply to Android are mar
 - **Claude and Stagehand** *(desktop)* — Stagehand, installed like any app, sets which apps Claude can use and what
   it may do in each. The launcher keeps a stable command for every installed app that can work with Claude, in
   `connectors.json` next to the install list (on Windows through a folder link that follows updates), shares
-  show lock with Stagehand and the apps through `claude.json`, and has Open Stagehand in Settings and the More menu.
+  show lock with Stagehand and the apps through `claude.json` ("Show lock for every app" in Settings → Claude, and each
+  app's own Show lock in its details, marked "Show lock on" on its row), and has Open Stagehand in Settings and the More
+  menu once Stagehand is installed.
 
 ## App catalog (the installable apps it launches)
 

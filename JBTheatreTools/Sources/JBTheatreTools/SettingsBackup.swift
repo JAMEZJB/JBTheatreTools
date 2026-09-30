@@ -605,7 +605,7 @@ enum AppImportOutcome: Equatable {
 }
 
 enum AppExportOutcome: Equatable {
-    case ok(secrets: Int, protected: Bool)
+    case ok(secrets: Int, protected: Bool, empty: Bool = false)
     case unsupported
     case failed(String)
 }
@@ -632,7 +632,8 @@ enum SettingsCLIClassify {
     static func export(_ r: SettingsCLIRun) -> AppExportOutcome {
         if r.ok {
             return .ok(secrets: (r.result?["secrets"] as? NSNumber)?.intValue ?? 0,
-                       protected: r.result?["protected"] as? Bool == true)
+                       protected: r.result?["protected"] as? Bool == true,
+                       empty: (r.result?["items"] as? [Any])?.isEmpty == true)
         }
         if let e = r.launchError { return .failed("It couldn't be started (\(e)).") }
         if r.timedOut && r.result == nil { return .unsupported }
@@ -726,7 +727,7 @@ extension SuiteBackup {
 
 /// One line of the combined result: an app (or the launcher) and how it went.
 struct SuiteBackupLine: Identifiable, Equatable {
-    enum State: Equatable { case ok, attention, unsupported, failed, skipped, retry }
+    enum State: Equatable { case ok, attention, unsupported, failed, skipped, retry, empty }
     let id: String
     let name: String
     var state: State
@@ -739,7 +740,7 @@ extension SuiteBackup {
     static func backUpAll(_ chosen: [(target: BackupTarget, slot: BackupSlot)], includeLauncher: Bool,
                           prefs: LauncherPrefs, secrets: LauncherSecrets, launcherVersion: String,
                           includeSecrets: Bool, passphrase: String?, dest: URL,
-                          progress: @escaping (String) -> Void = { _ in }) async throws -> [SuiteBackupLine] {
+                          progress: @escaping (_ id: String, _ message: String) -> Void = { _, _ in }) async throws -> [SuiteBackupLine] {
         let fm = FileManager.default
         let staging = fm.temporaryDirectory.appendingPathComponent("jbtt-backup-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: staging, withIntermediateDirectories: true)
@@ -748,23 +749,23 @@ extension SuiteBackup {
         var entries: [SuiteBundleApp] = []
         let pass = (passphrase?.isEmpty == false) ? passphrase : nil
         for (target, slot) in chosen {
-            progress("Backing up \(target.name)\u{2026}")
+            progress(target.id, "Backing up\u{2026}")
             let file = "\(target.id).\(settingsExt)"
             var args = ["--settings-export", staging.appendingPathComponent(file).path]
             if includeSecrets { args.append("--include-secrets") }
             let line: String? = includeSecrets ? (pass ?? "") : nil   // the stdin line (empty = no passphrase)
             let r = await SettingsCLI.run(slot.executable, args, passphrase: line, timeout: runTimeout)
             switch SettingsCLIClassify.export(r) {
-            case .ok(let n, let prot) where n > 0 && pass != nil && !prot:
+            case .ok(let n, let prot, _) where n > 0 && pass != nil && !prot:
                 // Asked for a passphrase but the app wrote its passwords in plain text: never keep that file.
                 try? fm.removeItem(at: staging.appendingPathComponent(file))
                 lines.append(SuiteBackupLine(id: target.id, name: target.name, state: .failed,
                                              detail: ["It didn't protect its passwords with the passphrase, so it was left out. Update it, or back up without passwords."]))
-            case .ok(let n, let prot):
+            case .ok(let n, let prot, let empty):
                 entries.append(SuiteBundleApp(id: target.id, name: target.name, version: slot.version, file: file, edition: slot.edition))
-                let note = n == 0 ? [] : [prot ? "\(n) saved password\(n == 1 ? "" : "s"), protected by the passphrase"
+                let note = n == 0 ? [] : [prot ? "\(n) saved password\(n == 1 ? "" : "s"), locked with the passphrase"
                                                : "\(n) saved password\(n == 1 ? "" : "s"), not protected"]
-                lines.append(SuiteBackupLine(id: target.id, name: target.name, state: .ok, detail: note))
+                lines.append(SuiteBackupLine(id: target.id, name: target.name, state: empty ? .empty : .ok, detail: note))
             case .unsupported:
                 try? fm.removeItem(at: staging.appendingPathComponent(file))
                 lines.append(SuiteBackupLine(id: target.id, name: target.name, state: .unsupported,
@@ -776,7 +777,7 @@ extension SuiteBackup {
         }
         var launcherFileName: String?
         if includeLauncher {
-            progress("Backing up JB Theatre Tools\u{2026}")
+            progress(launcherId, "Backing up\u{2026}")
             do {
                 let doc = try LauncherSettings.document(prefs: prefs, secrets: secrets, version: launcherVersion,
                                                         includeSecrets: includeSecrets, passphrase: pass)
@@ -785,7 +786,7 @@ extension SuiteBackup {
                 let n = ((doc["secrets"] as? [String: Any])?["count"] as? NSNumber)?.intValue ?? 0
                 lines.append(SuiteBackupLine(id: launcherId, name: launcherName, state: .ok,
                                              detail: n == 0 ? [] : ["\(n) saved password\(n == 1 ? "" : "s")"
-                                                                    + (pass != nil ? ", protected by the passphrase" : ", not protected")]))
+                                                                    + (pass != nil ? ", locked with the passphrase" : ", not protected")]))
             } catch {
                 lines.append(SuiteBackupLine(id: launcherId, name: launcherName, state: .failed, detail: [error.localizedDescription]))
             }
@@ -796,7 +797,7 @@ extension SuiteBackup {
         let manifest = SuiteBundleManifest(created: isoNow(), source: source(), launcherVersion: launcherVersion,
                                            apps: entries, launcherFile: launcherFileName)
         try atomicWrite(try jsonData(manifest.json), to: staging.appendingPathComponent(manifestFile))
-        progress("Saving the backup\u{2026}")
+        progress("", "Saving the backup\u{2026}")
         try SuiteBundle.write(staging: staging, to: dest)
         return lines
     }
