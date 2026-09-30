@@ -41,7 +41,8 @@
         "macos": "HeloControl-macOS.zip",
         "windows-x64": "HeloControl-Windows-x64.exe",
         "windows-arm64": "HeloControl-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v2.2.0"
     },
     {
       "id": "ciscoswitchtools",
@@ -62,7 +63,8 @@
         "macos": "Cisco.Switch.Tools.macOS.universal2.zip",
         "windows-x64": "Cisco.Switch.Tools.x64.exe",
         "windows-arm64": "Cisco.Switch.Tools.arm64.exe"
-      }
+      },
+      "claudeSince": "v1.9.0"
     },
     {
       "id": "netgearswitchtools",
@@ -81,7 +83,8 @@
         "macos": "NetgearSwitchTools-macOS.zip",
         "windows-x64": "NetgearSwitchTools-Windows-x64.exe",
         "windows-arm64": "NetgearSwitchTools-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v0.2.0"
     },
     {
       "id": "mikrotikroutertools",
@@ -100,7 +103,8 @@
         "macos": "MikroTikRouterTools-macOS.zip",
         "windows-x64": "MikroTikRouterTools-Windows-x64.exe",
         "windows-arm64": "MikroTikRouterTools-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v0.2.0"
     },
     {
       "id": "ciscobrotherlabels",
@@ -121,7 +125,8 @@
         "macos": "CiscoBrotherLabels-macOS.zip",
         "windows-x64": "CiscoBrotherLabels-Windows-x64.exe",
         "windows-arm64": "CiscoBrotherLabels-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v2.2.0"
     },
     {
       "id": "machineinventory",
@@ -142,7 +147,8 @@
         "macos": "MachineInventory-macOS.zip",
         "windows-x64": "MachineInventory-Windows-x64.exe",
         "windows-arm64": "MachineInventory-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v2.2.0"
     },
     {
       "id": "networkportmap",
@@ -163,7 +169,8 @@
         "macos": "NetworkPortMap-macOS.zip",
         "windows-x64": "NetworkPortMap-Windows-x64.exe",
         "windows-arm64": "NetworkPortMap-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v1.9.0"
     },
     {
       "id": "projectorcontrol",
@@ -185,7 +192,8 @@
         "macos": "ProjectorControl-macOS.zip",
         "windows-x64": "ProjectorControl-Windows-x64.exe",
         "windows-arm64": "ProjectorControl-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v2.3.0"
     },
     {
       "id": "showdashboard",
@@ -206,7 +214,8 @@
         "macos": "ShowDashboard-macOS.zip",
         "windows-x64": "ShowDashboard-Windows-x64.exe",
         "windows-arm64": "ShowDashboard-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v1.15.0"
     },
     {
       "id": "showhandbook",
@@ -247,7 +256,8 @@
             "windows-x64": "ShowHandbook-Full-Windows-x64.zip"
           }
         }
-      ]
+      ],
+      "claudeSince": "v1.23.0"
     },
     {
       "id": "psntools",
@@ -289,7 +299,8 @@
             "windows-x64": "PSNTools-Full-Windows-x64.zip"
           }
         }
-      ]
+      ],
+      "claudeSince": "v1.7.0"
     },
     {
       "id": "dmxtools",
@@ -310,7 +321,8 @@
         "macos": "DMXTools-macOS.zip",
         "windows-x64": "DMXTools-Windows-x64.exe",
         "windows-arm64": "DMXTools-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v1.5.0"
     },
     {
       "id": "deskconvert",
@@ -331,7 +343,8 @@
         "macos": "DeskConvert-macOS.zip",
         "windows-x64": "DeskConvert-Windows-x64.exe",
         "windows-arm64": "DeskConvert-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v0.6.0"
     },
     {
       "id": "nditools",
@@ -372,7 +385,8 @@
             "windows-x64": "NDITools-Full-Windows-x64.exe"
           }
         }
-      ]
+      ],
+      "claudeSince": "v0.4.0"
     },
     {
       "id": "powercalc",
@@ -393,7 +407,8 @@
         "macos": "PowerCalc-macOS.zip",
         "windows-x64": "PowerCalc-Windows-x64.exe",
         "windows-arm64": "PowerCalc-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v0.7.0"
     },
     {
       "id": "showcontroltools",
@@ -415,7 +430,8 @@
         "macos": "ShowControlTools-macOS.zip",
         "windows-x64": "ShowControlTools-Windows-x64.exe",
         "windows-arm64": "ShowControlTools-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v0.4.0"
     },
     {
       "id": "shownetscanner",
@@ -436,7 +452,8 @@
         "macos": "ShowNetScanner-macOS.zip",
         "windows-x64": "ShowNetScanner-Windows-x64.exe",
         "windows-arm64": "ShowNetScanner-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v0.5.0"
     },
     {
       "id": "timecodetools",
@@ -457,7 +474,8 @@
         "macos": "TimecodeTools-macOS.zip",
         "windows-x64": "TimecodeTools-Windows-x64.exe",
         "windows-arm64": "TimecodeTools-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v1.6.0"
     },
     {
       "id": "pdftools",
@@ -497,7 +515,8 @@
             "windows-x64": "PDFTools-Full-Windows-x64.zip"
           }
         }
-      ]
+      ],
+      "claudeSince": "v0.10.0"
     },
     {
       "id": "imagetools",
@@ -539,7 +558,8 @@
             "windows-arm64": "ImageTools-Full-Windows-arm64.zip"
           }
         }
-      ]
+      ],
+      "claudeSince": "v0.7.0"
     },
     {
       "id": "surtitletools",
@@ -581,7 +601,8 @@
             "windows-x64": "SurtitleTools-Full-Windows-x64.zip"
           }
         }
-      ]
+      ],
+      "claudeSince": "v0.6.0"
     },
     {
       "id": "convert",
@@ -623,7 +644,8 @@
         "macos": "RenameTools-macOS.zip",
         "windows-x64": "RenameTools-Windows-x64.exe",
         "windows-arm64": "RenameTools-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v0.4.0"
     },
     {
       "id": "reporadar",
@@ -644,7 +666,8 @@
         "macos": "RepoRadar-macOS.zip",
         "windows-x64": "RepoRadar-Windows-x64.exe",
         "windows-arm64": "RepoRadar-Windows-arm64.exe"
-      }
+      },
+      "claudeSince": "v0.3.0"
     },
     {
       "id": "stagehand",
