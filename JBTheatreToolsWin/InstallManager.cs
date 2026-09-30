@@ -75,7 +75,9 @@ public sealed class InstallManager
     public InstallManager(string? supportDirectory = null)
     {
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        SupportDir = supportDirectory ?? Path.Combine(local, "JBTheatreTools");
+        // JBTT_SUPPORT_DIR: a test stand-in for the whole folder (installed.json, apps, connectors.json).
+        var testSupport = Environment.GetEnvironmentVariable("JBTT_SUPPORT_DIR");
+        SupportDir = supportDirectory ?? (string.IsNullOrEmpty(testSupport) ? Path.Combine(local, "JBTheatreTools") : testSupport);
         AppsDir = Path.Combine(SupportDir, "apps");
         CacheDir = Path.Combine(SupportDir, "cache");
         ManifestPath = Path.Combine(SupportDir, "installed.json");
@@ -116,7 +118,11 @@ public sealed class InstallManager
         catch (Exception ex) when (!strict) { Log.Write($"manifest write failed: {ex.Message}"); }
         // Installs/removals change what's on disk → drop the read caches so the next resolve re-reads.
         lock (_readLock) { _snapshot = null; _pathCache.Clear(); _nameCache.Clear(); }
+        try { ManifestChanged?.Invoke(); } catch (Exception ex) { Log.Write($"after manifest write: {ex.Message}"); }
     }
+
+    /// <summary>Raised after every manifest write (install, update, removal) — connectors.json follows it.</summary>
+    public event Action? ManifestChanged;
 
     /// <summary>A cached manifest snapshot for the read hot path (this app is the only writer, so a snapshot
     /// is authoritative between writes). Caller holds <c>_readLock</c>.</summary>

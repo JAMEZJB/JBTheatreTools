@@ -13,11 +13,14 @@ import Foundation
 ///   JBTheatreTools --uninstall <id>
 ///   JBTheatreTools --launch   <id>
 ///   JBTheatreTools --self-check           [--token X]
+///   JBTheatreTools --backup-all  <file>   [--include-passwords] [--passphrase-stdin] [--apps a,b] [--no-launcher]
+///   JBTheatreTools --restore-all <file>   [--no-passwords] [--passphrase-stdin] [--apps a,b] [--no-launcher]
 ///   JBTheatreTools --help
 enum CLI {
     static let commands: Set<String> = [
         "--list", "--installed", "--releases", "--install", "--uninstall",
         "--launch", "--self-check", "--self-download", "--self-update", "--code-id", "--help", "-h",
+        "--backup-all", "--restore-all",
     ]
 
     /// Download-server override (`--server` / `--server-pass`): when set, every client the CLI builds
@@ -47,8 +50,9 @@ enum CLI {
         if cmd == "--help" || cmd == "-h" { printHelp(); return }
         // Show lock (set in the app) pauses installs, updates and uninstalls — the command line honours it too, and
         // refuses before touching the Keychain.
-        if UserDefaults.standard.bool(forKey: AppState.showLockKey), cmd == "--install" || cmd == "--uninstall" {
-            fputs("error: show lock is on — installs, updates and uninstalls are paused. Turn it off in JB Theatre Tools (⌘L) first.\n", stderr)
+        if UserDefaults.standard.bool(forKey: AppState.showLockKey) || ClaudeSettingsFile.suiteShowLock() == true,
+           cmd == "--install" || cmd == "--uninstall" || cmd == "--restore-all" {
+            fputs("error: show lock is on — installs, updates, uninstalls and restores are paused. Turn it off in JB Theatre Tools (⌘L) first.\n", stderr)
             exit(1)
         }
 
@@ -77,7 +81,8 @@ enum CLI {
         // --launch / --code-id) must never touch the Keychain: a read there can raise an OS prompt that
         // a headless run can't answer (audit F14).
         // --self-update: the launcher's repo is public — only credentials given on the command line are used.
-        let needsAuth = !["--installed", "--uninstall", "--launch", "--code-id", "--self-update"].contains(cmd)
+        let needsAuth = !["--installed", "--uninstall", "--launch", "--code-id", "--self-update",
+                          "--backup-all", "--restore-all"].contains(cmd)
         if needsAuth, token == nil { token = TokenStore.load() }
 
         let catalog: Catalog
@@ -90,6 +95,7 @@ enum CLI {
         // Normalise the shared install manifest the same way the GUI does (v1.15.0 → per-variant slots),
         // so the CLI sees the same slots as the app.
         InstallManager.shared.migrateVariantSlots(catalog.apps)
+        if cmd == "--install" || cmd == "--uninstall" { InstallManager.shared.connectorApps = catalog.apps }
 
         // Resolve download auth: explicit server flags win (either flag implies server mode, the URL
         // defaulting to the built-in relay); then a usable token; then the GUI-configured server mode
@@ -117,6 +123,8 @@ enum CLI {
         case "--self-download": selfDownload(catalog: catalog, token: token, dir: positional.first)
         case "--self-update": selfUpdate(catalog: catalog, token: token)
         case "--code-id":    print(CodeIdentity.current())
+        case "--backup-all", "--restore-all":
+            exit(backupCommand(cmd, catalog: catalog, args: args, file: positional.first))
         default:             printHelp()
         }
     }
@@ -373,6 +381,8 @@ enum CLI {
           --launch    <id>       Launch an installed app
           --self-check           Check whether a newer launcher release exists
           --self-update          Update this launcher in place (verified; the next start runs it)
+          --backup-all  <file>   Back up every installed app's settings (+ this launcher's) into one file
+          --restore-all <file>   Restore them from that file (installed apps only; quit each app first)
           --help                 This help
 
         Options: --token <pat>       GitHub PAT (else $GITHUB_TOKEN, else Keychain)
@@ -381,6 +391,11 @@ enum CLI {
                  --tag <vX.Y.Z>      Install a specific release (with --install)
                  --to-applications   Install into the Applications folder (with --install)
                  --catalog <path>    Use a specific catalog.json
+                 --include-passwords Also back up saved passwords (with --backup-all)
+                 --no-passwords      Leave this computer's passwords as they are (with --restore-all)
+                 --passphrase-stdin  Read the backup passphrase from one line of stdin
+                                     (else $JBTT_SETTINGS_PASSPHRASE; never on the command line)
+                 --apps <a,b>        Only these app ids;  --no-launcher: leave the launcher's own settings out
 
         Note: a secret passed via --token / --server-pass is visible to other local users (process
               list / shell history). Prefer $GITHUB_TOKEN or the saved Keychain values where possible.

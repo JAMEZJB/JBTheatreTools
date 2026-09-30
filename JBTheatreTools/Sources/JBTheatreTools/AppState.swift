@@ -311,6 +311,7 @@ final class AppState: ObservableObject {
     }
 
     private var devTap: AnyCancellable?
+    private var activationObserver: NSObjectProtocol?
     init() {
         if ProcessInfo.processInfo.environment["JBTT_LOOP_WATCH"] == "1" {
             devTap = objectWillChange.sink { LoopWatch.mark("AppState.willChange") }
@@ -320,6 +321,7 @@ final class AppState: ObservableObject {
             selfInfo = catalog.selfInfo
             serverBase = Self.serverOverride ?? catalog.downloadServer
             InstallManager.shared.migrateVariantSlots(catalog.apps)   // v1.15.0 → per-variant install slots
+            InstallManager.shared.connectorApps = catalog.apps          // connectors.json follows every install from here
             let known = Set(catalog.apps.map(\.id))
             // Load the per-app variant choice BEFORE building rows, so each row reads its selected slot.
             if let saved = UserDefaults.standard.dictionary(forKey: Self.variantKey) as? [String: String] {
@@ -362,6 +364,14 @@ final class AppState: ObservableObject {
         if let cached = WhatsNewNotes.loadCached() { applyWhatsNew(cached) }   // last relay copy, for offline starts
         UserDefaults.standard.removeObject(forKey: Self.devChannelRevealedKey)   // retired: the reveal is never stored
         prepareLauncherWhatsNew()
+        // Show lock is shared with Stagehand and every app through claude.json. At start the two agree on the safe side
+        // (either locked → locked); after that a change made elsewhere is picked up whenever this window comes forward.
+        adoptClaudeShowLock(initial: true)
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.adoptClaudeShowLock(initial: false) }
+        }
         AppLog.shared.log("launched v\(currentVersion)")
         syncChrome()   // the menus' first state (show lock, Update All, launchable apps)
     }
@@ -915,6 +925,30 @@ final class AppState: ObservableObject {
         }
         bumpRows()   // the header: the edition the row shows is the one Download All installs
         AppLog.shared.log("variant for \(appId) → \(variantId)")
+    }
+
+    /// Re-reads the list preferences (order, pins, hidden, held, editions, sections) after "Restore all apps" wrote the
+    /// launcher's own settings, then checks again (the channel or download access may have changed).
+    func reloadPreferences() {
+        let known = Set(rows.map(\.id))
+        variantSelection = ((UserDefaults.standard.dictionary(forKey: Self.variantKey) as? [String: String]) ?? [:])
+            .filter { known.contains($0.key) }
+        for i in rows.indices {
+            rows[i].installed = InstallManager.shared.installedVersion(installKey(for: rows[i].app))
+            rows[i].variantSuffix = rows[i].app.variantSuffix(selectedVariantId(rows[i].app))
+            recomputeRow(i)
+        }
+        categoryOrder = UserDefaults.standard.stringArray(forKey: Self.categoryOrderKey) ?? []
+        collapsedGroups = Set(UserDefaults.standard.stringArray(forKey: Self.collapsedKey) ?? [])
+        rows = Self.applyingSavedOrder(rows)
+        pinnedIds = Set(UserDefaults.standard.stringArray(forKey: Self.pinnedKey) ?? []).intersection(known)
+        hiddenIds = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? []).intersection(known)
+        heldIds = Set(UserDefaults.standard.stringArray(forKey: Self.heldKey) ?? []).intersection(known)
+        hasServerAuth = serverBase != nil && ServerAuthStore.exists()
+        hasToken = TokenStore.exists()
+        bumpRows()
+        AppLog.shared.log("launcher settings restored from a backup")
+        Task { await refreshAll() }
     }
 
     /// Re-derives latestAssetId + status for a row from its cached releases (after a variant change).
@@ -2070,17 +2104,58 @@ final class AppState: ObservableObject {
         else { objectWillChange.send() }   // a Settings checkbox switched off by the click shows "on" again
     }
 
-    func setShowLock(_ on: Bool) {
+    func setShowLock(_ on: Bool, fromClaudeFile: Bool = false) {
         guard showLock != on else { return }
         showLock = on
         syncChrome()
         UserDefaults.standard.set(on, forKey: Self.showLockKey)
-        AppLog.shared.log("show lock \(on ? "on" : "off")")
+        if !fromClaudeFile { ClaudeSettingsFile.setSuiteShowLock(on) }
+        AppLog.shared.log("show lock \(on ? "on" : "off")\(fromClaudeFile ? " (set in Stagehand or an app)" : "")")
         guard on else { return }
         // Nothing more installs once the lock is on: stop a batch, and cancel every download in flight (a slot that
         // has already downloaded is dropped before it installs — see `installPhase`).
         if batchRunning { stopBatch() }
         for task in downloadTasks.values { task.cancel() }
+    }
+
+    /// Reads the suite show lock from claude.json. At start: either side locked → both locked (never unlock silently).
+    /// Later: a change made in Stagehand or an app's own switch is taken as it is (it was the user's choice there).
+    func adoptClaudeShowLock(initial: Bool) {
+        let shared = ClaudeSettingsFile.suiteShowLock()
+        if initial {
+            if shared == true { setShowLock(true, fromClaudeFile: true) }
+            else if showLock { ClaudeSettingsFile.setSuiteShowLock(true) }
+            return
+        }
+        if let shared, shared != showLock { setShowLock(shared, fromClaudeFile: true) }
+    }
+
+    // MARK: - Stagehand (the suite app that sets what Claude may do in each app)
+
+    static let stagehandId = "stagehand"
+    var stagehandInCatalog: Bool { rows.contains { $0.id == Self.stagehandId } }
+    var stagehandInstalled: Bool { InstallManager.shared.installedVersion(Self.stagehandId) != nil }
+
+    /// Opens Stagehand, or offers to install it first (Not Now is the default).
+    func openStagehand() {
+        guard stagehandInCatalog else { return }
+        if stagehandInstalled { launch(Self.stagehandId); return }
+        if showLock {
+            inform("Show Lock Is On", "Stagehand isn't installed, and nothing installs during show lock. Turn show lock off to install it.")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Install Stagehand?"
+        alert.informativeText = "Stagehand sets which of your apps Claude can use and what it may do in each. It installs like any other app in the list."
+        alert.addButton(withTitle: "Not Now")
+        let installButton = alert.addButton(withTitle: "Install")
+        installButton.keyEquivalent = ""
+        alert.buttons[0].keyEquivalent = "\r"
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        Task {
+            await install(Self.stagehandId)
+            if stagehandInstalled { launch(Self.stagehandId) }
+        }
     }
 
     /// The model-level guard behind every install / update / removal path (the UI hides them too).
@@ -2782,6 +2857,9 @@ final class AppState: ObservableObject {
             alert.addButton(withTitle: "Move to Applications")
             alert.addButton(withTitle: "Choose Folder…")
             alert.addButton(withTitle: "Keep Here")
+            // The safe choice has Return (house ruling): moving also bins the downloaded copy.
+            alert.buttons[0].keyEquivalent = ""
+            alert.buttons[2].keyEquivalent = "\r"
             let response: NSApplication.ModalResponse
             if let window = NSApp.windows.first(where: { $0.isVisible && $0.canBecomeKey }) {
                 NSApp.activate(ignoringOtherApps: true)

@@ -21,13 +21,20 @@ class CatalogTest {
 
     @Test fun parsesEveryApp() {
         assertEquals(1, catalog.schemaVersion)
-        assertEquals(24, catalog.apps.size)
+        assertEquals(25, catalog.apps.size)
         catalog.apps.forEach { app ->
             assertTrue("${app.id} has no name", app.name.isNotBlank())
             assertTrue("${app.id} has no owner", app.owner.isNotBlank())
             assertTrue("${app.id} has no repo", app.repo.isNotBlank())
         }
         assertEquals(catalog.apps.size, catalog.apps.map { it.id }.distinct().size)
+    }
+
+    @Test fun desktopOnlyAppsAreLeftOffThePhone() {
+        assertTrue(catalog.apps.any { it.id == "stagehand" })
+        val phone = catalog.forAndroid()
+        assertFalse(phone.apps.any { it.id == "stagehand" })
+        assertEquals(24, phone.apps.size)
     }
 
     @Test fun carriesTheDownloadServerAndSelfEntry() {
@@ -73,10 +80,11 @@ class CatalogTest {
     @Test fun everyCatalogAppHasAnApplicationId() {
         // PackageIds is what the PackageManager lookup uses; a missing slug means the launcher would
         // silently never see that app as installed.
-        catalog.apps.forEach { app ->
+        val phone = catalog.forAndroid()
+        phone.apps.forEach { app ->
             assertNotNull("no applicationId mapped for ${app.id}", PackageIds.packageId(app.id))
         }
-        assertEquals(catalog.apps.size, PackageIds.catalogIds.size)
+        assertEquals(phone.apps.size, PackageIds.catalogIds.size)
     }
 
     @Test fun ignoresUnknownKeys() {

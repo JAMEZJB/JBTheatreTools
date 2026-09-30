@@ -27,6 +27,10 @@ data class Catalog(
         fun parse(text: String): Catalog = json.decodeFromString(serializer(), text)
     }
 
+    /** Only the apps that have an Android build: desktop-only apps (Stagehand, which runs Claude connectors on a
+     *  computer) are never listed on a phone. */
+    fun forAndroid(): Catalog = copy(apps = apps.filter { it.id !in PackageIds.desktopOnly })
+
     /** Category order for the expanded-width grouped list: the declared order, then any strays A–Z. */
     fun orderedCategories(): List<String> {
         val used = apps.mapNotNull { it.category }.distinct()

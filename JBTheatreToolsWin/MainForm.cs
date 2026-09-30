@@ -36,7 +36,7 @@ public sealed class MainForm : Form
     // Show lock (installs / updates / removals paused) and the one-time "Updated to vX" notice.
     private readonly Panel _lockBanner = new();
     private readonly Label _lockBannerText = new();
-    private readonly HouseButton _unlockBtn = new(HouseRole.Secondary);
+    private readonly HouseButton _unlockBtn = new(HouseRole.Primary);   // the confirm behind it keeps the lock on by default
     private readonly Panel _whatsNewBanner = new();
     private readonly Label _whatsNewText = new();
     private readonly HouseButton _whatsNewBtn = new(HouseRole.Secondary);
@@ -185,6 +185,10 @@ public sealed class MainForm : Form
 
         RescaleChrome();   // fonts, heights, paddings and fixed positions from the DPI (before the rows measure the list)
         Versions.DevChannel = _settings.DevChannel;   // before any release is picked
+        // Show lock is shared with Stagehand and every app through claude.json: at start the two agree on the safe side
+        // (either locked → locked); after that a change made elsewhere is picked up whenever this window comes forward.
+        AdoptClaudeShowLock(initial: true);
+        Activated += (_, _) => AdoptClaudeShowLock(initial: false);
         LoadCatalog();
         if (WhatsNewCache.Load() is { } cachedNotes) ApplyWhatsNew(cachedNotes);   // last relay copy, for offline starts
         ApplyTheme();
@@ -197,8 +201,8 @@ public sealed class MainForm : Form
             Log.Write($"launched v{CurrentVersion()}");
             // Again once visible: on Windows 11 (26100) DWM didn't honour the dark title bar set before the first show.
             Theme.ApplyTitleBar(this, Theme.IsDark(_settings.Appearance));
-            // Start with focus on the list, not the first header button (which Windows would show as the default).
-            _list.Focus();
+            // Start in the search box (house plan: type to find an app), not on the first header button.
+            _search.Focus();
             // After an in-place update: tell the previous launcher this one is up (it then closes), and remove its old exe.
             LauncherUpdate.Started();
             LauncherInstall.AfterInstall();   // the first start after installing itself: the downloaded copy goes
@@ -239,7 +243,8 @@ public sealed class MainForm : Form
             answer = auto == "keep" ? keep : install;
         else
             answer = HouseMessage.AskWithOption(this, "Install JB Theatre Tools", text,
-                new[] { ("Install", install), ("Choose Folder…", choose), ("Keep Here", keep) }, install, DialogResult.Cancel,
+                // Install stays the filled action; the safe choice (Keep Here) has Enter — installing also recycles the download.
+                new[] { ("Install", install), ("Choose Folder…", choose), ("Keep Here", keep) }, keep, DialogResult.Cancel,
                 MessageBoxIcon.Question, install, destructive: false, ("Also add a desktop shortcut", null), out desktop);
         string target;
         if (answer == install) target = defaultExe;
@@ -748,6 +753,7 @@ public sealed class MainForm : Form
         }
 
         InstallManager.Shared.MigrateVariantSlots(_catalog.Apps);   // v1.15.0 → per-variant install slots
+        ConnectorShims.Start(_catalog.Apps);   // connectors.json + stable entry points follow every install from here
         _list.Controls.Clear();
         _rows.Clear();
         foreach (var app in _catalog.Apps)
@@ -1107,14 +1113,29 @@ public sealed class MainForm : Form
         SetShowLock(on);
     }
 
-    private void SetShowLock(bool on)
+    private void SetShowLock(bool on, bool fromClaudeFile = false)
     {
         if (_settings.ShowLock == on) return;
         _settings.ShowLock = on;
         _settings.Save();
+        if (!fromClaudeFile) ClaudeSettingsFile.SetSuiteShowLock(on);
         ApplyLock();
-        Log.Write($"show lock {(on ? "on" : "off")}");
+        Log.Write($"show lock {(on ? "on" : "off")}{(fromClaudeFile ? " (set in Stagehand or an app)" : "")}");
         if (on) StopEverything();
+    }
+
+    /// <summary>Reads the suite show lock from claude.json. At start: either side locked → both locked (never unlock
+    /// silently). Later: a change made in Stagehand or an app's own switch is taken as it is (the user chose it there).</summary>
+    private void AdoptClaudeShowLock(bool initial)
+    {
+        var shared = ClaudeSettingsFile.SuiteShowLock();
+        if (initial)
+        {
+            if (shared == true && !_settings.ShowLock) { _settings.ShowLock = true; _settings.Save(); }
+            else if (_settings.ShowLock && shared != true) ClaudeSettingsFile.SetSuiteShowLock(true);
+            return;
+        }
+        if (shared is bool s && s != _settings.ShowLock) SetShowLock(s, fromClaudeFile: true);
     }
 
     /// <summary>Show lock just turned on: stop a batch and cancel every download in flight (a slot that has already
@@ -2563,11 +2584,16 @@ public sealed class MainForm : Form
         if (_launcherUpdating) return;   // the update restarts the launcher: no dialog open meanwhile
         bool prevInstallLoc = _settings.InstallToApplications;
         bool prevLock = _settings.ShowLock;
+        bool launcherRestored = false;
         using var dlg = new SettingsDialog(_settings, _catalog.Self, CurrentVersion(), _catalog.DownloadServer, new SettingsExtras(
             Storage: () => Task.Run(() => (InstallManager.Shared.InstalledSize(), InstallManager.Shared.CacheSize())),
             CanClearCache: () => !Locked && !_batchRunning && !_rows.Any(r => r.IsBusy),
             ClearCache: () => Task.Run(() => InstallManager.Shared.ClearCache()),
-            CopyDiagnostics: CopyDiagnostics));
+            CopyDiagnostics: CopyDiagnostics,
+            BackUpAll: BackUpAll,
+            RestoreAll: owner => launcherRestored = RestoreAll(owner),
+            OpenStagehand: _catalog.Apps.Any(a => a.Id == StagehandId) ? OpenStagehand : null,
+            StagehandInstalled: () => InstallManager.Shared.InstalledVersion(StagehandId) != null));
         dlg.ApplyTheme(Theme.IsDark(_settings.Appearance));
         // Settings has no Cancel: every control edits the live settings object as it changes (as the mac sheet does), so
         // closing it with its X is the same as Done. (Only Done used to apply and save them: after the X the window
@@ -2580,8 +2606,10 @@ public sealed class MainForm : Form
         if (_settings.InstallToApplications != prevInstallLoc)
             ReconcileInstallLocation(_settings.InstallToApplications);
         _ = RefreshAllAsync();
+        if (launcherRestored) ReloadRestoredSettings();
         if (_settings.ShowLock != prevLock)
         {
+            ClaudeSettingsFile.SetSuiteShowLock(_settings.ShowLock);
             Log.Write($"show lock {(_settings.ShowLock ? "on" : "off")} (settings)");
             if (_settings.ShowLock) StopEverything();
         }
@@ -2800,6 +2828,87 @@ public sealed class MainForm : Form
         }
     }
 
+    // ── Back up all / Restore all, and Stagehand ───────────────────────────────────────────────
+
+    private const string StagehandId = "stagehand";
+
+    private List<BackupTarget> BackupTargets() => SuiteBackup.Targets(_catalog.Apps.Select(a => a.ToBackupApp()),
+        InstallManager.Shared.InstalledVersion, InstallManager.Shared.InstalledPath);
+
+    private void BackUpAll(IWin32Window owner)
+    {
+        using var dlg = new BackupAllDialog(BackupTargets(), _settings, CurrentVersion(), Theme.IsDark(_settings.Appearance));
+        dlg.ShowDialog(owner);
+    }
+
+    /// <summary>Opens a backup and shows what it holds; true when the launcher's own settings were restored.</summary>
+    private bool RestoreAll(IWin32Window owner)
+    {
+        if (Locked) return false;
+        Directory.CreateDirectory(BackupResults.DocumentsFolder);
+        using var pick = new OpenFileDialog
+        {
+            Title = "Restore All Apps", InitialDirectory = BackupResults.DocumentsFolder,
+            Filter = "JB Theatre Tools backup (*.jbtt-backup)|*.jbtt-backup", CheckFileExists = true,
+        };
+        if (pick.ShowDialog(owner) != DialogResult.OK) return false;
+        SuiteBundle.Opened opened;
+        try { opened = SuiteBundle.Open(pick.FileName); }
+        catch (Exception ex)
+        {
+            HouseMessage.Show(owner, ex.Message, "Restore All Apps", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
+        using var dlg = new RestoreAllDialog(opened, _catalog.Apps, BackupTargets(), _settings,
+            async (id, edition) =>
+            {
+                if (_rows.FirstOrDefault(r => r.App.Id == id) is { } row)
+                    await InstallSlotAsync(row, null, edition, interactive: false);
+            },
+            () => Locked, Theme.IsDark(_settings.Appearance));
+        dlg.ShowDialog(owner);
+        return dlg.LauncherRestored;
+    }
+
+    /// <summary>Restore all wrote the launcher's own settings: re-read what the rows and the window show.</summary>
+    private void ReloadRestoredSettings()
+    {
+        foreach (var row in _rows)
+        {
+            if (!row.App.HasVariants) continue;
+            row.SetSelectedVariant(SelectedVariant(row.App));
+            row.SetState(InstallManager.Shared.InstalledVersion(InstallKey(row.App)), row.Latest, row.LatestAssetId, row.Status);
+            RecomputeRow(row);
+        }
+        ApplyViewMode();
+        ShowNotice(AuthClient.HasCredentials(_settings, _catalog.DownloadServer) ? null : NoCredsMsg);
+    }
+
+    /// <summary>Opens Stagehand, or offers to install it first (Not Now has Enter).</summary>
+    private async void OpenStagehand(IWin32Window owner)
+    {
+        try
+        {
+            var row = _rows.FirstOrDefault(r => r.App.Id == StagehandId);
+            if (row == null) return;
+            if (InstallManager.Shared.InstalledVersion(StagehandId) != null) { Launch(row); return; }
+            if (Locked)
+            {
+                HouseMessage.Show(owner, "Stagehand isn't installed, and nothing installs during show lock. Turn show lock off to install it.",
+                    "Open Stagehand", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (HouseMessage.Ask(owner, "Install Stagehand?",
+                    "Stagehand sets which of your apps Claude can use and what it may do in each. It installs like any other app in the list.",
+                    new[] { ("Not Now", DialogResult.Cancel), ("Install", DialogResult.OK) },
+                    defaultResult: DialogResult.Cancel, cancelResult: DialogResult.Cancel, MessageBoxIcon.Question,
+                    primaryResult: DialogResult.OK) != DialogResult.OK) return;
+            await InstallSlotAsync(row, null, null);
+            if (InstallManager.Shared.InstalledVersion(StagehandId) != null) Launch(row);
+        }
+        catch (Exception ex) { Log.Write($"open Stagehand: {ex.Message}"); }
+    }
+
     // ── More menu: show lock, activity, setup files, diagnostics ──────────────────────────────
 
     private void ShowMoreMenu()
@@ -2814,6 +2923,8 @@ public sealed class MainForm : Form
         lockItem.Click += (_, _) => RequestShowLock(!Locked);
         menu.Items.Add(lockItem);
         menu.Items.Add(new ToolStripSeparator());
+        if (_catalog.Apps.Any(a => a.Id == StagehandId))
+            menu.Items.Add("Open Stagehand", null, (_, _) => OpenStagehand(this));
         var history = new ToolStripMenuItem("Activity…") { ShortcutKeyDisplayString = "Ctrl+H" };
         history.Click += async (_, _) => await ShowHistoryAsync();
         menu.Items.Add(history);

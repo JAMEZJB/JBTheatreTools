@@ -40,6 +40,9 @@ object PackageIds {
         "convert" to "convert",
     )
 
+    /** Catalog apps with no Android build at all (Stagehand runs Claude connectors on a computer): never listed here. */
+    val desktopOnly: Set<String> = setOf("stagehand")
+
     /** This launcher's own package — the self-update target. */
     const val LAUNCHER = "com.jamesbreedon.jbtheatretools"
 

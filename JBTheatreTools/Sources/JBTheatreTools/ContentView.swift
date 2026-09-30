@@ -292,6 +292,9 @@ struct ContentView: View {
                       systemImage: state.showLock ? "lock.open" : "lock")
             }
             Divider()
+            if state.stagehandInCatalog {
+                Button { state.openStagehand() } label: { Label("Open Stagehand", systemImage: "sparkles") }
+            }
             Button { state.showActivity() } label: { Label("Activity…", systemImage: "clock.arrow.circlepath") }
             Button { state.exportSetup() } label: { Label("Export Setup…", systemImage: "square.and.arrow.up") }
             Button { state.importSetup() } label: { Label("Import Setup…", systemImage: "square.and.arrow.down") }
@@ -411,7 +414,7 @@ struct ContentView: View {
             }
             Spacer()
             Button("Turn Off") { state.requestShowLock(false) }
-                .buttonStyle(.jbSecondary)
+                .buttonStyle(.jbPrimary)   // the confirm behind it keeps the lock on by default
         }
         .padding(12)
         .bannerTint(.jbInfo)
@@ -1407,7 +1410,7 @@ struct AppRowView: View, Equatable {
         .jbMenuPill(.icon)   // house rule 21: selectors/menus are slate-blue, not the purple accent
         .fixedSize()
         .disabled(row.busy)
-        .help("Variant, reorder, other versions & uninstall")
+        .help("Edition, reorder, other versions & uninstall")
     }
 
     private func installButton(title: String) -> some View {
@@ -1588,7 +1591,7 @@ struct AppMenuButtons: View {
     @ViewBuilder private var variantSection: some View {
         if row.app.hasVariants, let vs = row.app.variants {
             Divider()
-            Picker("Variant", selection: Binding(
+            Picker("Edition", selection: Binding(
                 get: { state.selectedVariantId(row.app) ?? vs.first?.id ?? "" },
                 set: { state.setVariant(row.id, $0) }
             )) {

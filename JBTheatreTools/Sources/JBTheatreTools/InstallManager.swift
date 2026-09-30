@@ -101,13 +101,16 @@ final class InstallManager: @unchecked Sendable {
     let manifestURL: URL
 
     init() {
-        let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("JBTheatreTools", isDirectory: true)
+        // JBTT_SUPPORT_DIR: a test stand-in for the whole support folder (installed.json, apps, connectors.json).
+        let testSupport = ProcessInfo.processInfo.environment["JBTT_SUPPORT_DIR"].flatMap { $0.isEmpty ? nil : $0 }
+        let support = testSupport.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("JBTheatreTools", isDirectory: true)
         supportDir = support
         appsDir = support.appendingPathComponent("apps", isDirectory: true)
         manifestURL = support.appendingPathComponent("installed.json")
-        cacheDir = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("JBTheatreTools", isDirectory: true)
+        cacheDir = testSupport != nil ? support.appendingPathComponent("cache", isDirectory: true)
+            : fm.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("JBTheatreTools", isDirectory: true)
         try? fm.createDirectory(at: appsDir, withIntermediateDirectories: true)
         try? fm.createDirectory(at: cacheDir, withIntermediateDirectories: true)
     }
@@ -152,10 +155,17 @@ final class InstallManager: @unchecked Sendable {
         return m
     }
 
+    /// The catalog, once known (set at start-up by the app and the command line): every manifest change then also
+    /// refreshes connectors.json, so Stagehand's stable entry points follow installs, updates, removals and moves.
+    var connectorApps: [CatalogApp] = [] {
+        didSet { Connectors.sync(apps: connectorApps, manifest: manifest()) }
+    }
+
     private func writeManifest(_ m: [String: InstalledRecord]) {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let data = try? enc.encode(m) { try? data.write(to: manifestURL) }
+        defer { if !connectorApps.isEmpty { Connectors.sync(apps: connectorApps, manifest: m) } }
         manifestLock.lock()
         // Invalidate only the slots whose record actually changed (path or version) — wiping every entry made
         // the next render re-stat all 21 installed paths on the main thread after each install.

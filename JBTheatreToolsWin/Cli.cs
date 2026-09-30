@@ -15,9 +15,11 @@ namespace JBTheatreTools;
 ///   JBTheatreTools.exe --uninstall &lt;id&gt;
 ///   JBTheatreTools.exe --launch   &lt;id&gt;
 ///   JBTheatreTools.exe --self-check           [--token X]
+///   JBTheatreTools.exe --backup-all  &lt;file&gt;   [--include-passwords] [--passphrase-stdin] [--apps a,b] [--no-launcher]
+///   JBTheatreTools.exe --restore-all &lt;file&gt;   [--no-passwords] [--passphrase-stdin] [--apps a,b] [--no-launcher]
 ///   JBTheatreTools.exe --help
 /// </summary>
-public static class Cli
+public static partial class Cli
 {
     // Single source of truth for the recognised verbs — Program.cs reads this to decide CLI-vs-GUI, so
     // the dispatch allowlist can't drift from what Run actually handles.
@@ -25,6 +27,7 @@ public static class Cli
     {
         "--list", "--installed", "--releases", "--install", "--uninstall",
         "--launch", "--self-check", "--self-update", "--help", "-h",
+        "--backup-all", "--restore-all",
     };
 
     /// <summary>Download-server override (`--server` / `--server-pass`): when set, every client the
@@ -95,6 +98,8 @@ public static class Cli
         // Normalise the shared install manifest the same way the GUI does (v1.15.0 → per-variant slots),
         // so the CLI sees the same slots as the app.
         InstallManager.Shared.MigrateVariantSlots(catalog.Apps);
+        if (cmd is "--backup-all" or "--restore-all") return await BackupCommandAsync(cmd, catalog, args);
+        if (cmd is "--install" or "--uninstall" && OperatingSystem.IsWindows()) ConnectorShims.Start(catalog.Apps);
 
         // Resolve download auth: explicit server flags win (either flag implies server mode, the URL
         // defaulting to the built-in relay); then a usable token; then the GUI-configured server mode
@@ -121,7 +126,7 @@ public static class Cli
         }
 
         // Show lock (set in the app) pauses installs, updates and removals — the command line honours it too.
-        if (settings.ShowLock && cmd is "--install" or "--uninstall")
+        if ((settings.ShowLock || ClaudeSettingsFile.SuiteShowLock() == true) && cmd is "--install" or "--uninstall")
         {
             Console.Error.WriteLine("error: show lock is on — installs, updates and uninstalls are paused. Turn it off in JB Theatre Tools (More ▾ → Show lock) first.");
             return 1;
@@ -386,6 +391,8 @@ public static class Cli
           --launch    <id>       Launch an installed app
           --self-check           Check whether a newer launcher release exists
           --self-update          Update this launcher in place (verified; the next start runs it)
+          --backup-all  <file>   Back up every installed app's settings (+ this launcher's) into one file
+          --restore-all <file>   Restore them from that file (installed apps only; close each app first)
           --help                 This help
 
         Options: --token <pat>       GitHub PAT (else $GITHUB_TOKEN, else Credential Manager)
@@ -394,6 +401,11 @@ public static class Cli
                  --tag <vX.Y.Z>      Install a specific release (with --install)
                  --to-applications   Also create Start Menu + Desktop shortcuts (with --install)
                  --catalog <path>    Use a specific catalog.json
+                 --include-passwords Also back up saved passwords (with --backup-all)
+                 --no-passwords      Leave this PC's passwords as they are (with --restore-all)
+                 --passphrase-stdin  Read the backup passphrase from one line of stdin
+                                     (else %JBTT_SETTINGS_PASSPHRASE%; never on the command line)
+                 --apps <a,b>        Only these app ids;  --no-launcher: leave the launcher's own settings out
 
         Note: a secret passed via --token / --server-pass is visible to other local users (process
               list / shell history). Prefer $GITHUB_TOKEN or the saved Credential Manager values.

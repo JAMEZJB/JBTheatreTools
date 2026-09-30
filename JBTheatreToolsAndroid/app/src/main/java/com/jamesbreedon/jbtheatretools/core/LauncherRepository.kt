@@ -107,7 +107,7 @@ class LauncherRepository(private val context: Context) {
     private val installer = ApkInstaller(context)
 
     val catalog: Catalog by lazy {
-        context.assets.open("catalog.json").use { Catalog.parse(it.readBytes().toString(Charsets.UTF_8)) }
+        context.assets.open("catalog.json").use { Catalog.parse(it.readBytes().toString(Charsets.UTF_8)).forAndroid() }
     }
 
     val launcherVersion: String get() = BuildConfig.VERSION_NAME

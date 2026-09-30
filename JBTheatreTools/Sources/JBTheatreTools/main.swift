@@ -68,8 +68,10 @@ enum LoopWatch {
             for delay in [4.0, 12.0] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                     // With JBTT_OPEN_SETTINGS=1 the Settings sheet (its own window) is what gets captured.
-                    let widest = NSApp.windows.max(by: { $0.frame.width < $1.frame.width })
-                    guard let win = widest?.attachedSheet ?? widest else {
+                    // The front-most sheet: Settings, or a sheet on top of it (Back up / Restore all apps).
+                    var front = NSApp.windows.max(by: { $0.frame.width < $1.frame.width })
+                    while let sheet = front?.attachedSheet { front = sheet }
+                    guard let win = front else {
                         fputs("[snapshot] failed: no window\n", stderr); return
                     }
                     // Window-server capture first; when that's refused (screen locked / display asleep), draw the

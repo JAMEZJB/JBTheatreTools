@@ -71,6 +71,13 @@ struct CatalogApp: Decodable, Identifiable, Sendable {
     var dataFolders: [String]? = nil
     var bundleIds: [String]? = nil
 
+    /// `false`: the app has no settings Back up / Restore of the suite's kind (e.g. a repackaged third-party app), so
+    /// "Back up all apps" never starts it with `--settings-*`. Absent: the launcher asks the installed build.
+    var settingsBackup: Bool? = nil
+    /// The first release whose build is a Claude connector (`<app> --mcp`); absent = none yet. Only apps at or past it
+    /// get a stable entry in connectors.json (an app without it would open its window instead).
+    var claudeSince: String? = nil
+
     /// True when this app ships more than one variant → the launcher shows a Light/Full toggle.
     var hasVariants: Bool { (variants?.count ?? 0) > 1 }
 

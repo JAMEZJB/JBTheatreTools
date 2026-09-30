@@ -27,6 +27,15 @@ struct SettingsView: View {
     @State private var clearingCache = false
     @State private var diagnosticsCopied = false
     @State private var notificationsRefused = false
+    @State private var backupSheet: BackupSheet?
+    @State private var restoreError: String?
+    @State private var openingBackup = false
+
+    enum BackupSheet: Identifiable {
+        case backup(BackupAllModel)
+        case restore(RestoreAllModel)
+        var id: String { if case .backup = self { return "backup" } else { return "restore" } }
+    }
 
     /// The kit's panel heading (`.panel > h2`): a 10.5/600 caps micro-label in the tertiary text tone.
     private func panelLabel(_ title: String, _ symbol: String) -> some View {
@@ -68,6 +77,13 @@ struct SettingsView: View {
         .background(Color.jbGround)
         .tint(.jbAccent)
         .task { await loadStorage() }
+        // Dev harness (see main.swift): open Back up all (JBTT_OPEN_BACKUP=1) or a backup file's Restore sheet
+        // (JBTT_OPEN_RESTORE=<file>) so JBTT_SNAPSHOT can capture them.
+        .onAppear {
+            let env = ProcessInfo.processInfo.environment
+            if env["JBTT_OPEN_BACKUP"] == "1" { startBackup() }
+            if let file = env["JBTT_OPEN_RESTORE"], !file.isEmpty { openRestore(URL(fileURLWithPath: file)) }
+        }
         // When the setting changes, offer to move already-installed apps so they don't end up split
         // across both locations. (single-param onChange for macOS 13 compatibility)
         .onChange(of: installToApplications) { newValue in
@@ -108,6 +124,12 @@ struct SettingsView: View {
         // (single-param onChange for macOS 13 compatibility)
         .onChange(of: authMode) { _ in
             state.authModeChanged()
+        }
+        .sheet(item: $backupSheet) { sheet in
+            switch sheet {
+            case .backup(let m): BackupAllView(model: m).environmentObject(state)
+            case .restore(let m): RestoreAllView(model: m).environmentObject(state)
+            }
         }
     }
 
@@ -324,6 +346,46 @@ struct SettingsView: View {
                 Text("During a show: installs, updates and uninstalls are paused (and automatic updates wait). Launching still works. ⌘L turns it on and off.")
                     .font(JBFont.small).foregroundStyle(Color.jbText2)
                     .fixedSize(horizontal: false, vertical: true)
+                Text("It also stops Claude from using live equipment or deleting anything in your apps.")
+                    .font(JBFont.small).foregroundStyle(Color.jbText2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+
+        GroupBox(label: panelLabel("Claude", "sparkles")) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Which apps Claude can use, and what it may do in each, is set in Stagehand.")
+                    .font(JBFont.small).foregroundStyle(Color.jbText2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(state.stagehandInstalled ? "Open Stagehand" : "Install Stagehand\u{2026}") { state.openStagehand() }
+                    .tint(.selectorBlue)
+                    .disabled(!state.stagehandInCatalog)
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+
+        GroupBox(label: panelLabel("Back up & restore", "externaldrive")) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    Button("Back Up All Apps\u{2026}") { startBackup() }
+                        .tint(.selectorBlue)
+                    Button(openingBackup ? "Opening\u{2026}" : "Restore All Apps\u{2026}") { startRestore() }
+                        .tint(.selectorBlue)
+                        .disabled(state.showLock || state.batchRunning || openingBackup)
+                }
+                Text("Save every app's settings, and this launcher's, in one file \u{2014} then restore them here or on a new show computer.")
+                    .font(JBFont.small).foregroundStyle(Color.jbText2)
+                    .fixedSize(horizontal: false, vertical: true)
+                if state.showLock {
+                    Text("Restoring is paused while show lock is on.").font(JBFont.small).foregroundStyle(Color.jbInfo)
+                }
+                if let e = restoreError {
+                    Text(e).font(JBFont.small).foregroundStyle(Color.jbDanger)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -430,6 +492,42 @@ struct SettingsView: View {
     /// Room for the panels: the screen's usable height less the window title bar, the sheet's title, buttons and padding.
     private static var panelsMaxHeight: CGFloat {
         max(360, (NSScreen.main?.visibleFrame.height ?? 900) - 190)
+    }
+
+    private func backupTargets() -> [BackupTarget] {
+        SuiteBackup.targets(apps: state.rows.map(\.app),
+                            installedVersion: { InstallManager.shared.installedVersion($0) },
+                            installedPath: { InstallManager.shared.installedPath($0) })
+    }
+
+    private func startBackup() {
+        restoreError = nil
+        backupSheet = .backup(BackupAllModel(targets: backupTargets()))
+    }
+
+    private func startRestore() {
+        restoreError = nil
+        let panel = NSOpenPanel()
+        panel.title = "Restore All Apps"
+        panel.allowedContentTypes = [SuiteBackup.bundleType]
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = SuiteBackup.documentsFolder
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        openRestore(url)
+    }
+
+    private func openRestore(_ url: URL) {
+        openingBackup = true
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { Result { try SuiteBundle.open(url) } }.value
+            openingBackup = false
+            switch result {
+            case .success(let opened):
+                backupSheet = .restore(RestoreAllModel(opened: opened, apps: state.rows.map(\.app), targets: backupTargets()))
+            case .failure(let error):
+                restoreError = error.localizedDescription
+            }
+        }
     }
 
     private func loadStorage() async {

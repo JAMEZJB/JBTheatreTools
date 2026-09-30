@@ -5,7 +5,11 @@ public sealed record SettingsExtras(
     Func<Task<(long Installed, long Cache)>> Storage,
     Func<bool> CanClearCache,
     Func<Task> ClearCache,
-    Action<IWin32Window> CopyDiagnostics);   // owner: the Settings dialog, so its message sits on top
+    Action<IWin32Window> CopyDiagnostics,    // owner: the Settings dialog, so its message sits on top
+    Action<IWin32Window>? BackUpAll = null,
+    Func<IWin32Window, bool>? RestoreAll = null,   // true: the launcher's own settings were restored (Settings then closes)
+    Action<IWin32Window>? OpenStagehand = null,
+    Func<bool>? StagehandInstalled = null);
 
 /// <summary>Settings, laid out like the macOS Settings sheet (SettingsView.swift): two equal columns of rounded panels,
 /// each under a caps micro-label, with the same grouping — Download access, Updates, Appearance, When I close the window
@@ -73,6 +77,10 @@ public sealed class SettingsDialog : Form
     private readonly Label _storageNote = new();
     private readonly HouseButton _clearCache = new() { AutoSize = true };
     private readonly HouseButton _diag = new() { AutoSize = true };
+    private readonly HouseButton _openStagehand = new() { AutoSize = true };
+    private readonly HouseButton _backUpAll = new() { Text = "Back Up All Apps…", AutoSize = true };
+    private readonly HouseButton _restoreAll = new() { Text = "Restore All Apps…", AutoSize = true };
+    private readonly Label _restoreLocked = new();
     private readonly SettingsExtras? _extras;
 
     // Bottom bar.
@@ -288,6 +296,8 @@ public sealed class SettingsDialog : Form
                 return;
             }
             _settings.ShowLock = _showLock.Checked;
+            // Shared with Stagehand and the apps at once (the main window reads claude.json back when it's active again).
+            ClaudeSettingsFile.SetSuiteShowLock(_showLock.Checked);
             UpdateCacheButton();
         };
 
@@ -326,6 +336,23 @@ public sealed class SettingsDialog : Form
         // --- Support ---
         _diag.Text = "Copy Diagnostics";
         _diag.Click += (_, _) => _extras?.CopyDiagnostics(this);
+
+        // --- Claude (set in Stagehand) ---
+        _openStagehand.Text = _extras?.StagehandInstalled?.Invoke() == true ? "Open Stagehand" : "Install Stagehand…";
+        _openStagehand.Enabled = _extras?.OpenStagehand != null;
+        _openStagehand.Click += (_, _) => _extras?.OpenStagehand?.Invoke(this);
+
+        // --- Back up & restore ---
+        _backUpAll.Enabled = _extras?.BackUpAll != null;
+        _backUpAll.Click += (_, _) => _extras?.BackUpAll?.Invoke(this);
+        _restoreAll.Click += (_, _) =>
+        {
+            if (_extras?.RestoreAll?.Invoke(this) == true) { DialogResult = DialogResult.OK; Close(); }   // the main window re-reads everything
+        };
+        _restoreLocked.Text = "Restoring is paused while show lock is on.";
+        _restoreLocked.ForeColor = Theme.Info;
+        UpdateRestoreButton();
+        _showLock.CheckedChanged += (_, _) => { UpdateRestoreButton(); LayoutAll(); };
 
         // --- Bottom bar ---
         _openLog.Click += (_, _) => Log.Open();
@@ -412,7 +439,14 @@ public sealed class SettingsDialog : Form
             Full(Hint("Right-click the icon to launch any installed app, or check for updates."))));
 
         _right.Add(NewSection("Show lock", Full(_showLock),
-            Full(Hint("For show time: launching still works, nothing changes underneath you. Ctrl+L in the main window."))));
+            Full(Hint("For show time: launching still works, nothing changes underneath you. Ctrl+L in the main window.")),
+            Full(Hint("It also stops Claude from using live equipment or deleting anything in your apps."))));
+        _right.Add(NewSection("Claude",
+            Full(Hint("Which apps Claude can use, and what it may do in each, is set in Stagehand.")),
+            Row(null, _openStagehand)));
+        _right.Add(NewSection("Back up & restore", Row(null, _backUpAll, _restoreAll),
+            Full(Hint("Save every app's settings, and this launcher's, in one file — then restore them here or on a new show computer.")),
+            Full(_restoreLocked, () => _settings.ShowLock)));
         _right.Add(NewSection("When updates are found", Full(_notify), Full(_autoInstall),
             Full(Hint("Held apps and apps that are open are left alone, and nothing installs during show lock."))));
         _right.Add(NewSection("Install location", Full(_installToApps), Full(_installHint)));
@@ -425,7 +459,7 @@ public sealed class SettingsDialog : Form
                                     _storageInstalled, _storageCache, _storageNote });
         foreach (var l in new[] { _tokenState, _serverState, _serverHint, _serverRelay, _tokenHelp, _updateHint, _intervalLabel,
                                   _versionLabel, _checkResult, _closeHint, _installHint, _storageInstalledLabel, _storageInstalled,
-                                  _storageCacheLabel, _storageCache, _storageNote })
+                                  _storageCacheLabel, _storageCache, _storageNote, _restoreLocked })
         {
             l.AutoSize = false;
             l.UseMnemonic = false;
@@ -769,6 +803,8 @@ public sealed class SettingsDialog : Form
     }
 
     /// <summary>Clearing the cache is off during show lock and while anything is downloading or installing.</summary>
+    private void UpdateRestoreButton() => _restoreAll.Enabled = _extras?.RestoreAll != null && !_settings.ShowLock;
+
     private void UpdateCacheButton() =>
         _clearCache.Enabled = _extras != null && !_settings.ShowLock && _extras.CanClearCache();
 
@@ -903,6 +939,7 @@ public sealed class SettingsDialog : Form
         _tokenField.ApplyTheme(dark);
         _serverPassField.ApplyTheme(dark);
         foreach (var l in _subLabels) l.ForeColor = Theme.Sub(dark);
+        _restoreLocked.ForeColor = Theme.Info;
         _tokenLink.LinkColor = _tokenLink.ActiveLinkColor = _tokenLink.VisitedLinkColor = Theme.Accent;
         HouseDraw.NativeTheme(_scroll, dark);
         UpdateIntervalEnabled();

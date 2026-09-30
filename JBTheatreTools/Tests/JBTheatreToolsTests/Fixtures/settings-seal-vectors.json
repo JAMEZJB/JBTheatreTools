@@ -1,0 +1,33 @@
+{
+ "about": "Known-answer vectors for suitebackup.seal (HMAC-SHA256-CTR + HMAC-SHA256, scrypt / PBKDF2-SHA256). The launcher's Swift/.NET code must reproduce ct_b64 and tag_b64 exactly.",
+ "vectors": [
+  {
+   "kdf": {
+    "name": "pbkdf2-sha256",
+    "iterations": 600000
+   },
+   "passphrase": "correct horse battery",
+   "aad": "jbtt-settings|1|theatre",
+   "plaintext": "{\"json:settings:/devices/0/password\": \"pw-one\", \"store:keys:relay\": \"tok-A\"}",
+   "salt_hex": "000102030405060708090a0b0c0d0e0f",
+   "nonce_hex": "101112131415161718191a1b1c1d1e1f",
+   "ct_b64": "QKqjSnMXOZPbLNx0GFtE20BTuATiFwrH7WOS1kEUG5a+v4K/243HtkQLgG6D445B+26Nqq5ksyDKjazabjvHu5gVtWZSi5vVeyNvXg==",
+   "tag_b64": "8CV9Duu70LGfo9yJwI7SddaltVxEDlGyKw4AAT5Yvxs="
+  },
+  {
+   "kdf": {
+    "name": "scrypt",
+    "n": 32768,
+    "r": 8,
+    "p": 1
+   },
+   "passphrase": "correct horse battery",
+   "aad": "jbtt-settings|1|theatre",
+   "plaintext": "{\"json:settings:/devices/0/password\": \"pw-one\", \"store:keys:relay\": \"tok-A\"}",
+   "salt_hex": "000102030405060708090a0b0c0d0e0f",
+   "nonce_hex": "101112131415161718191a1b1c1d1e1f",
+   "ct_b64": "BkZtGHyqsctdZ20iqT3gYcbqZ/4evYBzCC17fwCVLqzV812xZSWDwMHV6qjZIonmlnrETnAUNYAU98YpExj5uZf6yUVlXtQilBSxmg==",
+   "tag_b64": "QFaBUC+9tf+tHobuaWcKx3TqguREtQwBIfbV3kZJyt8="
+  }
+ ]
+}

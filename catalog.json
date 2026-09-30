@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64 (plus optional per-arch macOS keys macos-arm64 / macos-x64, which the macOS launcher prefers over the universal `macos` key when present). macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Twenty-four apps (two — NETGEAR and MikroTik — are shown only with the Development builds switch on until they have a release) (NDI Tools, PDF Tools, Image Tools and Surtitle Tools each ship two variants — a default and a batteries-included 'Full' — chosen by a per-row toggle; each app entry may carry an optional `variants` array [{id,label,assets}], and the Full variant uses the per-arch macOS keys macos-arm64 / macos-x64. Convert is date-tagged (build-YYYYMMDD, rolling) rather than semver, so it resolves against the latest release); Each app entry may carry optional `whatsNew` + `whatsNewVersion` strings (a one-line what's-new for its current release, shown under the app in both launchers; omitted for apps with no release yet). asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships). Each app entry also lists `dataFolders` (the folder names it keeps its own settings, logs and caches under: %APPDATA% and %LOCALAPPDATA% on Windows; Application Support, Logs and Caches in ~/Library on macOS) and `bundleIds` (macOS: its WebKit data, caches, saved window state and preferences), so uninstalling its last edition can offer to remove them. Check both against the app's own paths when it changes them.",
+  "_comment": "Shared app catalog for JBTheatreTools. Both the macOS (SwiftUI) and Windows (WinForms) launchers bundle this file and resolve the per-OS/arch asset by exact name. Keep in sync with each tool's release asset names. Platform keys: macos, windows-x64, windows-arm64 (plus optional per-arch macOS keys macos-arm64 / macos-x64, which the macOS launcher prefers over the universal `macos` key when present). macOS assets are .zip bundles containing a .app; Windows assets are self-contained single-file .exe. The `self` object describes JBTheatreTools' own releases, used for the launcher's self-update check. `downloadServer` is the built-in relay base URL for the default passphrase auth mode (the endpoint requires the suite passphrase; a user-invisible override exists in local settings if this URL ever moves). Twenty-five apps (NETGEAR, MikroTik and Stagehand are shown only with the Development builds switch on until they have a release) (NDI Tools, PDF Tools, Image Tools and Surtitle Tools each ship two variants — a default and a batteries-included 'Full' — chosen by a per-row toggle; each app entry may carry an optional `variants` array [{id,label,assets}], and the Full variant uses the per-arch macOS keys macos-arm64 / macos-x64. Convert is date-tagged (build-YYYYMMDD, rolling) rather than semver, so it resolves against the latest release); Each app entry may carry optional `whatsNew` + `whatsNewVersion` strings (a one-line what's-new for its current release, shown under the app in both launchers; omitted for apps with no release yet). asset names must match each tool's release assets exactly (an app with no published release yet simply shows 'No release' until its first build ships). Each app entry also lists `dataFolders` (the folder names it keeps its own settings, logs and caches under: %APPDATA% and %LOCALAPPDATA% on Windows; Application Support, Logs and Caches in ~/Library on macOS) and `bundleIds` (macOS: its WebKit data, caches, saved window state and preferences), so uninstalling its last edition can offer to remove them. Check both against the app's own paths when it changes them. Optional per-app keys: `settingsBackup: false` marks an app with no settings Back up / Restore of the suite's kind (Back up all apps never starts it with --settings-*); `claudeSince` is the first release whose build is a Claude connector (`<app> --mcp`), so only installs at or past it are listed in connectors.json for Stagehand.",
   "downloadServer": "https://jbtheatretools.jamesbreedon.com/ghapi",
   "categories": [
     "Show control",
@@ -17,8 +17,8 @@
       "windows-x64": "JBTheatreTools-Windows-x64.exe",
       "windows-arm64": "JBTheatreTools-Windows-arm64.exe"
     },
-    "whatsNew": "Run an app as Intel (Rosetta) on Apple silicon, or its x64 build on ARM Windows — per app, from its ⋯ menu.",
-    "whatsNewVersion": "v1.31.0"
+    "whatsNew": "Back up every app's settings to one file and restore them on a new show computer; Stagehand joins the list.",
+    "whatsNewVersion": "v1.32.0"
   },
   "apps": [
     {
@@ -588,6 +588,7 @@
       "name": "Convert Tools",
       "blurb": "Universal offline file converter — NOT a JB app: a repackage of the open-source p2r3/convert (GPL-2.0), all credit to its authors.",
       "category": "Documents & media",
+      "settingsBackup": false,
       "owner": "JAMEZJB",
       "repo": "Convert",
       "dataFolders": [
@@ -643,6 +644,26 @@
         "macos": "RepoRadar-macOS.zip",
         "windows-x64": "RepoRadar-Windows-x64.exe",
         "windows-arm64": "RepoRadar-Windows-arm64.exe"
+      }
+    },
+    {
+      "id": "stagehand",
+      "name": "Stagehand",
+      "blurb": "Choose which of your apps Claude can use and what it may do in each, with show lock for the whole suite.",
+      "category": "Planning & admin",
+      "owner": "JAMEZJB",
+      "repo": "Stagehand",
+      "claudeSince": "v0.1.0",
+      "dataFolders": [
+        "Stagehand"
+      ],
+      "bundleIds": [
+        "com.jamesbreedon.stagehand"
+      ],
+      "assets": {
+        "macos": "Stagehand-macOS.zip",
+        "windows-x64": "Stagehand-Windows-x64.exe",
+        "windows-arm64": "Stagehand-Windows-arm64.exe"
       }
     }
   ]

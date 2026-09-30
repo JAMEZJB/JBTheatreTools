@@ -77,6 +77,22 @@ public sealed class CatalogApp
     /// Uninstalling the app's last edition offers to remove them.</summary>
     [JsonPropertyName("dataFolders")] public List<string>? DataFolders { get; set; }
 
+    /// <summary><c>false</c>: the app has no settings Back up / Restore of the suite's kind (e.g. a repackaged third-party
+    /// app), so "Back up all apps" never starts it with <c>--settings-*</c>. Absent: the launcher asks the installed build.</summary>
+    [JsonPropertyName("settingsBackup")] public bool? SettingsBackup { get; set; }
+
+    /// <summary>The first release whose build is a Claude connector (<c>&lt;app&gt; --mcp</c>); absent = none yet. Only
+    /// installs at or past it get a stable entry in connectors.json.</summary>
+    [JsonPropertyName("claudeSince")] public string? ClaudeSince { get; set; }
+
+    /// <summary>The install slots, the Full edition first (it has the most tools; both share one settings folder).</summary>
+    public IReadOnlyList<(string Key, string? Edition)> SlotsFullFirst() => HasVariants
+        ? Variants!.Select(v => (InstallKey(v.Id), (string?)v.Id)).Reverse().ToList()
+        : new List<(string, string?)> { (Id, null) };
+
+    public BackupApp ToBackupApp() => new(Id, Name, SlotsFullFirst(), SettingsBackup == false);
+    public Connectors.App ToConnectorApp() => new(Id, Name, ClaudeSince, SlotsFullFirst());
+
     /// <summary>True when this app ships more than one variant → the row shows a Light/Full toggle.</summary>
     public bool HasVariants => (Variants?.Count ?? 0) > 1;
 

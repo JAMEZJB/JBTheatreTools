@@ -79,6 +79,18 @@ The same features on every launcher (the few that don't apply to Android are mar
   instead. The command line does the same with `--self-update`. Android updates itself too.
 - **What's new in the launcher** — after the launcher updates itself it offers, once, the notes of every
   release since the version you had.
+- **Back up / restore every app's settings** *(desktop)* — Settings → Back Up All Apps… asks each installed app
+  to save its settings (`<app> --settings-export`) and adds the launcher's own, all in one
+  `JB Theatre Tools backup <date>.jbtt-backup` file. Saved passwords go in only when you tick "Include saved
+  passwords", sealed with an optional passphrase (PBKDF2-SHA256 + HMAC-SHA256). Restore All Apps… shows what the
+  file holds, offers to install apps that aren't installed yet, asks you to quit apps that are open, asks for the
+  passphrase once, then restores each app (each keeps a copy of its current settings first) and the launcher's own
+  settings last, with one combined result. A Mac backup restores on Windows and the other way round. An app whose
+  version can't back up yet says so. The command line does the same with `--backup-all` / `--restore-all`.
+- **Claude and Stagehand** *(desktop)* — Stagehand, installed like any app, sets which apps Claude can use and what
+  it may do in each. The launcher keeps a stable command for every installed app that can work with Claude, in
+  `connectors.json` next to the install list (on Windows through a folder link that follows updates), shares
+  show lock with Stagehand and the apps through `claude.json`, and has Open Stagehand in Settings and the More menu.
 
 ## App catalog (the installable apps it launches)
 
@@ -101,6 +113,7 @@ The same features on every launcher (the few that don't apply to Android are mar
 | ShowNet Scanner | `JAMEZJB/ShowNetScanner` | `ShowNetScanner-macOS.zip`, `ShowNetScanner-Windows-{x64,arm64}.exe` |
 | Timecode Tools | `JAMEZJB/TimecodeTools` | `TimecodeTools-macOS.zip`, `TimecodeTools-Windows-{x64,arm64}.exe` |
 | PDF Tools | `JAMEZJB/PDFTools` | Light: `PDFTools-macOS.zip`, `PDFTools-Windows-x64.exe` · Full: `PDFTools-Full-macOS-{arm64,x64}.zip` (no Windows Full yet) |
+| Stagehand | `JAMEZJB/Stagehand` | `Stagehand-macOS.zip`, `Stagehand-Windows-{x64,arm64}.exe` (desktop only) |
 
 Asset names differ per app, so the launcher resolves the right one for the current OS/arch. An app listed
 ahead of its first release shows "No release" and becomes installable once a build ships.
