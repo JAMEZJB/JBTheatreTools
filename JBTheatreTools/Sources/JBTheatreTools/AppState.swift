@@ -753,7 +753,7 @@ final class AppState: ObservableObject {
     // MARK: Category grouping (Pinned floats to the top; the rest group under their catalog category)
 
     /// Sentinel key for the Pinned group (can't collide with a real category name).
-    static let pinnedGroupKey = "\u{1}pinned"
+    nonisolated static let pinnedGroupKey = "\u{1}pinned"
     private static let uncategorised = "Other"
 
     /// The category a row belongs to for grouping (falls back to "Other" for an app with no category).
@@ -2430,7 +2430,7 @@ final class AppState: ObservableObject {
             createdBy: "JB Theatre Tools \(currentVersion) (macOS)",
             apps: entries,
             layout: .init(pinned: Array(pinnedIds).sorted(), hidden: Array(hiddenIds).sorted(), order: rows.map(\.id),
-                          categoryOrder: fullCategoryOrder, collapsed: Array(collapsedGroups).sorted()))
+                          categoryOrder: fullCategoryOrder, collapsed: Self.sharedGroupKeys(collapsedGroups)))
         let panel = NSSavePanel()
         panel.title = "Export Setup"
         panel.nameFieldStringValue = SetupProfile.suggestedFileName(Date())
@@ -2525,8 +2525,17 @@ final class AppState: ObservableObject {
         UserDefaults.standard.set(order, forKey: Self.appOrderKey)
         rows = Self.applyingSavedOrder(rows)
         setCategoryOrder(l.categoryOrder)
-        collapsedGroups = Set(l.collapsed)
+        collapsedGroups = Self.localGroupKeys(l.collapsed)
         UserDefaults.standard.set(Array(collapsedGroups), forKey: Self.collapsedKey)
+    }
+
+    /// Setup files name the Pinned section "pinned" (as Windows and Android do); here it's `pinnedGroupKey`.
+    nonisolated static func sharedGroupKeys(_ local: Set<String>) -> [String] {
+        local.map { $0 == pinnedGroupKey ? "pinned" : $0 }.sorted()
+    }
+
+    nonisolated static func localGroupKeys(_ shared: [String]) -> Set<String> {
+        Set(shared.map { $0 == "pinned" || $0 == pinnedGroupKey ? pinnedGroupKey : $0 })
     }
 
     // MARK: - Storage, diagnostics

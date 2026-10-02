@@ -17,3 +17,12 @@ final class TransientErrorTests: XCTestCase {
         XCTAssertFalse(AppState.isTransient(CocoaError(.fileWriteNoPermission)))
     }
 }
+
+/// The folded Pinned section travels in setup files as "pinned" (Windows / Android spelling).
+final class LayoutKeyTests: XCTestCase {
+    func testPinnedSectionKeyRoundTrips() {
+        XCTAssertEqual(AppState.sharedGroupKeys([AppState.pinnedGroupKey, "Networking"]), ["Networking", "pinned"])
+        XCTAssertEqual(AppState.localGroupKeys(["pinned", "Networking"]), [AppState.pinnedGroupKey, "Networking"])
+        XCTAssertEqual(AppState.localGroupKeys([AppState.pinnedGroupKey]), [AppState.pinnedGroupKey])   // older mac files
+    }
+}
