@@ -40,6 +40,8 @@ object HouseIcons {
     )
     val Check = stroked("check", "M5 12l5 5l10 -10")
     val Close = stroked("close", "M18 6l-12 12 M6 6l12 12")
+    val ChevronDown = stroked("chevron-down", "M6 9l6 6l6 -6")
+    val ChevronRight = stroked("chevron-right", "M9 6l6 6l-6 6")
     val Share = stroked(
         "share",
         "M6 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0 M18 6m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0 " +

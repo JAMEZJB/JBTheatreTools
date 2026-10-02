@@ -90,6 +90,8 @@ object ActiveInstalls {
     private val queued: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     fun queue(ids: Collection<String>) { queued.clear(); queued.addAll(ids) }
+    /** A batch topped up its list: the new ids are queued too. */
+    fun addToQueue(ids: Collection<String>) { queued.addAll(ids) }
     fun clearQueue() = queued.clear()
     fun ids(): Set<String> = running + queued
 }
@@ -115,7 +117,29 @@ class LauncherRepository(private val context: Context) {
 
     val launcherVersion: String get() = BuildConfig.VERSION_NAME
 
-    private var notes: WhatsNewNotes = WhatsNewNotes()
+    /**
+     * The relay's "New in vX" lines: the last good copy is kept on disk (whats-new.json) so an offline start still
+     * shows the latest lines it saw; the catalog's own lines are the fallback under it.
+     */
+    private val notesFile = File(context.filesDir, "whats-new.json")
+    @Volatile private var notes: WhatsNewNotes =
+        runCatching { if (notesFile.isFile) WhatsNewNotes.parse(notesFile.readBytes()) else WhatsNewNotes() }
+            .getOrDefault(WhatsNewNotes())
+
+    /** Keeps [bytes] (a document that just parsed) as the on-disk copy, written atomically; best effort. */
+    private fun saveNotes(bytes: ByteArray) {
+        runCatching {
+            val tmp = File(notesFile.path + ".tmp")
+            tmp.writeBytes(bytes)
+            if (!tmp.renameTo(notesFile)) { notesFile.delete(); tmp.renameTo(notesFile) }
+        }.onFailure { log.log("what's new: couldn't keep the lines on disk: ${it.message}") }
+    }
+
+    /** Every app as it stands before a check: what's installed, and the last "New in" lines seen (offline too). */
+    fun initialStatuses(): List<AppStatus> = catalog.apps.map { app ->
+        val (line, version) = notes.resolved(app)
+        AppStatus(app, whatsNew = line, whatsNewVersion = version)
+    }
 
     // ── the release feed ─────────────────────────────────────────────────────
 
@@ -207,7 +231,7 @@ class LauncherRepository(private val context: Context) {
     /** Refreshes every app's status. Network failures land in the row's note, never as a crash. */
     suspend fun refresh(): List<AppStatus> = withContext(Dispatchers.IO) {
         val client = client()
-        client?.whatsNewNotes()?.let { (parsed, _) -> notes = parsed }
+        client?.whatsNewNotes()?.let { (parsed, bytes) -> notes = parsed; saveNotes(bytes) }
         catalog.apps.map { app -> statusFor(app, client) }
     }
 
@@ -266,6 +290,9 @@ class LauncherRepository(private val context: Context) {
     /** Catalog ids whose download should stop (the Cancel button, or Stop on Update all). */
     private val cancelRequests: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
+    /** Why each app's last install failed (an exception, not a refusal by Android) — a batch's retry looks here. */
+    private val lastFailure = ConcurrentHashMap<String, Throwable>()
+
     /** Asks an in-flight download of [catalogId] to stop; a no-op once it has moved on to verify / install. */
     fun requestCancel(catalogId: String) { cancelRequests.add(catalogId) }
 
@@ -292,6 +319,13 @@ class LauncherRepository(private val context: Context) {
         stop: () -> Boolean = { false },
         /** An automatic update: no dialogs (see [ApkInstaller.install]). */
         unattended: Boolean = false,
+        /**
+         * A version hand-picked from "Install version": the only install allowed without a signed checksum list (very
+         * old releases predate it) — the suite certificate and package id are still checked. Everything else is strict.
+         */
+        lenient: Boolean = false,
+        /** The version this install replaces when the app was removed first (Roll back, an older pick, Back to release). */
+        replacing: String? = null,
     ): InstallResult = withContext(Dispatchers.IO) {
         // One install per app at a time: a row's Update and a batch's Update all used to download, verify and
         // delete the SAME cache file concurrently (a spurious failure, and a window where the session could stream
@@ -300,7 +334,8 @@ class LauncherRepository(private val context: Context) {
             log.log("install ${app.id}: already downloading or installing — not started again")
             return@withContext InstallResult.ALREADY_RUNNING
         }
-        try { installOnce(app, onProgress, tag, stop, unattended) } finally {
+        lastFailure.remove(app.id)
+        try { installOnce(app, onProgress, tag, stop, unattended, lenient && tag != null, replacing) } finally {
             ActiveInstalls.running.remove(app.id)
             cancelRequests.remove(app.id)
         }
@@ -333,6 +368,8 @@ class LauncherRepository(private val context: Context) {
         tag: String?,
         stop: () -> Boolean,
         unattended: Boolean = false,
+        lenient: Boolean = false,
+        replacing: String? = null,
     ): InstallResult = withContext(Dispatchers.IO) {
         val client = client() ?: run {
             onProgress(InstallProgress(app.id, InstallProgress.Phase.FAILED, message = "Not signed in"))
@@ -340,7 +377,7 @@ class LauncherRepository(private val context: Context) {
         }
         val cache = File(context.cacheDir, "downloads").apply { mkdirs() }
         var apk: File? = null
-        val before = installedVersionFor(app.id)
+        val before = installedVersionFor(app.id) ?: replacing
         var releaseTag: String? = tag
         try {
             // A specific version (a setup file's held version), or the channel's latest.
@@ -375,7 +412,7 @@ class LauncherRepository(private val context: Context) {
             }
 
             onProgress(InstallProgress(app.id, InstallProgress.Phase.VERIFYING, 1.0))
-            verify(client, app, release, asset.name, apk)
+            verify(client, app, release, asset.name, apk, lenient)
 
             onProgress(InstallProgress(app.id, InstallProgress.Phase.INSTALLING, 1.0))
             val expectedPackage = PackageIds.packageId(app.id)
@@ -406,6 +443,9 @@ class LauncherRepository(private val context: Context) {
             when (outcome) {
                 is ApkInstaller.Outcome.Succeeded -> {
                     settings.setInstalledTag(app.id, release.tagName)
+                    settings.setPreviousVersion(
+                        app.id, PreviousVersion.after(before, VersionCompare.norm(release.tagName), settings.previousVersion(app.id)),
+                    )
                     log.log("install ${app.id} ${release.tagName}: $assetName verified + installed")
                     addHistory(app.id, app.name, ActivityHistory.actionFor(before, release.tagName), before, release.tagName)
                     onProgress(InstallProgress(app.id, InstallProgress.Phase.DONE, 1.0))
@@ -446,6 +486,7 @@ class LauncherRepository(private val context: Context) {
             InstallResult.CANCELLED
         } catch (e: Exception) {
             apk?.delete()
+            lastFailure[app.id] = e   // a batch retries a transient one once (see [runBatch])
             // The log keeps the detail; the row and the history get a plain line (no host names, no socket text).
             log.log("install ${app.id}: refused — ${e.javaClass.simpleName}: ${e.message}")
             val message = UserMessage.of(e)
@@ -467,12 +508,23 @@ class LauncherRepository(private val context: Context) {
         release: ReleaseInfo,
         assetName: String,
         apk: File,
+        lenient: Boolean = false,
     ) {
         val cache = File(context.cacheDir, "downloads")
         val sumsAsset = release.assets.firstOrNull { it.name == "SHA256SUMS" }
-            ?: throw IllegalStateException("this release publishes no SHA256SUMS checksums")
         val sigAsset = release.assets.firstOrNull { it.name == "SHA256SUMS.minisig" }
-            ?: throw IllegalStateException("this release’s SHA256SUMS isn’t signed with the suite key")
+        if (lenient && (sumsAsset == null || sigAsset == null)) {
+            // A hand-picked older version that predates the signed checksum list: still only the suite's own build
+            // installs — its signing certificate must be the suite's (and the package id the catalog's, checked after).
+            when (val r = ApkVerifier.checkSigningCert(context, apk)) {
+                is ApkVerifier.Result.Failed -> throw IllegalStateException(r.reason)
+                else -> Unit
+            }
+            log.log("verify ${app.id} ${release.tagName}: $assetName — no signed checksums (a hand-picked version), suite cert ok")
+            return
+        }
+        if (sumsAsset == null) throw IllegalStateException("this release publishes no SHA256SUMS checksums")
+        if (sigAsset == null) throw IllegalStateException("this release’s SHA256SUMS isn’t signed with the suite key")
 
         val sums = File(cache, "${app.id}-${PathSafe.component(release.tagName)}-SHA256SUMS")
         val sig = File(cache, "${app.id}-${PathSafe.component(release.tagName)}-SHA256SUMS.minisig")
@@ -522,33 +574,66 @@ class LauncherRepository(private val context: Context) {
     data class BatchCount(val done: Int, val attempted: Int)
 
     /**
-     * Update every app with a pending update (never a held one), one session at a time; a failure never blocks
-     * the rest. [shouldStop] ends the run between apps (Stop). An app already installing from its own row is left
-     * to that install and isn't counted as a failure.
+     * Runs a batch — Update all, Install every app, a setup import — one PackageInstaller session at a time; a failure
+     * never blocks the rest. Each slot is re-checked just before its turn ([BatchRules.skipReason]); a download that
+     * failed on a network or I/O hiccup is tried ONCE more after a short pause (never a verification failure, a cancel
+     * or show lock). When the list runs out, [refill] (Update all / Install every app) is asked again and anything it
+     * now lists that this batch hasn't had is added — each app at most once per batch; [onAdded] hears of those.
+     * [shouldStop] ends the run between apps (Stop). An app already installing from its own row is left to that
+     * install and isn't counted as a failure.
      */
-    suspend fun updateAll(
-        statuses: List<AppStatus>,
+    suspend fun runBatch(
+        work: List<BatchSlot>,
         shouldStop: () -> Boolean,
         onProgress: (InstallProgress) -> Unit,
+        refill: (() -> List<BatchSlot>)? = null,
+        onAdded: (List<String>) -> Unit = {},
+        title: String = "batch",
     ): BatchCount {
-        val pending = statuses.filter { it.updatePending && it.canInstall }
+        val queue = BatchQueue(work) { it.app.id }
         var done = 0
         var attempted = 0
-        for (status in pending) {
-            if (shouldStop()) break
-            if (status.app.id in settings.heldApps) continue   // held after Update all started
-            // Re-checked just before its turn, as on the desktop: updated from its row meanwhile (already at the
-            // latest), or uninstalled meanwhile — either way the batch leaves it alone.
-            val now = installedVersionFor(status.app.id)
-            if (now == null && status.installedVersion != null) continue
-            if (now != null && status.latestVersion != null && VersionCompare.equal(now, status.latestVersion)) continue
-            if (status.app.id !in ActiveInstalls.running) clearCancel(status.app.id)
-            when (install(status.app, onProgress, stop = shouldStop)) {
-                InstallResult.INSTALLED -> { done++; attempted++ }
-                InstallResult.ALREADY_RUNNING -> Unit
-                else -> attempted++
+        val topUp: (() -> List<BatchSlot>)? = refill?.let { r ->
+            {
+                if (shouldStop() || settings.showLock) emptyList()
+                else r().also { more ->
+                    val fresh = more.filter { it.app.id !in queue.keys }
+                    if (fresh.isNotEmpty()) {
+                        log.log("$title: ${fresh.size} more app(s) added while it ran")
+                        onAdded(fresh.map { it.app.id })
+                    }
+                }
             }
         }
+        while (true) {
+            if (shouldStop() || settings.showLock) break
+            val slot = queue.next(topUp) ?: break
+            val id = slot.app.id
+            fun skip(): String? = BatchRules.skipReason(slot, installedVersionFor(id), id in settings.heldApps)
+            val reason = skip()
+            if (reason != null) {
+                log.log("$title: $id $reason — skipped")
+            } else {
+                if (id !in ActiveInstalls.running) clearCancel(id)
+                var result = install(slot.app, onProgress, slot.tag, stop = shouldStop)
+                if (result == InstallResult.NOT_INSTALLED && TransientError.isTransient(lastFailure[id]) &&
+                    !shouldStop() && !settings.showLock && skip() == null
+                ) {
+                    log.log("install $id: retrying once after a transient error: ${lastFailure[id]?.message}")
+                    delay(2_000)
+                    if (!shouldStop() && !settings.showLock) {
+                        clearCancel(id)
+                        result = install(slot.app, onProgress, slot.tag, stop = shouldStop)
+                    }
+                }
+                when (result) {
+                    InstallResult.INSTALLED -> { done++; attempted++ }
+                    InstallResult.ALREADY_RUNNING -> Unit
+                    else -> attempted++
+                }
+            }
+        }
+        log.log("$title ${if (shouldStop() || settings.showLock) "stopped" else "complete"} ($done of $attempted installed)")
         return BatchCount(done, attempted)
     }
 

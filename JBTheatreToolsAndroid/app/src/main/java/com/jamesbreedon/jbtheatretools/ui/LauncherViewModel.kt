@@ -9,6 +9,12 @@ import com.jamesbreedon.jbtheatretools.core.ActiveInstalls
 import com.jamesbreedon.jbtheatretools.core.ActivityEvent
 import com.jamesbreedon.jbtheatretools.core.AppLog
 import com.jamesbreedon.jbtheatretools.core.AppFilter
+import com.jamesbreedon.jbtheatretools.core.AppLayout
+import com.jamesbreedon.jbtheatretools.core.BatchRules
+import com.jamesbreedon.jbtheatretools.core.BatchSlot
+import com.jamesbreedon.jbtheatretools.core.ByteSize
+import com.jamesbreedon.jbtheatretools.core.LayoutPrefs
+import com.jamesbreedon.jbtheatretools.core.PreviousVersion
 import com.jamesbreedon.jbtheatretools.core.AppVisibility
 import com.jamesbreedon.jbtheatretools.core.Appearance
 import com.jamesbreedon.jbtheatretools.core.AppStatus
@@ -56,8 +62,47 @@ data class NotesSheet(
     val message: String? = null,
 )
 
-/** The preview before a setup file is applied. */
-data class ImportPreview(val summary: String, val plan: SetupPlanner.Plan)
+/** The preview before a setup file is applied; [layout] is the file's list layout, used only when [applyLayout]. */
+data class ImportPreview(
+    val summary: String,
+    val plan: SetupPlanner.Plan,
+    val layout: SetupProfile.Layout? = null,
+    val applyLayout: Boolean = false,
+)
+
+/** "Install version": an app's releases that have an Android build, loaded on demand. */
+data class VersionsSheet(
+    val app: CatalogApp,
+    val installed: String?,
+    val releases: List<ReleaseInfo> = emptyList(),
+    val loading: Boolean = true,
+    val message: String? = null,
+)
+
+/**
+ * Going to another version of an installed app. Android can't install an older version over a newer one, so an older
+ * target ([needsRemoval]) removes the app first and installs straight after — asked first, as it resets the app's
+ * saved settings.
+ */
+data class ReinstallRequest(
+    val app: CatalogApp,
+    /** The release tag to install; null = the channel's latest (Back to release). */
+    val tag: String?,
+    /** The version being installed, for the wording ("1.1.0"). */
+    val target: String,
+    val from: String?,
+    val kind: Kind,
+    val needsRemoval: Boolean,
+) {
+    enum class Kind {
+        /** A dev build back to the release (Development builds switched off). */
+        BACK_TO_RELEASE,
+        /** One click back to the version before the last update, then held there. */
+        ROLL_BACK,
+        /** A version hand-picked from "Install version". */
+        PICKED,
+    }
+}
 
 data class LauncherUiState(
     val signedIn: Boolean = false,
@@ -75,7 +120,8 @@ data class LauncherUiState(
     /** A newer launcher version with an Android build (e.g. "1.28.0"), or null. */
     val launcherUpdate: String? = null,
     val devRevealed: Boolean = false,
-    val confirmBackToRelease: CatalogApp? = null,   // rule-8 confirm (it removes the app first)
+    /** Rule-8 confirm before an older version replaces a newer one (it removes the app first) or a roll back. */
+    val confirmReinstall: ReinstallRequest? = null,
     val devChannel: Boolean = false,
     /** Show lock: installs, updates and removals are paused; opening apps still works. */
     val showLock: Boolean = false,
@@ -95,6 +141,19 @@ data class LauncherUiState(
     val storage: Pair<Long, Long>? = null,
     /** The log's last lines (About → Log), read off the main thread. */
     val logTail: String = "",
+    /** Pinned, hidden, order, sections — this device's list layout. */
+    val layout: LayoutPrefs = LayoutPrefs(),
+    /** Phones and small tablets: rows instead of tiles. */
+    val listView: Boolean = false,
+    /** The catalog's section order (for the grouped list). */
+    val catalogCategories: List<String> = emptyList(),
+    /** The version each app had before its last install changed it (Roll back's target; shown in the details). */
+    val previousVersions: Map<String, String> = emptyMap(),
+    /** Releases loaded for an app's details (Roll back is offered only for a release that can install). */
+    val appReleases: Map<String, List<ReleaseInfo>> = emptyMap(),
+    val versions: VersionsSheet? = null,
+    /** The section whose actions are showing (long-press on its header). */
+    val sectionSheet: String? = null,
 ) {
     val installedCount: Int get() = statuses.count { it.isInstalled }
     /** Apps with an update that isn't held. */
@@ -107,11 +166,56 @@ data class LauncherUiState(
     )
     val anyInstallRunning: Boolean get() = busyAll || progress.values.any { it.isActive }
 
+    /** Install every app's work: everything with an Android build not installed yet, plus the pending updates. */
+    val installAllWork: List<AppStatus> get() = BatchRules.installAllWork(statuses)
+    val installAllBytes: Long get() = ByteSize.sum(installAllWork.map { it.apkSizeBytes })
+    /** Apps with an Android build that aren't installed (Install every app is offered while there are any). */
+    val notInstalledCount: Int get() = statuses.count { !it.isInstalled && it.canInstall && !it.hidden }
+
+    /** A search or status filter narrows the list: sections show open and reordering is paused. */
+    val filtering: Boolean get() = AppFilter.isActive(search, statusFilter)
+
+    /** Every app the Apps list would show without a filter, in this device's order (hidden apps left out). */
+    fun listedStatuses(): List<AppStatus> {
+        val byId = statuses.associateBy { it.app.id }
+        return AppLayout.ordered(statuses.map { it.app.id }, layout.order).mapNotNull { byId[it] }
+            .filter { !it.hidden && it.app.id !in layout.hidden }
+    }
+
     /** The Apps list after Find & filter: the query matches name, blurb, category or id; plus the status chips. */
-    fun visibleStatuses(): List<AppStatus> = statuses.filter { !it.hidden }.filter {
+    fun visibleStatuses(): List<AppStatus> = listedStatuses().filter {
         AppFilter.matchesQuery(search, it.app.name, it.app.blurb, it.app.category, it.app.id) &&
             AppFilter.matchesStatus(statusFilter, it.isInstalled, it.updatePending, !it.isInstalled && it.canInstall)
     }
+
+    /** The Apps list's sections: Pinned first, then each category with something to show. */
+    fun groups(): List<Pair<AppLayout.Group, List<AppStatus>>> {
+        val shown = visibleStatuses()
+        val byId = shown.associateBy { it.app.id }
+        return AppLayout.groups(shown.map { it.app.id }, ::categoryOf, layout.pinned, layout.categoryOrder, catalogCategories)
+            .map { g -> g to g.ids.mapNotNull { byId[it] } }
+    }
+
+    fun categoryOf(id: String): String = AppLayout.categoryOf(statuses.firstOrNull { it.app.id == id }?.app?.category)
+
+    /** A section is folded unless a filter is on (a match never hides behind a fold). */
+    fun isCollapsed(key: String): Boolean = key in layout.collapsed && !filtering
+
+    /** "3 of 24 apps" — shown while a search or filter is on. */
+    fun countLabel(): String = AppLayout.countLabel(visibleStatuses().size, listedStatuses().size, filtering)
+
+    /** [id] can move [up]/down inside its section (never while a filter is on). */
+    fun canMove(id: String, up: Boolean): Boolean = !filtering && moved(id, up) != null
+
+    /** The app order after moving [id] past its neighbour on screen, or null. */
+    fun moved(id: String, up: Boolean): List<String>? {
+        // The full order (hidden apps keep their place); the neighbour must be one that's on screen.
+        val order = AppLayout.ordered(statuses.map { it.app.id }, layout.order)
+        val visible = listedStatuses().map { it.app.id }.filter { groupKeyOf(it) !in layout.collapsed }.toSet()
+        return AppLayout.move(order, id, up, visible, ::groupKeyOf)
+    }
+
+    fun groupKeyOf(id: String): String = AppLayout.groupKey(id, layout.pinned, ::categoryOf)
 }
 
 class LauncherViewModel(app: Application) : AndroidViewModel(app) {
@@ -123,7 +227,10 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         LauncherUiState(
             signedIn = repo.hasCredential(),
             appearance = repo.settings.appearance,
-            statuses = repo.catalog.apps.map { AppStatus(it) },
+            statuses = repo.initialStatuses(),
+            layout = repo.settings.layout,
+            listView = repo.settings.listView,
+            catalogCategories = repo.catalog.categories,
             devRevealed = repo.settings.devChannel,
             devChannel = repo.settings.devChannel,
             showLock = repo.settings.showLock,
@@ -152,6 +259,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         AppVisibility.foreground = true   // the view model is created with the activity, i.e. on screen
         prepareLauncherWhatsNew()
         reloadHistory()
+        refreshInstalledOnly()   // what's installed and each app's previous version, off the main thread
         if (repo.hasCredential()) refresh()
         updateShortcuts()
         if (_state.value.notifyUpdates) notifier.ensureChannel()
@@ -207,6 +315,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 s.copy(
                     loading = false, statuses = statuses, signedIn = repo.hasCredential(),
+                    appReleases = emptyMap(),   // a check may have found new releases: the details load them again
                     // The launcher's check reports "no update" and "failed" alike; only a restart clears a found one.
                     launcherUpdate = if (scheduled) launcherUpdate ?: s.launcherUpdate else launcherUpdate,
                 )
@@ -301,7 +410,21 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setStatusFilter(filter: StatusFilter) = _state.update { it.copy(statusFilter = filter) }
 
-    fun showSheet(app: CatalogApp?) = _state.update { it.copy(sheetFor = app) }
+    fun showSheet(app: CatalogApp?) {
+        _state.update { it.copy(sheetFor = app) }
+        // An installed app's details offer Roll back only for a release that can install: load its releases.
+        if (app != null && _state.value.statuses.firstOrNull { it.app.id == app.id }?.isInstalled == true) loadReleases(app)
+    }
+
+    /** Loads [app]'s releases into the details cache (once per check); a failure just means no Roll back offered. */
+    private fun loadReleases(app: CatalogApp, then: ((List<ReleaseInfo>?, Throwable?) -> Unit)? = null) {
+        _state.value.appReleases[app.id]?.let { cached -> then?.invoke(cached, null); return }
+        viewModelScope.launch {
+            val result = runCatching { repo.releasesFor(app) }
+            result.getOrNull()?.let { list -> _state.update { it.copy(appReleases = it.appReleases + (app.id to list)) } }
+            then?.invoke(result.getOrNull(), result.exceptionOrNull())
+        }
+    }
 
     fun askRemove(app: CatalogApp?) {
         if (app != null && blockedByLock()) return
@@ -336,7 +459,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         repo.settings.debugFeedBase = ""
         repo.settings.authMode = AuthMode.SERVER
         _state.update {
-            it.copy(signedIn = false, statuses = repo.catalog.apps.map { a -> AppStatus(a) })
+            it.copy(signedIn = false, statuses = repo.initialStatuses(), appReleases = emptyMap())
         }
         syncBackgroundChecks()
     }
@@ -374,7 +497,19 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
 
     // ── Install / update ────────────────────────────────────────────────────
 
-    fun install(app: CatalogApp, tag: String? = null) {
+    fun install(app: CatalogApp, tag: String? = null) = startInstall(app, tag)
+
+    /**
+     * One app's install from its row or sheet. [lenient] = a hand-picked version (see [LauncherRepository.install]);
+     * [replacing] = the version a removal just took off; [afterInstalled] runs once it has installed.
+     */
+    private fun startInstall(
+        app: CatalogApp,
+        tag: String? = null,
+        lenient: Boolean = false,
+        replacing: String? = null,
+        afterInstalled: (() -> Unit)? = null,
+    ) {
         _state.update { it.copy(sheetFor = null) }
         if (blockedByLock()) return
         if (!repo.canRequestInstalls()) {
@@ -392,7 +527,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         val placeholder = InstallProgress(app.id, InstallProgress.Phase.DOWNLOADING, 0.0)
         onProgress(placeholder)
         viewModelScope.launch {
-            val result = repo.install(app, { p -> onProgress(p) }, tag)
+            val result = repo.install(app, { p -> onProgress(p) }, tag, lenient = lenient, replacing = replacing)
             if (result == InstallResult.ALREADY_RUNNING) {
                 // Lost a race with another install of this app: leave its progress alone, drop only our placeholder.
                 _state.update { s -> if (s.progress[app.id] === placeholder) s.copy(progress = s.progress - app.id) else s }
@@ -411,13 +546,23 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                     },
                 )
             }
+            if (result == InstallResult.INSTALLED) afterInstalled?.invoke()
         }
     }
 
     /** Stops [app]'s download (the Cancel button). */
     fun cancelInstall(app: CatalogApp) = repo.requestCancel(app.id)
 
-    fun updateAll() {
+    /** Update all: every installed, non-held app with an update (then the launcher itself, last). */
+    fun updateAll() = startBatch(installAll = false)
+
+    /**
+     * Install every app: every app with an Android build that isn't installed yet, plus the pending updates. Android
+     * shows its own install dialog for each first install; the batch waits for each one.
+     */
+    fun installAll() = startBatch(installAll = true)
+
+    private fun startBatch(installAll: Boolean) {
         if (_state.value.busyAll || blockedByLock()) return
         if (!repo.canRequestInstalls()) {
             _state.update { it.copy(snackbar = "Allow JB Theatre Tools to install apps, then try again.") }
@@ -425,14 +570,24 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         stopRequested = false
-        val pending = _state.value.statuses.filter { it.updatePending && it.canInstall }
+        // Re-derived when the list runs out, so an update found (or a hold released) meanwhile is picked up too.
+        val derive: () -> List<BatchSlot> = {
+            val s = _state.value.statuses
+            (if (installAll) BatchRules.installAllWork(s) else BatchRules.updateWork(s)).map(BatchRules::slotOf)
+        }
+        val work = derive()
+        if (work.isEmpty() && (installAll || _state.value.launcherUpdate == null)) return
         batchIds.clear()
-        batchIds.addAll(pending.map { it.app.id })
+        batchIds.addAll(work.map { it.app.id })
         ActiveInstalls.queue(batchIds)   // the background check never announces what's being installed
         _state.update { it.copy(busyAll = true) }
         viewModelScope.launch {
             val count = try {
-                repo.updateAll(pending, { stopRequested }) { p -> onProgress(p) }
+                repo.runBatch(
+                    work, { stopRequested }, { p -> onProgress(p) }, refill = derive,
+                    onAdded = { ids -> batchIds.addAll(ids); ActiveInstalls.addToQueue(ids) },
+                    title = if (installAll) "Install every app" else "Update all",
+                )
             } finally {
                 // Also when the batch is cancelled (the screen closed): the process-wide queue must not keep these ids.
                 batchIds.clear()
@@ -444,11 +599,13 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                 it.copy(
                     busyAll = false,
                     // An app that was already installing from its own row isn't counted either way.
-                    snackbar = if (count.attempted == 0) it.snackbar else "Updated ${count.done} of ${count.attempted}",
+                    snackbar = if (count.attempted == 0) it.snackbar
+                    else if (installAll) "Installed ${count.done} of ${count.attempted}"
+                    else "Updated ${count.done} of ${count.attempted}",
                 )
             }
             // The launcher goes LAST: replacing it ends this process, so every app update must be done first.
-            if (_state.value.launcherUpdate != null && !stopRequested && !_state.value.showLock) runLauncherUpdate()
+            if (!installAll && _state.value.launcherUpdate != null && !stopRequested && !_state.value.showLock) runLauncherUpdate()
         }
     }
 
@@ -473,6 +630,72 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                 snackbar = if (app.id in now) "${app.name} is held at this version" else "${app.name} will update again",
             )
         }
+    }
+
+    // ── List layout: pin, hide, reorder, sections, view ────────────────────────
+
+    private fun saveLayout(layout: LayoutPrefs, message: String? = null) {
+        repo.settings.layout = layout
+        _state.update { it.copy(layout = layout, sheetFor = null, sectionSheet = null, snackbar = message ?: it.snackbar) }
+    }
+
+    fun togglePin(app: CatalogApp) {
+        val now = AppLayout.togglePin(_state.value.layout, app.id)
+        saveLayout(now)
+        AppLog.get(getApplication()).log("${if (app.id in now.pinned) "pinned" else "unpinned"} ${app.id}")
+    }
+
+    fun hideApp(app: CatalogApp) {
+        val l = _state.value.layout
+        saveLayout(l.copy(hidden = l.hidden + app.id), "${app.name} is hidden — About → App list shows it again")
+        AppLog.get(getApplication()).log("hid ${app.id}")
+    }
+
+    /** "Show hidden apps (n)": every hidden app comes back. */
+    fun showHiddenApps() {
+        saveLayout(_state.value.layout.copy(hidden = emptySet()), "Hidden apps are shown again")
+        AppLog.get(getApplication()).log("unhid all apps")
+    }
+
+    /** "Reset app order": the catalog's order again (pins, hidden apps and sections stay as they are). */
+    fun resetAppOrder() {
+        saveLayout(_state.value.layout.copy(order = emptyList()), "App order reset")
+        AppLog.get(getApplication()).log("reset the app order")
+    }
+
+    /** Move up / Move down: past the nearest app on screen in the same section (paused while a filter is on). */
+    fun moveApp(app: CatalogApp, up: Boolean) {
+        val s = _state.value
+        if (s.filtering) return
+        val order = s.moved(app.id, up) ?: return
+        repo.settings.layout = s.layout.copy(order = order)
+        // The sheet stays open, so the app can move several places in a row.
+        _state.update { it.copy(layout = it.layout.copy(order = order)) }
+        AppLog.get(getApplication()).log("moved ${app.id} ${if (up) "up" else "down"}")
+    }
+
+    fun toggleSection(key: String) {
+        val l = _state.value.layout
+        val now = if (key in l.collapsed) l.collapsed - key else l.collapsed + key
+        saveLayout(l.copy(collapsed = now))
+    }
+
+    fun showSectionSheet(key: String?) = _state.update { it.copy(sectionSheet = key) }
+
+    /** Moves a category section one place up/down (Pinned always stays first). */
+    fun moveSection(key: String, up: Boolean) {
+        val s = _state.value
+        if (s.filtering) return
+        val displayed = s.groups().map { it.first.key }
+        val order = AppLayout.moveSection(displayed, key, up) ?: return
+        repo.settings.layout = s.layout.copy(categoryOrder = order)
+        _state.update { it.copy(layout = it.layout.copy(categoryOrder = order)) }
+        AppLog.get(getApplication()).log("reordered category sections")
+    }
+
+    fun setListView(on: Boolean) {
+        repo.settings.listView = on
+        _state.update { it.copy(listView = on) }
     }
 
     // ── Remove / open ───────────────────────────────────────────────────────
@@ -513,8 +736,10 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                 ids.associateWith { repo.installedVersionFor(it) } to gone.isNotEmpty()
             }
             val held = repo.settings.heldApps
+            val previous = ids.mapNotNull { id -> repo.settings.previousVersion(id)?.let { id to it } }.toMap()
             _state.update { s ->
                 s.copy(
+                    previousVersions = previous,
                     statuses = s.statuses.map {
                         if (it.app.id !in installedNow) return@map it
                         val installed = installedNow[it.app.id]
@@ -664,7 +889,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
 
     // ── Setup files ─────────────────────────────────────────────────────────
 
-    /** Writes this device's setup (installed apps, versions, holds) to [uri] (from the system file picker). */
+    /** Writes this device's setup (installed apps, versions, holds, the list layout) to [uri] (from the system file picker). */
     fun exportSetup(uri: Uri) {
         val statuses = _state.value.statuses.filter { it.isInstalled }
         if (statuses.isEmpty()) {
@@ -676,6 +901,11 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             createdAt = SetupProfile.timestamp(Instant.now()),
             createdBy = "JB Theatre Tools $launcherVersion (Android)",
             apps = statuses.map { SetupProfile.Entry(it.app.id, null, it.installedVersion, it.app.id in held) },
+            // The shared `layout` section, so any launcher can take this device's pins, hidden apps and order.
+            layout = AppLayout.toProfile(
+                repo.settings.layout, repo.catalog.apps.map { it.id }, repo.catalog.categories,
+                repo.catalog.apps.map { AppLayout.categoryOf(it.category) },
+            ),
         )
         viewModelScope.launch {
             val result = runCatching {
@@ -712,7 +942,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                     val plan = SetupPlanner.build(
                         profile, catalog, installedKeys, supportsVariants = false, allowDevTags = repo.settings.devChannel,
                     )
-                    ImportPreview(SetupPlanner.summary(plan, SetupPlanner.Wording.ANDROID), plan)
+                    ImportPreview(SetupPlanner.summary(plan, SetupPlanner.Wording.ANDROID), plan, profile.layout)
                 }
             }
             _state.update {
@@ -737,12 +967,21 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
 
     fun cancelImport() = _state.update { it.copy(importPreview = null) }
 
+    /** The preview's "Also use this file's list layout" choice. */
+    fun setImportApplyLayout(on: Boolean) = _state.update { s -> s.copy(importPreview = s.importPreview?.copy(applyLayout = on)) }
+
     /** Applies the previewed setup: holds first, then each missing app, one at a time (Stop ends the run). */
     fun confirmImport() {
         val preview = _state.value.importPreview ?: return
         _state.update { it.copy(importPreview = null) }
         if (blockedByLock()) return
         repo.settings.heldApps = repo.settings.heldApps + preview.plan.holdIds
+        if (preview.applyLayout && preview.layout != null) {
+            val layout = AppLayout.fromProfile(preview.layout, repo.catalog.apps.map { it.id }.toSet())
+            repo.settings.layout = layout
+            _state.update { it.copy(layout = layout) }
+            AppLog.get(getApplication()).log("import setup: the file's list layout applied")
+        }
         refreshInstalledOnly()
         if (preview.plan.toInstall.isEmpty()) {
             _state.update { it.copy(snackbar = "Setup applied — nothing new to install") }
@@ -758,28 +997,18 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         stopRequested = false
+        // Installed from its own row since the preview: the import leaves installed apps as they are. The repository
+        // refuses a development build here unless Development builds are on (the preview already skipped them).
+        val work = preview.plan.toInstall.mapNotNull { item ->
+            repo.catalog.apps.firstOrNull { it.id == item.appId }?.let { BatchSlot(it, item.tag, onlyIfMissing = true) }
+        }
         batchIds.clear()
-        batchIds.addAll(preview.plan.toInstall.map { it.appId })
+        batchIds.addAll(work.map { it.app.id })
         ActiveInstalls.queue(batchIds)
         _state.update { it.copy(busyAll = true) }
         viewModelScope.launch {
-            var done = 0
-            var attempted = 0
-            try {
-                for (item in preview.plan.toInstall) {
-                    if (stopRequested) break
-                    val app = repo.catalog.apps.firstOrNull { it.id == item.appId } ?: continue
-                    // Installed from its own row since the preview: the import leaves installed apps as they are.
-                    if (repo.isInstalled(app.id)) continue
-                    if (!repo.isInstalling(app.id)) repo.clearCancel(app.id)
-                    // The repository refuses a development build here unless Development builds are on (the preview
-                    // already skipped them; this covers the switch being turned off in between).
-                    when (repo.install(app, { p -> onProgress(p) }, item.tag, stop = { stopRequested })) {
-                        InstallResult.INSTALLED -> { done++; attempted++ }
-                        InstallResult.ALREADY_RUNNING -> Unit   // installing from its own row: not a failure
-                        else -> attempted++
-                    }
-                }
+            val count = try {
+                repo.runBatch(work, { stopRequested }, { p -> onProgress(p) }, title = "import setup")
             } finally {
                 batchIds.clear()
                 ActiveInstalls.clearQueue()
@@ -787,7 +1016,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             refreshInstalledOnly()
             reloadHistory()
             _state.update {
-                it.copy(busyAll = false, snackbar = if (attempted == 0) it.snackbar else "Installed $done of $attempted from the setup file")
+                it.copy(busyAll = false, snackbar = if (count.attempted == 0) it.snackbar else "Installed ${count.done} of ${count.attempted} from the setup file")
             }
         }
     }
@@ -858,26 +1087,114 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ── Other versions: back to release, roll back, install version ─────────
+
+    /** Back to release: a dev build replaced by the latest release (Development builds switched off). */
     fun askBackToRelease(app: CatalogApp?) {
-        if (app != null && blockedByLock()) return
-        _state.update { it.copy(confirmBackToRelease = app, sheetFor = null) }
+        if (app == null) { cancelReinstall(); return }
+        if (blockedByLock()) return
+        val status = _state.value.statuses.firstOrNull { it.app.id == app.id } ?: return
+        val target = status.latestVersion ?: return
+        _state.update {
+            it.copy(sheetFor = null, confirmReinstall = ReinstallRequest(
+                app, null, target, status.installedVersion, ReinstallRequest.Kind.BACK_TO_RELEASE, needsRemoval = true,
+            ))
+        }
+    }
+
+    /** "Roll back to vX…": asks first (it's a downgrade — Android removes the app first — and the app is held after). */
+    fun askRollBack(app: CatalogApp, tag: String) {
+        if (blockedByLock()) return
+        val installed = _state.value.statuses.firstOrNull { it.app.id == app.id }?.installedVersion ?: return
+        _state.update {
+            it.copy(sheetFor = null, confirmReinstall = ReinstallRequest(
+                app, tag, VersionCompare.norm(tag), installed, ReinstallRequest.Kind.ROLL_BACK,
+                needsRemoval = PreviousVersion.needsRemoval(installed, tag),
+            ))
+        }
+    }
+
+    /** "Install version…": the app's releases with an Android build, newest first. */
+    fun showVersions(app: CatalogApp) {
+        if (blockedByLock()) return
+        val installed = _state.value.statuses.firstOrNull { it.app.id == app.id }?.installedVersion
+        _state.update { it.copy(sheetFor = null, versions = VersionsSheet(app, installed)) }
+        loadReleases(app) { list, error ->
+            _state.update { s ->
+                val sheet = s.versions?.takeIf { it.app.id == app.id } ?: return@update s
+                val offered = list?.let { PreviousVersion.installable(app, it) }.orEmpty()
+                s.copy(versions = sheet.copy(
+                    loading = false, releases = offered,
+                    message = when {
+                        error != null -> UserMessage.of(error)
+                        offered.isEmpty() -> "No release of ${app.name} has an Android build yet."
+                        else -> null
+                    },
+                ))
+            }
+        }
+    }
+
+    fun closeVersions() = _state.update { it.copy(versions = null) }
+
+    /**
+     * A version picked from "Install version". The only install that may go ahead without a signed checksum list (an
+     * old release that predates it); its certificate is still checked. An older version than the one installed asks
+     * first, as Android needs the app removed before it can go back.
+     */
+    fun pickVersion(app: CatalogApp, tag: String) {
+        _state.update { it.copy(versions = null) }
+        if (blockedByLock()) return
+        val installed = _state.value.statuses.firstOrNull { it.app.id == app.id }?.installedVersion
+        if (PreviousVersion.needsRemoval(installed, tag)) {
+            _state.update {
+                it.copy(confirmReinstall = ReinstallRequest(
+                    app, tag, VersionCompare.norm(tag), installed, ReinstallRequest.Kind.PICKED, needsRemoval = true,
+                ))
+            }
+        } else {
+            startInstall(app, tag, lenient = true)
+        }
+    }
+
+    fun cancelReinstall() = _state.update { it.copy(confirmReinstall = null) }
+
+    /** The confirm sheet's go-ahead: remove first when Android needs it, then install; a roll back is then held. */
+    fun confirmReinstall(request: ReinstallRequest) {
+        _state.update { it.copy(confirmReinstall = null) }
+        if (blockedByLock()) return
+        val lenient = request.kind == ReinstallRequest.Kind.PICKED
+        val after: (() -> Unit)? = if (request.kind != ReinstallRequest.Kind.ROLL_BACK) null else { { holdAfterRollBack(request) } }
+        if (request.needsRemoval) removeThenInstall(request.app, request.tag, request.from, lenient, after)
+        else startInstall(request.app, request.tag, lenient, afterInstalled = after)
+    }
+
+    /** Rolled back: held at that version so Update all and automatic updates leave it alone (the desktop behaviour). */
+    private fun holdAfterRollBack(request: ReinstallRequest) = viewModelScope.launch {
+        val now = withContext(Dispatchers.IO) { repo.installedVersionFor(request.app.id) } ?: return@launch
+        if (!VersionCompare.equal(now, request.target)) return@launch
+        if (request.app.id !in repo.settings.heldApps) repo.settings.heldApps = repo.settings.heldApps + request.app.id
+        AppLog.get(getApplication()).log("rolled back ${request.app.id} to ${request.target} (held)")
+        _state.update { s ->
+            s.copy(
+                statuses = s.statuses.map { if (it.app.id == request.app.id) it.copy(held = true) else it },
+                snackbar = "${request.app.name} rolled back to ${VersionCompare.display(request.target)} and held there",
+            )
+        }
+        refreshInstalledOnly()
     }
 
     /**
-     * Replace an installed dev build with the release. Android refuses to install an OLDER version over a
-     * newer one, so the app is removed first (the system asks to confirm), then the release installs as soon
-     * as the package is gone. Gives up quietly if the removal is cancelled.
+     * Android refuses to install an OLDER version over a newer one, so the app is removed first (the system asks to
+     * confirm), then [tag] installs as soon as the package is gone. Gives up quietly if the removal is cancelled.
      */
-    fun backToRelease(app: CatalogApp) {
-        _state.update { it.copy(confirmBackToRelease = null) }
-        if (blockedByLock()) return
+    private fun removeThenInstall(app: CatalogApp, tag: String?, from: String?, lenient: Boolean, afterInstalled: (() -> Unit)?) {
         if (!repo.canRequestInstalls()) {
             _state.update { it.copy(snackbar = "Allow JB Theatre Tools to install apps, then try again.") }
             repo.openInstallPermissionSettings()
             return
         }
-        val version = _state.value.statuses.firstOrNull { it.app.id == app.id }?.installedVersion
-        synchronized(pendingRemovals) { pendingRemovals[app.id] = version }
+        synchronized(pendingRemovals) { pendingRemovals[app.id] = from }
         repo.remove(app.id)
         viewModelScope.launch {
             for (i in 0 until 240) {                     // up to 2 minutes for the system uninstall dialog
@@ -886,10 +1203,10 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             }
             refreshInstalledOnly()
             if (withContext(Dispatchers.IO) { repo.isInstalled(app.id) }) {
-                _state.update { it.copy(snackbar = "${app.name} was not removed, so it's still on the dev build") }
+                _state.update { it.copy(snackbar = "${app.name} was not removed, so it's still at ${from?.let(VersionCompare::display) ?: "its version"}") }
                 return@launch
             }
-            install(app)
+            startInstall(app, tag, lenient, replacing = from, afterInstalled = afterInstalled)
         }
     }
 

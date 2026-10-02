@@ -25,14 +25,21 @@ The same features on every launcher (the few that don't apply to Android are mar
 - **Release notes in the launcher** — every release of an app, newest first, with its date and notes;
   releases newer than yours are marked "New since your version".
 - **Download sizes and release dates** — each row shows how old the latest release is and how big its
-  download is, and Update All / Download All show the total download.
+  download is, and Update All / Download All show the total download. On Android the Updates tab has
+  "Update all" and "Install every app" (every app not installed yet, plus the pending updates), each with its
+  count and total download; first installs show Android's own install dialog for each app.
 - **Hold an app at its version** — Update All, automatic updates and update notifications leave a held app
   alone (it shows "Held" instead of "Update") until the hold is released.
 - **Show lock** — for show time: installs, updates, roll backs, uninstalls and imports are paused, and so are
   scheduled checks and automatic updates, while launching still works (⌘L / Ctrl+L). Turning it off asks
   first. The command line honours it too.
-- **One-click roll back** *(desktop)* — go back to the version you had before the last update; the app is
-  then held there.
+- **One-click roll back** — go back to the version you had before the last update; the app is
+  then held there. **Install version** picks any older release. Android can't install an older version over a
+  newer one, so there the app is removed first (asked first — its saved settings on the device are reset) and the
+  older version installs straight after.
+- **Arrange the list** — pin apps to the top, hide apps from the list (Show hidden apps brings them back), move
+  apps up or down within their section (Reset app order undoes it), fold sections and move them, and choose a list
+  or grid view. On Android it's all in each app's details (tap or long-press) and on the section headings.
 - **Activity history** — installs, updates, downgrades, uninstalls and failures, newest first, with times
   (⌘Y on macOS, Ctrl+H on Windows).
 - **Export / import a setup** — save which apps (and editions) are installed, their versions, holds and

@@ -118,6 +118,36 @@ class Settings(context: Context) {
         get() = prefs.getString(KEY_RECENT, "").orEmpty().split(',').filter { it.isNotBlank() }
         set(value) = prefs.edit().putString(KEY_RECENT, value.take(8).joinToString(",")).apply()
 
+    // ── List layout (pins, hidden, order, sections, view) and roll back ──
+
+    /** The version each app had before its last install changed it (the one-click Roll back's target). */
+    fun previousVersion(catalogId: String): String? = prefs.getString(KEY_PREVIOUS_PREFIX + catalogId, null)
+
+    fun setPreviousVersion(catalogId: String, version: String?) =
+        prefs.edit().apply { if (version == null) remove(KEY_PREVIOUS_PREFIX + catalogId) else putString(KEY_PREVIOUS_PREFIX + catalogId, version) }.apply()
+
+    /** Pinned apps, hidden apps, the saved app and section order and the collapsed sections. */
+    var layout: LayoutPrefs
+        get() = LayoutPrefs(
+            pinned = list(KEY_PINNED), hidden = list(KEY_HIDDEN).toSet(), order = list(KEY_ORDER),
+            categoryOrder = list(KEY_CATEGORY_ORDER), collapsed = list(KEY_COLLAPSED).toSet(),
+        )
+        set(value) = prefs.edit()
+            .putString(KEY_PINNED, value.pinned.joinToString("\n"))
+            .putString(KEY_HIDDEN, value.hidden.sorted().joinToString("\n"))
+            .putString(KEY_ORDER, value.order.joinToString("\n"))
+            .putString(KEY_CATEGORY_ORDER, value.categoryOrder.joinToString("\n"))
+            .putString(KEY_COLLAPSED, value.collapsed.sorted().joinToString("\n"))
+            .apply()
+
+    /** Phones and small tablets: the Apps tab as a grid of tiles (the default) or a list of rows. */
+    var listView: Boolean
+        get() = prefs.getBoolean(KEY_LIST_VIEW, false)
+        set(value) = prefs.edit().putBoolean(KEY_LIST_VIEW, value).apply()
+
+    private fun list(key: String): List<String> =
+        prefs.getString(key, "").orEmpty().split('\n').filter { it.isNotBlank() }
+
     var firstRunDone: Boolean
         get() = prefs.getBoolean(KEY_FIRST_RUN_DONE, false)
         set(value) = prefs.edit().putBoolean(KEY_FIRST_RUN_DONE, value).apply()
@@ -139,5 +169,12 @@ class Settings(context: Context) {
         const val KEY_NOTIFIED = "notified-updates"
         const val KEY_LAST_SEEN = "last-seen-launcher-version"
         const val KEY_RECENT = "recent-opens"
+        const val KEY_PREVIOUS_PREFIX = "previous-version:"
+        const val KEY_PINNED = "layout-pinned"
+        const val KEY_HIDDEN = "layout-hidden"
+        const val KEY_ORDER = "layout-order"
+        const val KEY_CATEGORY_ORDER = "layout-category-order"
+        const val KEY_COLLAPSED = "layout-collapsed"
+        const val KEY_LIST_VIEW = "list-view"
     }
 }

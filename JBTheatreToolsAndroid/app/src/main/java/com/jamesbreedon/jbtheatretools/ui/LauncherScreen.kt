@@ -36,7 +36,10 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
@@ -70,6 +73,9 @@ import com.jamesbreedon.jbtheatretools.core.ByteSize
 import com.jamesbreedon.jbtheatretools.core.InstallProgress
 import com.jamesbreedon.jbtheatretools.core.RelativeAge
 import com.jamesbreedon.jbtheatretools.core.ReleaseNotesText
+import com.jamesbreedon.jbtheatretools.core.RowText
+import com.jamesbreedon.jbtheatretools.core.PreviousVersion
+import com.jamesbreedon.jbtheatretools.core.AppLayout
 import com.jamesbreedon.jbtheatretools.core.SetupProfile
 import com.jamesbreedon.jbtheatretools.core.StatusFilter
 import com.jamesbreedon.jbtheatretools.core.VersionCompare
@@ -143,10 +149,20 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
                             Modifier.padding(start = gutter, end = gutter, top = 10.dp).fillMaxWidth(),
                             role = Role.Tab,
                         )
+                        if (state.filtering) {
+                            // "3 of 24 apps" while the search or a status filter narrows the list (the desktop count).
+                            SmallText(
+                                state.countLabel(), Modifier.padding(start = gutter, end = gutter, top = 8.dp),
+                                color = c.text2, weight = FontWeight.Medium,
+                            )
+                        }
                         Box(Modifier.weight(1f).fillMaxWidth()) {
-                            if (state.visibleStatuses().isEmpty() && AppFilter.isActive(state.search, state.statusFilter)) {
+                            if (state.visibleStatuses().isEmpty() && state.filtering) {
                                 NoMatches()
-                            } else if (expanded) {
+                            } else if (state.visibleStatuses().isEmpty() && state.layout.hidden.isNotEmpty()) {
+                                EverythingHidden(state.layout.hidden.size, vm::showHiddenApps)
+                            } else if (expanded || state.listView) {
+                                // Expanded is always the desktop's grouped list; phones and small tablets choose.
                                 GroupedList(vm, state, gutter)
                             } else {
                                 TileGrid(vm, state, gutter, medium)
@@ -162,21 +178,30 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
 
         // Pinned primary (§3): one per screen, full width, 48 high.
         // While a batch runs its Stop stays here even under show lock (turning the lock on also stops it).
-        if (state.tab == Tab.UPDATES && (state.busyAll || (state.updateCount > 0 && !state.showLock))) {
-            Box(
+        // Update all is the primary; Install every app (the desktop "Download All" → "Install every app") sits under it
+        // while some app with an Android build isn't installed yet — or is the primary itself when nothing needs updating.
+        val offerInstallAll = state.notInstalledCount > 0
+        if (state.tab == Tab.UPDATES && (state.busyAll || ((state.updateCount > 0 || offerInstallAll) && !state.showLock))) {
+            Column(
                 Modifier.fillMaxWidth().background(c.surface)
                     .padding(start = gutter, end = gutter, top = 12.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 if (state.busyAll) {
                     // Stop: the download in flight is cancelled and nothing more starts.
                     SecondaryButton("Stop", Modifier.fillMaxWidth(), onClick = vm::stopAll)
                 } else {
-                    val size = state.updateBytes
-                    PrimaryButton(
-                        text = "Update all (${state.updateCount})" + if (size > 0) " · ${ByteSize.format(size)}" else "",
-                        modifier = Modifier.fillMaxWidth(),
-                        onClick = vm::updateAll,
-                    )
+                    val installAllLabel = RowText.batchLabel("Install every app", state.installAllWork.size, state.installAllBytes)
+                    if (state.updateCount > 0) {
+                        PrimaryButton(
+                            text = RowText.batchLabel("Update all", state.updateCount, state.updateBytes),
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = vm::updateAll,
+                        )
+                        if (offerInstallAll) SecondaryButton(installAllLabel, Modifier.fillMaxWidth(), onClick = vm::installAll)
+                    } else {
+                        PrimaryButton(installAllLabel, Modifier.fillMaxWidth(), onClick = vm::installAll)
+                    }
                 }
             }
         }
@@ -188,7 +213,8 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
         }
     }
 
-    // Long-press actions (§7): Open / Update / Hold / Release notes / Remove, plus the app's details.
+    // Long-press actions (§7): Open / Update / Hold / Release notes / Remove, plus the app's details, the other versions
+    // (Install version, Roll back) and its place in the list (Pin to top, Move up/down, Hide from list).
     state.sheetFor?.let { app ->
         val status = state.statuses.firstOrNull { it.app.id == app.id }
         val progress = state.progress[app.id]
@@ -196,13 +222,17 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
         val details by produceState<Pair<Long, Long>?>(null, app.id, status?.installedVersion) {
             value = withContext(Dispatchers.IO) { vm.repo.installedDetails(app.id) }
         }
+        val previous = state.previousVersions[app.id]
+        val rollback = status?.let {
+            PreviousVersion.rollbackTag(app, it.installedVersion, previous, state.appReleases[app.id].orEmpty(), state.devChannel)
+        }
         ModalBottomSheet(
             onDismissRequest = { vm.showSheet(null) },
             containerColor = c.raised,
             shape = RoundedCornerShape(topStart = Radii.window, topEnd = Radii.window),
             sheetState = rememberModalBottomSheetState(),
         ) {
-            Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     AppIconTile(app.id, app.name, 40.dp)
                     HSpace(12.dp)
@@ -214,6 +244,9 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
                 VSpace(10.dp)
                 if (status?.isInstalled == true) {
                     SmallText(installedLine(status.installedVersion!!, details), color = c.text2, weight = FontWeight.Normal)
+                    if (previous != null && !VersionCompare.equal(previous, status.installedVersion)) {
+                        SmallText("Previous version ${VersionCompare.display(previous)}", color = c.text2, weight = FontWeight.Normal)
+                    }
                     if (status.held && status.hasUpdate) {
                         SmallText(
                             "v${status.latestVersion} is available — held at v${status.installedVersion}",
@@ -249,14 +282,75 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
                     VSpace(10.dp)
                 }
                 SecondaryButton("Release notes", Modifier.fillMaxWidth()) { vm.showReleaseNotes(app) }
+                if (!state.showLock && status != null && state.signedIn && progress?.isActive != true) {
+                    VSpace(10.dp)
+                    SecondaryButton("Install version…", Modifier.fillMaxWidth()) { vm.showVersions(app) }
+                    if (rollback != null) {
+                        VSpace(10.dp)
+                        SecondaryButton("Roll back to ${VersionCompare.display(rollback)}…", Modifier.fillMaxWidth()) {
+                            vm.askRollBack(app, rollback)
+                        }
+                    }
+                }
                 if (status?.isInstalled == true) {
                     VSpace(10.dp)
                     SecondaryButton(if (status.held) "Release hold" else "Hold at this version", Modifier.fillMaxWidth()) {
                         vm.toggleHold(app)
                     }
-                    if (!state.showLock) {
-                        VSpace(10.dp)
-                        GhostButton("Remove", Modifier.fillMaxWidth()) { vm.askRemove(app) }
+                }
+                // The app's place in the list (per device). Reordering pauses while a search or filter is on.
+                VSpace(18.dp)
+                LabelText("In the list")
+                VSpace(8.dp)
+                val pinned = app.id in state.layout.pinned
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SecondaryButton("Move up", Modifier.weight(1f), enabled = state.canMove(app.id, true)) { vm.moveApp(app, true) }
+                    SecondaryButton("Move down", Modifier.weight(1f), enabled = state.canMove(app.id, false)) { vm.moveApp(app, false) }
+                }
+                if (state.filtering) {
+                    VSpace(6.dp)
+                    SmallText("Clear the search and filter to reorder.", color = c.text3, weight = FontWeight.Normal, maxLines = 2)
+                }
+                VSpace(10.dp)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SecondaryButton(if (pinned) "Unpin from top" else "Pin to top", Modifier.weight(1f)) { vm.togglePin(app) }
+                    SecondaryButton("Hide from list", Modifier.weight(1f)) { vm.hideApp(app) }
+                }
+                if (status?.isInstalled == true && !state.showLock) {
+                    VSpace(10.dp)
+                    GhostButton("Remove", Modifier.fillMaxWidth()) { vm.askRemove(app) }
+                }
+            }
+        }
+    }
+
+    // "Install version": every release with an Android build, newest first.
+    state.versions?.let { sheet -> VersionsSheet(sheet, vm) }
+
+    // Long-press on a section header: fold it, or move it up / down (Pinned always stays first).
+    state.sectionSheet?.let { key ->
+        val keys = state.groups().map { it.first.key }.filter { it != AppLayout.PINNED_KEY }
+        val title = if (key == AppLayout.PINNED_KEY) "Pinned" else key
+        ModalBottomSheet(
+            onDismissRequest = { vm.showSectionSheet(null) },
+            containerColor = c.raised,
+            shape = RoundedCornerShape(topStart = Radii.window, topEnd = Radii.window),
+            sheetState = rememberModalBottomSheetState(),
+        ) {
+            Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
+                TitleText(title)
+                VSpace(12.dp)
+                SecondaryButton(if (key in state.layout.collapsed) "Expand section" else "Collapse section", Modifier.fillMaxWidth()) {
+                    vm.toggleSection(key)
+                }
+                if (key != AppLayout.PINNED_KEY) {
+                    VSpace(10.dp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        val i = keys.indexOf(key)
+                        SecondaryButton("Move section up", Modifier.weight(1f), enabled = !state.filtering && i > 0) { vm.moveSection(key, true) }
+                        SecondaryButton("Move section down", Modifier.weight(1f), enabled = !state.filtering && i in 0 until keys.size - 1) {
+                            vm.moveSection(key, false)
+                        }
                     }
                 }
             }
@@ -279,6 +373,14 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
                 // Install / Cancel off a small screen.
                 Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
                     BodyText(preview.summary, color = c.text, maxLines = Int.MAX_VALUE)
+                }
+                if (preview.layout != null) {
+                    // The desktop launchers' choice, word for word: the file's layout replaces this device's only if asked.
+                    VSpace(12.dp)
+                    CheckRow(
+                        "Also use this file's list layout (pinned, hidden and order of apps and sections)",
+                        preview.applyLayout, vm::setImportApplyLayout,
+                    )
                 }
                 VSpace(16.dp)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -310,25 +412,45 @@ fun LauncherScreen(vm: LauncherViewModel, widthClass: WindowWidthSizeClass) {
         }
     }
 
-    state.confirmBackToRelease?.let { app ->
+    // Another version of an installed app: Back to release, Roll back, or an older pick from Install version.
+    state.confirmReinstall?.let { request ->
+        val name = request.app.name
+        val to = VersionCompare.display(request.target)
+        val from = request.from?.let(VersionCompare::display)
         ModalBottomSheet(
-            onDismissRequest = { vm.askBackToRelease(null) },
+            onDismissRequest = vm::cancelReinstall,
             containerColor = c.raised,
             shape = RoundedCornerShape(topStart = Radii.window, topEnd = Radii.window),
             sheetState = rememberModalBottomSheetState(),
         ) {
             Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
-                TitleText("Back to the release of ${app.name}?")
-                VSpace(6.dp)
-                BodyText(
-                    "Android can't install an older version over a newer one, so the development build is removed " +
-                        "first and the release installs straight after. The app's saved settings on this device are reset.",
-                    maxLines = Int.MAX_VALUE,
+                TitleText(
+                    when (request.kind) {
+                        ReinstallRequest.Kind.BACK_TO_RELEASE -> "Back to the release of $name?"
+                        ReinstallRequest.Kind.ROLL_BACK -> if (from != null) "Roll $name back from $from to $to?" else "Roll $name back to $to?"
+                        ReinstallRequest.Kind.PICKED -> "Install $name $to?"
+                    },
+                    maxLines = 3,
                 )
+                VSpace(6.dp)
+                val removal = if (!request.needsRemoval) "" else when (request.kind) {
+                    ReinstallRequest.Kind.BACK_TO_RELEASE ->
+                        "Android can't install an older version over a newer one, so the development build is removed " +
+                            "first and the release installs straight after. The app's saved settings on this device are reset."
+                    else ->
+                        "Android can't install an older version over a newer one, so ${from ?: "the installed version"} is removed " +
+                            "first and $to installs straight after. The app's saved settings on this device are reset."
+                }
+                val hold = if (request.kind == ReinstallRequest.Kind.ROLL_BACK)
+                    "It's then held at that version, so Update all and automatic updates leave it alone — release the hold " +
+                        "from its details when you're ready."
+                else ""
+                BodyText(listOf(removal, hold).filter { it.isNotEmpty() }.joinToString("\n\n"), maxLines = Int.MAX_VALUE)
                 VSpace(16.dp)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    SecondaryButton("Cancel", Modifier.weight(1f)) { vm.askBackToRelease(null) }
-                    DangerButton("Remove and reinstall", Modifier.weight(1f)) { vm.backToRelease(app) }
+                    SecondaryButton("Cancel", Modifier.weight(1f), onClick = vm::cancelReinstall)
+                    if (request.needsRemoval) DangerButton("Remove and reinstall", Modifier.weight(1f)) { vm.confirmReinstall(request) }
+                    else PrimaryButton("Roll back", Modifier.weight(1f)) { vm.confirmReinstall(request) }
                 }
             }
         }
@@ -586,7 +708,10 @@ private fun SidebarItem(
 
 // ── the three destinations ──────────────────────────────────────────────────
 
-/** §7: 3-column glyph-tile grid, name 12/500, mono version under it, long-press = actions. */
+/**
+ * §7: 3-column glyph-tile grid, name 12/500, mono version under it, long-press = actions — in the list's sections
+ * (Pinned first, then each category), each one folding from its header.
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun TileGrid(
@@ -595,18 +720,35 @@ private fun TileGrid(
     gutter: androidx.compose.ui.unit.Dp,
     medium: Boolean,
 ) {
-    val items = state.visibleStatuses()
+    val groups = state.groups()
+    val gridState = rememberLazyGridState()
+    // A lazy grid keeps the first item on screen in place, so a newly pinned app would land in a Pinned section
+    // scrolled off the top: show it.
+    ScrollToTopOnNewPin(state.layout.pinned) { gridState.scrollToItem(0) }
     LazyVerticalGrid(
         columns = if (medium) GridCells.Adaptive(112.dp) else GridCells.Fixed(3),
         modifier = Modifier.fillMaxSize(),
+        state = gridState,
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
-            start = gutter, end = gutter, top = 16.dp, bottom = 24.dp,
+            start = gutter, end = gutter, top = 8.dp, bottom = 24.dp,
         ),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        items(items, key = { it.app.id }) { status ->
-            AppTile(status, state.progress[status.app.id], vm)
+        for ((group, rows) in groups) {
+            val collapsed = state.isCollapsed(group.key)
+            item(key = "header-${group.key}", span = { GridItemSpan(maxLineSpan) }) {
+                CollapsibleSectionHeader(
+                    group.title, rows.size, collapsed,
+                    onToggle = { vm.toggleSection(group.key) },
+                    onLongPress = { vm.showSectionSheet(group.key) },
+                )
+            }
+            if (!collapsed) {
+                items(rows, key = { it.app.id }) { status ->
+                    AppTile(status, state.progress[status.app.id], vm)
+                }
+            }
         }
     }
 }
@@ -658,31 +800,33 @@ private fun AppTile(status: AppStatus, progress: InstallProgress?, vm: LauncherV
     }
 }
 
-/** Expanded: the desktop launcher's grouped list (§7). */
+/** Expanded (and the List view on a phone): the desktop launcher's grouped list (§7) — Pinned first, sections fold. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun GroupedList(vm: LauncherViewModel, state: LauncherUiState, gutter: androidx.compose.ui.unit.Dp) {
-    val visible = state.visibleStatuses()
-    val categories = vm.repo.catalog.orderedCategories()
+    val groups = state.groups()
+    val listState = rememberLazyListState()
+    ScrollToTopOnNewPin(state.layout.pinned) { listState.scrollToItem(0) }
     LazyColumn(
         Modifier.fillMaxSize(),
+        state = listState,
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
-            start = gutter, end = gutter, top = 8.dp, bottom = 24.dp,
+            start = gutter, end = gutter, top = 4.dp, bottom = 24.dp,
         ),
     ) {
-        categories.forEach { category ->
-            val rows = visible.filter { it.app.category == category }
-            if (rows.isEmpty()) return@forEach
-            item(key = "header-$category") { SectionHeader(category) }
-            items(rows, key = { it.app.id }) { status ->
-                AppRow(status, state.progress[status.app.id], vm, state.showLock)
+        for ((group, rows) in groups) {
+            val collapsed = state.isCollapsed(group.key)
+            item(key = "header-${group.key}") {
+                CollapsibleSectionHeader(
+                    group.title, rows.size, collapsed,
+                    onToggle = { vm.toggleSection(group.key) },
+                    onLongPress = { vm.showSectionSheet(group.key) },
+                )
             }
-        }
-        val uncategorised = visible.filter { it.app.category == null }
-        if (uncategorised.isNotEmpty()) {
-            item(key = "header-other") { SectionHeader("Other") }
-            items(uncategorised, key = { it.app.id }) { status ->
-                AppRow(status, state.progress[status.app.id], vm, state.showLock)
+            if (!collapsed) {
+                items(rows, key = { it.app.id }) { status ->
+                    AppRow(status, state.progress[status.app.id], vm, state.showLock)
+                }
             }
         }
     }
@@ -709,6 +853,13 @@ private fun AppRow(status: AppStatus, progress: InstallProgress?, vm: LauncherVi
             Column(Modifier.weight(1f)) {
                 TitleText(status.app.name)
                 BodyText(status.app.blurb, maxLines = 1)
+                // An update or an app not installed yet: the desktop row's "Latest: v1.2.0 (3 days ago) · 22 MB".
+                if (status.latestVersion != null && status.canInstall && (status.updatePending || !status.isInstalled)) {
+                    SmallText(
+                        RowText.latestLine(status.latestVersion, status.latestPublished, status.apkSizeBytes, Instant.now()),
+                        color = c.text2, weight = FontWeight.Normal, maxLines = 2,
+                    )
+                }
                 status.whatsNew?.let { line ->
                     SmallText(
                         (status.whatsNewVersion?.let { "New in $it: " } ?: "") + line,
@@ -738,17 +889,15 @@ private fun AppRow(status: AppStatus, progress: InstallProgress?, vm: LauncherVi
                     }
 
                     status.canInstall -> {
-                        MonoText(
-                            "v${status.latestVersion}" + if (status.apkSizeBytes > 0) " · ${ByteSize.format(status.apkSizeBytes)}" else "",
-                            color = c.text3,
-                        )
                         if (!locked) {
-                            VSpace(6.dp)
                             SecondaryButton("Install", Modifier.width(120.dp), enabled = !busy) { vm.install(status.app) }
+                        } else {
+                            MonoText("v${status.latestVersion}", color = c.text3)
                         }
                     }
 
-                    else -> SmallText(status.note ?: "No release", color = c.text3, weight = FontWeight.Normal, maxLines = 3)
+                    // Kept narrow: an unbounded line (an offline check's error) would squeeze the app's name out.
+                    else -> SmallText(status.note ?: "No release", Modifier.widthIn(max = 160.dp), color = c.text3, weight = FontWeight.Normal, maxLines = 3)
                 }
                 if (status.isDev) {
                     VSpace(4.dp)
@@ -805,7 +954,7 @@ private fun UpdatesList(vm: LauncherViewModel, state: LauncherUiState, gutter: a
                     TitleText(if (held.isEmpty()) "Everything is up to date" else "No updates to install", maxLines = 2)
                     VSpace(4.dp)
                     BodyText(
-                        if (held.isEmpty()) "${state.installedCount} apps installed"
+                        if (held.isEmpty()) "${state.installedCount} app${if (state.installedCount == 1) "" else "s"} installed"
                         else "Held apps stay at their version until you release the hold.",
                         maxLines = Int.MAX_VALUE,
                     )
@@ -926,6 +1075,31 @@ private fun AboutScreen(vm: LauncherViewModel, state: LauncherUiState, gutter: a
                         },
                         Modifier.fillMaxWidth(),
                     )
+                }
+            }
+            VSpace(12.dp)
+        }
+        item {
+            // The Apps tab's arrangement on this device: view, hidden apps, order.
+            Panel(Modifier.fillMaxWidth()) {
+                Column {
+                    LabelText("App list")
+                    VSpace(8.dp)
+                    Segmented(listOf("Grid", "List"), if (state.listView) 1 else 0, { vm.setListView(it == 1) }, Modifier.fillMaxWidth())
+                    VSpace(8.dp)
+                    BodyText(
+                        "Long-press an app to pin it to the top, move it up or down, or hide it from the list; tap a " +
+                            "section's heading to fold it, long-press it to move it. Wide screens always show the list.",
+                        maxLines = Int.MAX_VALUE,
+                    )
+                    VSpace(12.dp)
+                    val hidden = state.layout.hidden.size
+                    SecondaryButton(
+                        if (hidden > 0) "Show hidden apps ($hidden)" else "Show hidden apps", Modifier.fillMaxWidth(),
+                        enabled = hidden > 0, onClick = vm::showHiddenApps,
+                    )
+                    VSpace(10.dp)
+                    SecondaryButton("Reset app order", Modifier.fillMaxWidth(), enabled = state.layout.order.isNotEmpty(), onClick = vm::resetAppOrder)
                 }
             }
             VSpace(12.dp)
@@ -1327,5 +1501,101 @@ private fun AboutV130Panels(vm: LauncherViewModel, state: LauncherUiState) {
             }
         }
         VSpace(12.dp)
+    }
+}
+
+/** A tickable line (the desktop's checkbox): the box shows the accent with a tick when on; the whole row toggles. */
+@Composable
+private fun CheckRow(text: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    val c = House.colors
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = Metrics.touchTarget).clip(RoundedCornerShape(Radii.control))
+            .clickable(role = Role.Checkbox) { onChange(!checked) }
+            .semantics { contentDescription = text + if (checked) ", ticked" else ", not ticked" }
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(22.dp).clip(RoundedCornerShape(6.dp))
+                .background(if (checked) c.accent else c.surface)
+                .border(1.dp, if (checked) c.accent else c.lineStrong, RoundedCornerShape(6.dp)),
+            contentAlignment = Alignment.Center,
+        ) { if (checked) Glyph(HouseIcons.Check, 16.dp, c.onAccent) }
+        HSpace(12.dp)
+        BodyText(text, Modifier.weight(1f), color = c.text, maxLines = Int.MAX_VALUE)
+    }
+}
+
+/** Every app the list would show is hidden: say so, with the way back. */
+@Composable
+private fun EverythingHidden(count: Int, onShow: () -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().padding(top = 48.dp, start = 24.dp, end = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        TitleText("Every app is hidden", maxLines = 2)
+        VSpace(4.dp)
+        BodyText("Hidden apps stay installed; they're just left out of this list.", maxLines = 3)
+        VSpace(12.dp)
+        SecondaryButton("Show hidden apps ($count)", Modifier.width(240.dp), onClick = onShow)
+    }
+}
+
+/** "Install version": the app's releases with an Android build, newest first; the installed one is marked. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VersionsSheet(sheet: VersionsSheet, vm: LauncherViewModel) {
+    val c = House.colors
+    ModalBottomSheet(
+        onDismissRequest = vm::closeVersions,
+        containerColor = c.raised,
+        shape = RoundedCornerShape(topStart = Radii.window, topEnd = Radii.window),
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        LazyColumn(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
+            item {
+                TitleText("${sheet.app.name} — install version", maxLines = 2)
+                VSpace(6.dp)
+                BodyText(
+                    "An older version than the one installed means removing the app first — Android can't install it " +
+                        "over a newer one. It isn't held: Update all updates it again unless you hold it.",
+                    maxLines = Int.MAX_VALUE,
+                )
+                VSpace(12.dp)
+            }
+            if (sheet.loading) item { BodyText("Loading the releases…") }
+            sheet.message?.let { msg -> item { BodyText(msg, color = c.text, maxLines = 5) } }
+            val now = Instant.now()
+            items(sheet.releases, key = { it.tagName }) { r ->
+                val installed = sheet.installed != null && VersionCompare.equal(r.tagName, sheet.installed)
+                val meta = mutableListOf<String>()
+                RelativeAge.parseIso(r.publishedAt)?.let { meta.add(RelativeAge.describe(it, now)) }
+                if (r.prerelease) meta.add(if (VersionCompare.isDev(r.tagName)) "development build" else "pre-release")
+                if (installed) meta.add("✓ installed")
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = Metrics.touchTargetPreferred)
+                        .clip(RoundedCornerShape(Radii.control))
+                        .clickable { vm.pickVersion(sheet.app, r.tagName) }
+                        .padding(horizontal = 4.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    MonoText(VersionCompare.display(r.tagName), color = c.text, size = HouseType.bodySize)
+                    HSpace(12.dp)
+                    SmallText(meta.joinToString(" · "), Modifier.weight(1f), color = c.text2, weight = FontWeight.Normal)
+                }
+                Divider()
+            }
+            item { VSpace(28.dp) }
+        }
+    }
+}
+
+/** Runs [scrollToTop] when an app is pinned (not on the first showing, not on an unpin). */
+@Composable
+private fun ScrollToTopOnNewPin(pinned: List<String>, scrollToTop: suspend () -> Unit) {
+    val seen = remember { mutableListOf<String>().apply { addAll(pinned) } }
+    LaunchedEffect(pinned) {
+        if (pinned.any { it !in seen }) scrollToTop()
+        seen.clear(); seen.addAll(pinned)
     }
 }

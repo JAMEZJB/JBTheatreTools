@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -417,5 +419,37 @@ fun HSpace(width: Dp) = Spacer(Modifier.width(width))
 fun SectionHeader(text: String, modifier: Modifier = Modifier) {
     Column(modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp)) {
         LabelText(text)
+    }
+}
+
+/**
+ * A list section's header that folds: tap toggles it (the chevron points down when open), long-press offers the
+ * section's actions. The count shows how many apps the section holds — useful when it's folded.
+ */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+fun CollapsibleSectionHeader(
+    text: String,
+    count: Int,
+    collapsed: Boolean,
+    onToggle: () -> Unit,
+    onLongPress: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) {
+    val c = House.colors
+    Row(
+        modifier.fillMaxWidth().padding(top = 8.dp)
+            .heightIn(min = Metrics.touchTarget)
+            .clip(RoundedCornerShape(Radii.control))
+            .combinedClickable(onClick = onToggle, onLongClick = onLongPress)
+            .semantics {
+                contentDescription = "$text, $count app${if (count == 1) "" else "s"}, " + if (collapsed) "folded" else "open"
+            },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Glyph(if (collapsed) HouseIcons.ChevronRight else HouseIcons.ChevronDown, 16.dp, c.text3)
+        HSpace(6.dp)
+        LabelText(text, Modifier.weight(1f))
+        if (collapsed) MonoText("$count", color = c.text3)
     }
 }
