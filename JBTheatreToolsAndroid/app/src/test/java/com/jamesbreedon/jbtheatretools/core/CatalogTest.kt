@@ -21,7 +21,7 @@ class CatalogTest {
 
     @Test fun parsesEveryApp() {
         assertEquals(1, catalog.schemaVersion)
-        assertEquals(25, catalog.apps.size)
+        assertEquals(26, catalog.apps.size)
         catalog.apps.forEach { app ->
             assertTrue("${app.id} has no name", app.name.isNotBlank())
             assertTrue("${app.id} has no owner", app.owner.isNotBlank())
@@ -34,6 +34,8 @@ class CatalogTest {
         assertTrue(catalog.apps.any { it.id == "stagehand" })
         val phone = catalog.forAndroid()
         assertFalse(phone.apps.any { it.id == "stagehand" })
+        assertTrue(catalog.apps.any { it.id == "driveatlas" })
+        assertFalse(phone.apps.any { it.id == "driveatlas" })   // Drive Atlas is desktop only too
         assertEquals(24, phone.apps.size)
     }
 

@@ -1,6 +1,7 @@
 package com.jamesbreedon.jbtheatretools.core
 
 import android.content.Context
+import android.os.Build
 import com.jamesbreedon.jbtheatretools.BuildConfig
 import com.jamesbreedon.jbtheatretools.install.ApkInstaller
 import com.jamesbreedon.jbtheatretools.install.ApkVerifier
@@ -75,6 +76,8 @@ enum class InstallResult {
     CANCELLED,
     /** That app is already downloading or installing (a second tap, or a batch has it): nothing new started. */
     ALREADY_RUNNING,
+    /** An automatic update Android would only do after asking the person: nothing shown, left for them. */
+    NEEDS_USER,
 }
 
 /**
@@ -287,6 +290,8 @@ class LauncherRepository(private val context: Context) {
         tag: String? = null,
         /** A batch's Stop: cancels this download too, and keeps a queued one from starting. Show lock always does. */
         stop: () -> Boolean = { false },
+        /** An automatic update: no dialogs (see [ApkInstaller.install]). */
+        unattended: Boolean = false,
     ): InstallResult = withContext(Dispatchers.IO) {
         // One install per app at a time: a row's Update and a batch's Update all used to download, verify and
         // delete the SAME cache file concurrently (a spurious failure, and a window where the session could stream
@@ -295,7 +300,7 @@ class LauncherRepository(private val context: Context) {
             log.log("install ${app.id}: already downloading or installing — not started again")
             return@withContext InstallResult.ALREADY_RUNNING
         }
-        try { installOnce(app, onProgress, tag, stop) } finally {
+        try { installOnce(app, onProgress, tag, stop, unattended) } finally {
             ActiveInstalls.running.remove(app.id)
             cancelRequests.remove(app.id)
         }
@@ -327,6 +332,7 @@ class LauncherRepository(private val context: Context) {
         onProgress: (InstallProgress) -> Unit,
         tag: String?,
         stop: () -> Boolean,
+        unattended: Boolean = false,
     ): InstallResult = withContext(Dispatchers.IO) {
         val client = client() ?: run {
             onProgress(InstallProgress(app.id, InstallProgress.Phase.FAILED, message = "Not signed in"))
@@ -388,12 +394,12 @@ class LauncherRepository(private val context: Context) {
             // another's confirm dialog must not go ahead if the lock was switched on while it waited.
             val outcome = sessionMutex.withLock {
                 if (settings.showLock) throw ShowLockedException()
-                var result = installer.install(apk, expectedPackage ?: declared, app.id)
+                var result = installer.install(apk, expectedPackage ?: declared, app.id, unattended)
                 if (result is ApkInstaller.Outcome.Failed && result.detail.contains("VERIFICATION_FAILURE")) {
                     log.log("install ${app.id} ${release.tagName}: verifier busy — retrying once")
                     delay(2_500)
                     if (settings.showLock) throw ShowLockedException()
-                    result = installer.install(apk, expectedPackage ?: declared, app.id)
+                    result = installer.install(apk, expectedPackage ?: declared, app.id, unattended)
                 }
                 result
             }
@@ -404,6 +410,12 @@ class LauncherRepository(private val context: Context) {
                     addHistory(app.id, app.name, ActivityHistory.actionFor(before, release.tagName), before, release.tagName)
                     onProgress(InstallProgress(app.id, InstallProgress.Phase.DONE, 1.0))
                     InstallResult.INSTALLED
+                }
+                is ApkInstaller.Outcome.NeedsUser -> {
+                    // Automatic update: Android would have asked. Nothing was shown; the row keeps its Update button.
+                    log.log("install ${app.id} ${release.tagName}: automatic update needs your OK — left for later")
+                    onProgress(InstallProgress(app.id, InstallProgress.Phase.CANCELLED))
+                    InstallResult.NEEDS_USER
                 }
                 is ApkInstaller.Outcome.Cancelled -> {
                     // The system's install dialog was cancelled: recorded as cancelled, never as a failure.
@@ -538,6 +550,41 @@ class LauncherRepository(private val context: Context) {
             }
         }
         return BatchCount(done, attempted)
+    }
+
+    /** What an automatic update run did: [updated] (name, version) and the apps Android would only update after asking. */
+    data class AutoUpdateResult(val updated: List<Pair<String, String>>, val needsUser: List<String>)
+
+    /**
+     * Automatic updates (Android 12+, "Install updates automatically"): every pending, non-held update, installed with
+     * no dialogs — Android allows that for apps this launcher installed. Never under show lock (checked per app, and
+     * again inside the session lock). One that Android would only do after asking is left for the person; so is the
+     * rest of the run once that happens (they'd ask too). Never touches an app already installing.
+     */
+    suspend fun autoUpdate(
+        statuses: List<AppStatus>,
+        stop: () -> Boolean = { false },
+        onProgress: (InstallProgress) -> Unit = {},
+    ): AutoUpdateResult {
+        val updated = mutableListOf<Pair<String, String>>()
+        val needsUser = mutableListOf<String>()
+        if (!AutoUpdatePolicy.available(Build.VERSION.SDK_INT) || !settings.autoInstallUpdates) return AutoUpdateResult(updated, needsUser)
+        // Only what's installing right now is skipped — not the queue, which is this very run (the launcher queues it).
+        for (status in AutoUpdatePolicy.candidates(statuses, settings.heldApps, ActiveInstalls.running.toSet())) {
+            if (settings.showLock || !settings.autoInstallUpdates || stop()) break
+            val now = installedVersionFor(status.app.id)
+            if (now == null || (status.latestVersion != null && VersionCompare.equal(now, status.latestVersion))) continue
+            if (needsUser.isNotEmpty()) { needsUser += status.app.name; continue }
+            when (install(status.app, onProgress, stop = stop, unattended = true)) {
+                InstallResult.INSTALLED -> updated += status.app.name to (installedVersionFor(status.app.id) ?: status.latestVersion.orEmpty())
+                InstallResult.NEEDS_USER -> needsUser += status.app.name
+                else -> Unit   // failures are in the history and the log; the next run tries again
+            }
+        }
+        if (updated.isNotEmpty() || needsUser.isNotEmpty()) {
+            log.log("automatic update: ${updated.size} updated" + if (needsUser.isEmpty()) "" else ", ${needsUser.size} need your OK")
+        }
+        return AutoUpdateResult(updated, needsUser)
     }
 
     // ── v1.30: history, release notes, storage, launcher shortcuts ──────────

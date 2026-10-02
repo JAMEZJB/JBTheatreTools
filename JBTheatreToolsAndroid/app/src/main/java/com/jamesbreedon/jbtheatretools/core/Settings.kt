@@ -98,6 +98,11 @@ class Settings(context: Context) {
         get() = prefs.getBoolean(KEY_NOTIFY, false)   // opt-in: no background checks or notifications unless asked
         set(value) = prefs.edit().putBoolean(KEY_NOTIFY, value).apply()
 
+    /** Install updates automatically (Android 12+): see [AutoUpdateScheduler]. Off unless asked for. */
+    var autoInstallUpdates: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_INSTALL, false)
+        set(value) = prefs.edit().putBoolean(KEY_AUTO_INSTALL, value).apply()
+
     /** "id version" keys already announced. */
     var notifiedUpdates: Set<String>
         get() = prefs.getStringSet(KEY_NOTIFIED, null)?.toSet() ?: emptySet()
@@ -130,6 +135,7 @@ class Settings(context: Context) {
         const val KEY_HELD = "held-apps"
         const val KEY_AUTO_CHECK = "auto-check-interval"
         const val KEY_NOTIFY = "notify-updates"
+        const val KEY_AUTO_INSTALL = "auto-install-updates"
         const val KEY_NOTIFIED = "notified-updates"
         const val KEY_LAST_SEEN = "last-seen-launcher-version"
         const val KEY_RECENT = "recent-opens"

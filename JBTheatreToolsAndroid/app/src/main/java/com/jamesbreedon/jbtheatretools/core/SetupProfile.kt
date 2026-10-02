@@ -171,13 +171,13 @@ object SetupPlanner {
     }
 
     /**
-     * How the preview names this platform: the desktop launchers say "machine", "Update All" and mention automatic
-     * updates; Android says "device" and "Update all", and has no automatic updates to mention.
+     * How the preview names this platform: the desktop launchers say "machine" and "Update All"; Android says "device"
+     * and "Update all". Both mention automatic updates (Android has them from 1.32 on Android 12+).
      */
     data class Wording(val device: String, val updateAll: String, val automaticUpdates: Boolean) {
         companion object {
             val DESKTOP = Wording("machine", "Update All", automaticUpdates = true)
-            val ANDROID = Wording("device", "Update all", automaticUpdates = false)
+            val ANDROID = Wording("device", "Update all", automaticUpdates = true)
         }
     }
 

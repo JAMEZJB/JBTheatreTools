@@ -24,7 +24,8 @@ class InstallResultReceiver : BroadcastReceiver() {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
                 @Suppress("DEPRECATION")
                 val confirm = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
-                if (confirm != null) {
+                // An automatic update never pops a dialog: the installer abandons the session and leaves it for later.
+                if (confirm != null && !intent.getBooleanExtra(EXTRA_UNATTENDED, false)) {
                     confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     context.startActivity(confirm)
                 }
@@ -58,6 +59,7 @@ class InstallResultReceiver : BroadcastReceiver() {
 
     companion object {
         const val EXTRA_SESSION_KEY = "com.jamesbreedon.jbtheatretools.SESSION_KEY"
+        const val EXTRA_UNATTENDED = "com.jamesbreedon.jbtheatretools.UNATTENDED"
 
         private val _events = MutableSharedFlow<Event>(replay = 0, extraBufferCapacity = 32)
         val events: SharedFlow<Event> = _events

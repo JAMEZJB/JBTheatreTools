@@ -44,8 +44,12 @@ The same features on every launcher (the few that don't apply to Android are mar
 - **Update notifications** *(opt-in)* — a system notification when a check finds new updates while the
   launcher is in the background, once per version. The system asks for permission only when you switch
   them on.
-- **Automatic updates** *(desktop, opt-in)* — after each check, updates install on their own: never for
-  held apps, apps that are open, or under show lock.
+- **Automatic updates** *(opt-in)* — after each check, updates install on their own: never for held apps or
+  under show lock. On the desktop, never for an app that's open. On Android (12 or later; About → "Install updates
+  automatically") apps installed from the launcher update without the install dialog, after a check while the
+  launcher is open and in the background while the device is charging, on Wi-Fi and not in use (updating closes an
+  app that's open). An update Android would only do after asking is left with its Update button, and Google Play
+  Protect may first ask to scan a build it hasn't seen.
 - **Run translated** *(desktop, Apple silicon Macs and ARM64 Windows PCs)* — per app edition, from its ⋯ menu:
   on a Mac, "Open as Intel (Rosetta)" for a universal app (the launcher and its menu-bar menu open it as Intel;
   Finder and the Dock still open it as Apple silicon) or "Use the Intel Build (Rosetta)" for an edition with its
@@ -116,6 +120,7 @@ The same features on every launcher (the few that don't apply to Android are mar
 | Timecode Tools | `JAMEZJB/TimecodeTools` | `TimecodeTools-macOS.zip`, `TimecodeTools-Windows-{x64,arm64}.exe` |
 | PDF Tools | `JAMEZJB/PDFTools` | Light: `PDFTools-macOS.zip`, `PDFTools-Windows-x64.exe` · Full: `PDFTools-Full-macOS-{arm64,x64}.zip` (no Windows Full yet) |
 | Stagehand | `JAMEZJB/Stagehand` | `Stagehand-macOS.zip`, `Stagehand-Windows-{x64,arm64}.exe` (desktop only) |
+| Drive Atlas | `JAMEZJB/DriveAtlas` | `DriveAtlas-macOS.zip`, `DriveAtlas-Windows-{x64,arm64}.exe` (desktop only) |
 
 Asset names differ per app, so the launcher resolves the right one for the current OS/arch. An app listed
 ahead of its first release shows "No release" and becomes installable once a build ships.

@@ -279,8 +279,7 @@ class FeatureLogicTest {
     @Test fun setupPreviewWordingPerPlatform() {
         val plan = SetupPlanner.build(sample(), catalog, setOf("psn"), supportsVariants = false)
         val android = SetupPlanner.summary(plan, SetupPlanner.Wording.ANDROID)
-        assertTrue(android.contains("— Update all leaves them at the version this device has"))
-        assertFalse(android.contains("automatic"))
+        assertTrue(android.contains("— Update all and automatic updates leave them at the version this device has"))
         assertFalse(android.contains("machine"))
         assertTrue(SetupPlanner.summary(SetupPlanner.build(SetupProfile(), catalog, emptySet()), SetupPlanner.Wording.ANDROID)
             .startsWith("Nothing to install — this device already has every app in the file."))

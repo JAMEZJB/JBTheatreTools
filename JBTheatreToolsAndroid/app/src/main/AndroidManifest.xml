@@ -13,6 +13,10 @@
          that prompt at all ("does not have REQUEST_DELETE_PACKAGES"). It is a normal permission:
          no runtime prompt, and the user still confirms in the system's own dialog. -->
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <!-- "Install updates automatically" (Android 12+): lets the launcher update apps IT installed without the
+         confirmation dialog. A normal permission (no prompt); a first install, or an app installed some other way,
+         still asks. -->
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
     <!-- No ENFORCE_UPDATE_OWNERSHIP (dropped in 1.28.0): claiming exclusive update rights over other apps is
          an aggressive-installer signal for Play Protect, and it stopped anything but this launcher (e.g. an
          APK opened from Files) updating a suite app without an extra prompt. -->
@@ -77,6 +81,12 @@
         <!-- With update notifications on: the periodic background check (core/UpdateChecks.kt). Never installs. -->
         <service
             android:name=".core.UpdateCheckJob"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="false" />
+
+        <!-- "Install updates automatically": charging + Wi-Fi + idle only, no dialogs (core/UpdateChecks.kt). -->
+        <service
+            android:name=".core.AutoUpdateJob"
             android:permission="android.permission.BIND_JOB_SERVICE"
             android:exported="false" />
 

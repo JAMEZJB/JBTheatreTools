@@ -30,6 +30,8 @@ class ApkInstaller(private val context: Context) {
         object Succeeded : Outcome()
         /** The user cancelled the system's install dialog — not a failure. */
         object Cancelled : Outcome()
+        /** An unattended install that Android would only do after asking: nothing was shown, nothing installed. */
+        object NeedsUser : Outcome()
         /** [message] is for the user; [detail] (the system's own text) is for the log. */
         data class Failed(val message: String, val detail: String = message) : Outcome()
     }
@@ -37,14 +39,23 @@ class ApkInstaller(private val context: Context) {
     /**
      * Commits a session for [apk] and suspends until the system reports the result. [sessionKey] is an
      * opaque tag (the catalog id) echoed back on the broadcast so concurrent installs can't cross.
+     *
+     * [unattended] (automatic updates, Android 12+): asks Android to update WITHOUT the confirmation dialog — which it
+     * does for an app this launcher installed (it's the installer / update owner of record). If Android would still ask,
+     * nothing is shown: the session is abandoned and the result is [Outcome.NeedsUser] (left for the person to do).
      */
-    suspend fun install(apk: File, expectedPackage: String?, sessionKey: String): Outcome {
+    suspend fun install(apk: File, expectedPackage: String?, sessionKey: String, unattended: Boolean = false): Outcome {
         val installer = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
         expectedPackage?.let { params.setAppPackageName(it) }
         params.setSize(apk.length())
         if (Build.VERSION.SDK_INT >= 31) {
-            params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_UNSPECIFIED)
+            params.setRequireUserAction(
+                if (unattended) PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED
+                else PackageInstaller.SessionParams.USER_ACTION_UNSPECIFIED
+            )
+        } else if (unattended) {
+            return Outcome.NeedsUser   // Android 10–11 always ask
         }
 
         val sessionId = try {
@@ -64,7 +75,7 @@ class ApkInstaller(private val context: Context) {
                 while (true) {
                     val event = InstallResultReceiver.events.first { it.sessionKey == sessionKey }
                     when (event.state) {
-                        InstallResultReceiver.State.NEEDS_CONFIRMATION -> continue
+                        InstallResultReceiver.State.NEEDS_CONFIRMATION -> if (unattended) return@async Outcome.NeedsUser else continue
                         InstallResultReceiver.State.SUCCEEDED -> return@async Outcome.Succeeded
                         InstallResultReceiver.State.CANCELLED -> return@async Outcome.Cancelled
                         InstallResultReceiver.State.FAILED ->
@@ -80,14 +91,19 @@ class ApkInstaller(private val context: Context) {
                         apk.inputStream().use { input -> input.copyTo(out, 1 shl 16) }
                         session.fsync(out)
                     }
-                    session.commit(statusIntent(sessionKey, sessionId).intentSender)
+                    session.commit(statusIntent(sessionKey, sessionId, unattended).intentSender)
                 }
             } catch (e: Exception) {
                 result.cancel()
                 runCatching { installer.abandonSession(sessionId) }
                 return@coroutineScope Outcome.Failed("couldn’t write the install session", "couldn’t write the install session: ${e.message}")
             }
-            withTimeoutOrNull(SESSION_TIMEOUT_MS) { result.await() } ?: run {
+            // An unattended session waits as long as any other: Google Play Protect may first ask to scan a build it
+            // hasn't seen ("App scan recommended") — answered within the time, the update still goes through.
+            val outcome = withTimeoutOrNull(SESSION_TIMEOUT_MS) { result.await() }
+            // Android wanted to ask: drop the session, so no dialog turns up later out of nowhere.
+            if (outcome is Outcome.NeedsUser) runCatching { installer.abandonSession(sessionId) }
+            outcome ?: run {
                 result.cancel()
                 runCatching { installer.abandonSession(sessionId) }
                 Outcome.Failed("the install wasn't confirmed — open JB Theatre Tools and try again")
@@ -118,9 +134,10 @@ class ApkInstaller(private val context: Context) {
         context.startActivity(intent)
     }
 
-    private fun statusIntent(sessionKey: String, sessionId: Int): PendingIntent {
+    private fun statusIntent(sessionKey: String, sessionId: Int, unattended: Boolean): PendingIntent {
         val intent = Intent(context, InstallResultReceiver::class.java).apply {
             putExtra(InstallResultReceiver.EXTRA_SESSION_KEY, sessionKey)
+            putExtra(InstallResultReceiver.EXTRA_UNATTENDED, unattended)
         }
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
         return PendingIntent.getBroadcast(context, sessionId, intent, flags)

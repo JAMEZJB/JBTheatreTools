@@ -70,6 +70,34 @@ object UpdatePolicy {
         else "Updated ${updated.size} apps"
 }
 
+/**
+ * Automatic updates on Android ("Install updates automatically"). Android 12+ lets the app that installed another app
+ * update it without the confirmation dialog — older versions always ask, so it isn't offered there. Pure.
+ */
+object AutoUpdatePolicy {
+    const val MIN_SDK = 31
+
+    fun available(sdk: Int): Boolean = sdk >= MIN_SDK
+
+    /** What an automatic run may update: pending (not held), installable, and not already being installed. */
+    fun candidates(statuses: List<AppStatus>, held: Set<String>, busy: Set<String>): List<AppStatus> =
+        statuses.filter { it.updatePending && it.canInstall && it.isInstalled && it.app.id !in held && it.app.id !in busy }
+
+    /** The notification after a background run, or null when there's nothing to say. */
+    fun notification(updated: List<Pair<String, String>>, needsUser: List<String>): Pair<String, String>? = when {
+        updated.isNotEmpty() && needsUser.isNotEmpty() ->
+            "Apps updated" to UpdatePolicy.autoUpdateSummary(updated) + ". " + needsYourOk(needsUser)
+        updated.isNotEmpty() -> "Apps updated" to UpdatePolicy.autoUpdateSummary(updated)
+        needsUser.isNotEmpty() -> "Updates waiting" to needsYourOk(needsUser)
+        else -> null
+    }
+
+    /** "PSN Tools needs you to tap Update" / "3 apps need you to tap Update" — Android wouldn't update them silently. */
+    fun needsYourOk(names: List<String>): String =
+        if (names.size == 1) "${names[0]} needs you to tap Update in JB Theatre Tools."
+        else "${names.size} apps need you to tap Update in JB Theatre Tools."
+}
+
 /** When to show the launcher's own "what's new" after it has been updated. */
 object LauncherWhatsNew {
     /**

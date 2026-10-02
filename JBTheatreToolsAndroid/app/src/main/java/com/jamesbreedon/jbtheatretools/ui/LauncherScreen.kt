@@ -1245,6 +1245,22 @@ private fun AboutV130Panels(vm: LauncherViewModel, state: LauncherUiState) {
                         vm.setNotifyUpdates(on == 1)
                     }
                 }, Modifier.fillMaxWidth())
+                VSpace(12.dp)
+                LabelText("Install updates automatically")
+                VSpace(8.dp)
+                Segmented(
+                    listOf("Off", "On"), if (state.autoInstallUpdates) 1 else 0, { vm.setAutoInstallUpdates(it == 1) },
+                    Modifier.fillMaxWidth(),
+                )
+                VSpace(8.dp)
+                BodyText(
+                    if (state.autoInstallAvailable)
+                        "Apps installed from here update by themselves: after a check while the launcher is open, and in " +
+                            "the background while this device is charging, on Wi-Fi and not in use. Updating an app " +
+                            "closes it if it's open. Never during show lock, and held apps stay as they are."
+                    else "Needs Android 12 or later — on this device, use Update all.",
+                    maxLines = Int.MAX_VALUE,
+                )
             }
         }
         VSpace(12.dp)

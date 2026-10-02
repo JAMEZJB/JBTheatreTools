@@ -13,6 +13,8 @@ import com.jamesbreedon.jbtheatretools.core.AppVisibility
 import com.jamesbreedon.jbtheatretools.core.Appearance
 import com.jamesbreedon.jbtheatretools.core.AppStatus
 import com.jamesbreedon.jbtheatretools.core.AuthMode
+import com.jamesbreedon.jbtheatretools.core.AutoUpdatePolicy
+import com.jamesbreedon.jbtheatretools.core.AutoUpdateScheduler
 import com.jamesbreedon.jbtheatretools.core.CatalogApp
 import com.jamesbreedon.jbtheatretools.core.Diagnostics
 import com.jamesbreedon.jbtheatretools.core.InstallProgress
@@ -81,6 +83,9 @@ data class LauncherUiState(
     val confirmShowLockOff: Boolean = false,
     val autoCheckInterval: String = UpdatePolicy.DEFAULT_INTERVAL,
     val notifyUpdates: Boolean = true,
+    /** "Install updates automatically" (Android 12+ only — [autoInstallAvailable]). */
+    val autoInstallUpdates: Boolean = false,
+    val autoInstallAvailable: Boolean = false,
     /** Set to this build's version on the first launch after the launcher was updated (the banner). */
     val launcherWhatsNew: String? = null,
     val notes: NotesSheet? = null,
@@ -124,6 +129,8 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             showLock = repo.settings.showLock,
             autoCheckInterval = repo.settings.autoCheckInterval,
             notifyUpdates = repo.settings.notifyUpdates && Notifier(app).canPost(),
+            autoInstallUpdates = repo.settings.autoInstallUpdates && AutoUpdatePolicy.available(android.os.Build.VERSION.SDK_INT),
+            autoInstallAvailable = AutoUpdatePolicy.available(android.os.Build.VERSION.SDK_INT),
         )
     )
     val state: StateFlow<LauncherUiState> = _state.asStateFlow()
@@ -171,9 +178,12 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** The background check runs only when notifications are on and allowed (it has nothing else to do). */
-    private fun syncBackgroundChecks() =
+    /** The background check runs only when notifications are on and allowed (it has nothing else to do); automatic
+     *  updates have their own job (charging + Wi-Fi + idle). */
+    private fun syncBackgroundChecks() {
         UpdateCheckScheduler.sync(getApplication(), repo.settings, repo.hasCredential() && notifier.canPost())
+        AutoUpdateScheduler.sync(getApplication(), repo.settings, repo.hasCredential())
+    }
 
     fun refresh() = runRefresh(scheduled = false)
 
@@ -202,6 +212,45 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
             announceNewUpdates()
+            runAutoUpdate()
+        }
+    }
+
+    /**
+     * After a check, with "Install updates automatically" on: update what Android lets this launcher update without
+     * asking (apps it installed), quietly. The launcher is on screen, so no other app is in use. Never under show lock
+     * or during another batch; one Android would only update after asking keeps its Update button.
+     */
+    private fun runAutoUpdate() {
+        val s = _state.value
+        if (!s.autoInstallUpdates || s.showLock || s.busyAll || !repo.hasCredential()) return
+        val pending = AutoUpdatePolicy.candidates(s.statuses, repo.settings.heldApps, ActiveInstalls.ids())
+        if (pending.isEmpty()) return
+        stopRequested = false
+        batchIds.clear()
+        batchIds.addAll(pending.map { it.app.id })
+        ActiveInstalls.queue(batchIds)
+        _state.update { it.copy(busyAll = true) }
+        viewModelScope.launch {
+            val result = try {
+                repo.autoUpdate(pending, stop = { stopRequested }) { p -> onProgress(p) }
+            } finally {
+                batchIds.clear()
+                ActiveInstalls.clearQueue()
+            }
+            refreshInstalledOnly()
+            reloadHistory()
+            _state.update {
+                it.copy(
+                    busyAll = false,
+                    snackbar = when {
+                        result.updated.isEmpty() && result.needsUser.isEmpty() -> it.snackbar
+                        result.needsUser.isEmpty() -> UpdatePolicy.autoUpdateSummary(result.updated)
+                        result.updated.isEmpty() -> AutoUpdatePolicy.needsYourOk(result.needsUser)
+                        else -> UpdatePolicy.autoUpdateSummary(result.updated) + ". " + AutoUpdatePolicy.needsYourOk(result.needsUser)
+                    },
+                )
+            }
         }
     }
 
@@ -561,6 +610,15 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         repo.settings.autoCheckInterval = raw
         _state.update { it.copy(autoCheckInterval = raw) }
         syncBackgroundChecks()
+    }
+
+    /** "Install updates automatically" on/off (Android 12+). Switching it on updates what's waiting straight away. */
+    fun setAutoInstallUpdates(on: Boolean) {
+        if (!AutoUpdatePolicy.available(android.os.Build.VERSION.SDK_INT)) return
+        repo.settings.autoInstallUpdates = on
+        _state.update { it.copy(autoInstallUpdates = on) }
+        syncBackgroundChecks()
+        if (on) runAutoUpdate()
     }
 
     /** Notifications on/off. The screen asks for the Android 13+ permission first and passes the answer here. */

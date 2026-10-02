@@ -109,3 +109,66 @@ class UpdateCheckJob : JobService() {
         super.onDestroy()
     }
 }
+
+/**
+ * "Install updates automatically" (Android 12+): a periodic job that only runs while the device is charging, on Wi-Fi
+ * and idle — overnight on the charger, typically — so an app is never closed under someone using it (updating an app
+ * closes it, and the launcher can't see which apps are open). Not persisted across a reboot; opening the launcher
+ * schedules it again.
+ */
+object AutoUpdateScheduler {
+    private const val JOB_ID = 7302
+    private const val INTERVAL_MS = 6 * 60 * 60 * 1000L
+
+    /** [canRun]: signed in. */
+    fun sync(context: Context, settings: Settings, canRun: Boolean) {
+        val js = context.getSystemService(JobScheduler::class.java) ?: return
+        if (!canRun || !settings.autoInstallUpdates || !AutoUpdatePolicy.available(android.os.Build.VERSION.SDK_INT)) {
+            js.cancel(JOB_ID)
+            return
+        }
+        if (js.getPendingJob(JOB_ID) != null) return
+        val job = JobInfo.Builder(JOB_ID, ComponentName(context, AutoUpdateJob::class.java))
+            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_UNMETERED)   // never on mobile data
+            .setRequiresCharging(true)
+            .setRequiresDeviceIdle(true)                               // nobody is using the device
+            .setPeriodic(INTERVAL_MS)
+            .build()
+        runCatching { js.schedule(job) }
+    }
+}
+
+/** The run behind [AutoUpdateScheduler]: refresh, install what it may with no dialogs, say what happened. */
+class AutoUpdateJob : JobService() {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    override fun onStartJob(params: JobParameters): Boolean {
+        if (AppVisibility.foreground) return false   // the open launcher runs its own after its check
+        scope.launch {
+            try {
+                val repo = LauncherRepository(applicationContext)
+                if (repo.settings.autoInstallUpdates && !repo.settings.showLock && repo.hasCredential()) {
+                    val result = repo.autoUpdate(repo.refresh())
+                    AutoUpdatePolicy.notification(result.updated, result.needsUser)?.let { (title, body) ->
+                        Notifier(applicationContext).post(title, body)
+                    }
+                }
+            } catch (_: Exception) {
+                // Best effort: the next run tries again.
+            } finally {
+                jobFinished(params, false)
+            }
+        }
+        return true
+    }
+
+    override fun onStopJob(params: JobParameters): Boolean {
+        scope.coroutineContext.cancelChildren()   // the device woke up / was unplugged: stop, try again next time
+        return true
+    }
+
+    override fun onDestroy() {
+        scope.cancel()
+        super.onDestroy()
+    }
+}
