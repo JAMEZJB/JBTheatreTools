@@ -315,7 +315,8 @@ public static partial class Cli
     {
         var s = catalog.Self;
         if (s == null) { Console.Error.WriteLine("error: no `self` entry in catalog."); return 1; }
-        if (settings.ShowLock)
+        // The launcher's own show lock, or the suite-wide one set from Stagehand or an app (claude.json).
+        if (settings.ShowLock || ClaudeSettingsFile.SuiteShowLock() == true)
         {
             Console.Error.WriteLine("error: show lock is on — turn it off in JB Theatre Tools first.");
             return 1;

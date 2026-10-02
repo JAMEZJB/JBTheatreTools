@@ -1276,6 +1276,16 @@ final class AppState: ObservableObject {
                     discard(d)
                     AppLog.shared.log("\(label): \(slot.id) \(reason) — skipped")
                 } else { await installPhase(d, id: slot.id) }   // …and verify + extract N meanwhile
+            } else if let app = rows.first(where: { $0.id == slot.id })?.app,
+                      transientFailures.remove(app.installKey(variantId: slot.variant)) != nil,
+                      !batchStopRequested, !showLock, skipReason(i) == nil {
+                // A network hiccup (never a verification failure, a cancel or show lock): one more try after a pause.
+                AppLog.shared.log("install \(slot.id): retrying once after a transient error")
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if !batchStopRequested, !showLock,
+                   let rd = await downloadPhase(slot.id, tag: slot.tag, variantOverride: slot.variant, unattended: unattended) {
+                    await installPhase(rd, id: slot.id)
+                }
             }
             if let after = installedVersion(slot), before.map({ !VersionDisplay.equal($0, after) }) ?? true,
                let app = rows.first(where: { $0.id == slot.id })?.app {
@@ -1623,6 +1633,7 @@ final class AppState: ObservableObject {
         }
         let slotName = app.name + app.variantSuffix(variantId)
         let slotKey = app.installKey(variantId: variantId)
+        transientFailures.remove(slotKey)   // only THIS attempt's failure may earn a batch retry
         guard slotsInFlight.insert(slotKey).inserted else {
             AppLog.shared.log("install \(slotKey): already downloading or installing — not started again")
             endBusy(id)
@@ -1694,9 +1705,23 @@ final class AppState: ObservableObject {
             update(id) { $0.status = .error(error.localizedDescription) }
             AppLog.shared.log("install \(app.id) FAILED: \(error.localizedDescription)")
             HistoryStore.add(app: slotKey, name: slotName, action: "failed", to: rel.tagName, note: error.localizedDescription)
+            if Self.isTransient(error) { transientFailures.insert(slotKey) }   // a batch retries it once
             endBusy(id)
             return nil
         }
+    }
+
+    /// Install slots whose last download failed on the network (see `isTransient`) — a batch retries those once.
+    private var transientFailures = Set<String>()
+
+    /// Network and I/O hiccups worth one more try in a batch. A verification failure, an HTTP refusal or a cancel is not.
+    nonisolated static func isTransient(_ error: Error) -> Bool {
+        if let u = error as? URLError {
+            return [.timedOut, .networkConnectionLost, .notConnectedToInternet, .cannotConnectToHost, .cannotFindHost,
+                    .dnsLookupFailed, .resourceUnavailable, .secureConnectionFailed, .dataNotAllowed].contains(u.code)
+        }
+        let ns = error as NSError
+        return ns.domain == NSPOSIXErrorDomain && [ECONNRESET, ETIMEDOUT, ENETDOWN, ENETUNREACH, EPIPE].contains(Int32(ns.code))
     }
 
     /// Forgets a finished download task (unless a newer one for the same row has replaced it).

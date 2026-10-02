@@ -334,7 +334,8 @@ enum CLI {
     /// verified like every download; no restart (the next start runs the new version and bins the old copy).
     private static func selfUpdate(catalog: Catalog, token: String?) {
         guard let s = catalog.selfInfo else { fputs("error: no `self` entry in catalog.\n", stderr); exit(1) }
-        if UserDefaults.standard.bool(forKey: AppState.showLockKey) {
+        // The launcher's own show lock, or the suite-wide one set from Stagehand or an app (claude.json).
+        if UserDefaults.standard.bool(forKey: AppState.showLockKey) || ClaudeSettingsFile.suiteShowLock() == true {
             fputs("error: show lock is on — turn it off in JB Theatre Tools (⌘L) first.\n", stderr); exit(1)
         }
         let current = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
