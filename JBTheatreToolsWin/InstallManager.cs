@@ -410,9 +410,12 @@ public sealed class InstallManager
     {
         lock (_mutationLock)
         {
-            var m = Manifest();
-            if (m.TryGetValue(installKey, out var rec))
+            var m = Manifest(strict: true);
+            if (m.Remove(installKey, out var rec))
             {
+                // Publish the removal before touching a working install. A refused manifest
+                // replacement must leave its payload, shortcuts and cached identity intact.
+                WriteManifest(m, strict: true);
                 if (rec.StartMenuShortcut != null) Shortcuts.RemoveStartMenu(rec.StartMenuShortcut);
                 if (rec.DesktopShortcut != null) Shortcuts.RemoveDesktop(rec.DesktopShortcut);
                 // Remove the payload: a whole extracted one-dir (.zip Full) install, or a single-file .exe.
@@ -425,7 +428,6 @@ public sealed class InstallManager
                 }
                 catch (Exception ex) { Log.Write($"uninstall {installKey}: could not delete payload: {ex.Message}"); }
             }
-            if (m.Remove(installKey)) WriteManifest(m);
         }
         // Any older version of this slot kept aside while it was running (see RemovePreviousPayload), then the app's
         // base dir once no sibling slot's files remain (Light/Full share apps/<id>/).

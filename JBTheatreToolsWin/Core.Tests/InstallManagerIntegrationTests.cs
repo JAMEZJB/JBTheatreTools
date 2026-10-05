@@ -193,5 +193,151 @@ public sealed class InstallManagerIntegrationTests : IDisposable
         Assert.True(File.Exists(next));
     }
 
+    [Fact]
+    public void UninstallPublicationFailurePreservesSlotSiblingShortcutsAndCache()
+    {
+        if (!OperatingSystem.IsWindows()) return; // Windows replacement sharing refusal.
+        string current = manager.Install(app, "v1", Exe(), "Demo.exe", true);
+        string sibling = manager.Install(app, "v2", Zip(), "Demo.zip", true, "full");
+        byte[] metadata = File.ReadAllBytes(manager.ManifestPath);
+        Assert.Equal(current, manager.InstalledPath("demo")); // prime the read caches
+        Assert.Equal(sibling, manager.InstalledPath("demo@full"));
+        var start = new Dictionary<string, string>(Shortcuts.Start);
+        var desktop = new Dictionary<string, string>(Shortcuts.Desktop);
+        int events = 0;
+        manager.ManifestChanged += () => events++;
+        Exception? refusal = null;
+        using (var held = new FileStream(manager.ManifestPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            try { manager.Uninstall("demo"); } catch (Exception exception) { refusal = exception; }
+        Assert.True(refusal is IOException or UnauthorizedAccessException);
+        Assert.Equal(metadata, File.ReadAllBytes(manager.ManifestPath));
+        Assert.True(File.Exists(current));
+        Assert.True(File.Exists(sibling));
+        Assert.Equal(current, manager.InstalledPath("demo"));
+        Assert.Equal("v1", manager.InstalledVersion("demo"));
+        Assert.Equal(start.OrderBy(p => p.Key), Shortcuts.Start.OrderBy(p => p.Key));
+        Assert.Equal(desktop.OrderBy(p => p.Key), Shortcuts.Desktop.OrderBy(p => p.Key));
+        Assert.Equal(0, events);
+        Assert.Empty(Directory.GetFiles(root, ".manifest-*.tmp"));
+    }
+
+    [Fact]
+    public void UninstallCorruptManifestRefusesBeforeAnyCleanup()
+    {
+        string current = manager.Install(app, "v1", Exe(), "Demo.exe", true);
+        string sibling = manager.Install(app, "v1", Exe(), "Demo.exe", false, "full");
+        Assert.Equal(current, manager.InstalledPath("demo"));
+        File.WriteAllText(manager.ManifestPath, "not json");
+        int events = 0;
+        manager.ManifestChanged += () => events++;
+        Assert.Throws<JsonException>(() => manager.Uninstall("demo"));
+        Assert.Equal("not json", File.ReadAllText(manager.ManifestPath));
+        Assert.True(File.Exists(current));
+        Assert.True(File.Exists(sibling));
+        Assert.Equal(current, Shortcuts.Start["Demo"]);
+        Assert.Equal(current, Shortcuts.Desktop["Demo"]);
+        Assert.Equal(current, manager.InstalledPath("demo"));
+        Assert.Equal(0, events);
+    }
+
+    [Fact]
+    public void UninstallUnreadableManifestRefusesBeforeAnyCleanup()
+    {
+        if (!OperatingSystem.IsWindows()) return; // Windows read sharing refusal.
+        string current = manager.Install(app, "v1", Exe(), "Demo.exe", true);
+        byte[] metadata = File.ReadAllBytes(manager.ManifestPath);
+        Assert.Equal(current, manager.InstalledPath("demo"));
+        int events = 0;
+        manager.ManifestChanged += () => events++;
+        using (var held = new FileStream(manager.ManifestPath, FileMode.Open, FileAccess.Read, FileShare.None))
+            Assert.ThrowsAny<IOException>(() => manager.Uninstall("demo"));
+        Assert.Equal(metadata, File.ReadAllBytes(manager.ManifestPath));
+        Assert.True(File.Exists(current));
+        Assert.Equal(current, Shortcuts.Start["Demo"]);
+        Assert.Equal(current, Shortcuts.Desktop["Demo"]);
+        Assert.Equal(current, manager.InstalledPath("demo"));
+        Assert.Equal(0, events);
+    }
+
+    [Fact]
+    public void UninstallPublishesRemovalBeforeCleaningPayloadAndShortcuts()
+    {
+        string current = manager.Install(app, "v1", Zip(), "Demo.zip", true);
+        string sibling = manager.Install(app, "v2", Exe(), "Demo.exe", false, "full");
+        Assert.Equal(current, manager.InstalledPath("demo"));
+        int events = 0;
+        bool publicationObservedBeforeCleanup = false;
+        manager.ManifestChanged += () =>
+        {
+            events++;
+            Assert.False(manager.Manifest(strict: true).ContainsKey("demo"));
+            Assert.Null(manager.InstalledPath("demo"));
+            Assert.True(File.Exists(current));
+            Assert.Equal(current, Shortcuts.Start["Demo"]);
+            Assert.Equal(current, Shortcuts.Desktop["Demo"]);
+            publicationObservedBeforeCleanup = true;
+        };
+        manager.Uninstall("demo");
+        // WriteManifest deliberately contains observer exceptions, so also require the
+        // observation below rather than relying only on assertions inside its callback.
+        Assert.Equal(1, events);
+        Assert.True(publicationObservedBeforeCleanup);
+        Assert.False(File.Exists(current));
+        Assert.True(File.Exists(sibling));
+        Assert.Equal(sibling, manager.InstalledPath("demo@full"));
+        Assert.False(Shortcuts.Start.ContainsKey("Demo"));
+        Assert.False(Shortcuts.Desktop.ContainsKey("Demo"));
+    }
+
+    [Fact]
+    public void UninstallLegacySingleFilePreservesSibling()
+    {
+        string directory = Path.Combine(manager.AppsDir, app.Id);
+        Directory.CreateDirectory(directory);
+        string current = Path.Combine(directory, "Demo.exe");
+        string sibling = Path.Combine(directory, "Sibling.exe");
+        File.WriteAllText(current, "current"); File.WriteAllText(sibling, "sibling");
+        File.WriteAllText(manager.ManifestPath, JsonSerializer.Serialize(new Dictionary<string, InstalledRecord>
+        {
+            ["demo"] = new() { Version = "v1", Path = current },
+            ["demo@full"] = new() { Version = "v2", Path = sibling, Variant = "full" }
+        }));
+        manager.Uninstall("demo");
+        Assert.False(File.Exists(current));
+        Assert.True(File.Exists(sibling));
+        Assert.Equal("sibling", File.ReadAllText(sibling));
+        Assert.Equal(sibling, manager.Manifest(strict: true)["demo@full"].Path);
+    }
+
+    [Fact]
+    public void UninstallAbsentSlotDoesNotPublishOrRemoveSibling()
+    {
+        string sibling = manager.Install(app, "v1", Exe(), "Demo.exe", true, "full");
+        byte[] metadata = File.ReadAllBytes(manager.ManifestPath);
+        int events = 0;
+        manager.ManifestChanged += () => events++;
+        manager.Uninstall("demo");
+        Assert.Equal(metadata, File.ReadAllBytes(manager.ManifestPath));
+        Assert.True(File.Exists(sibling));
+        Assert.Equal(0, events);
+        Assert.Equal(sibling, manager.InstalledPath("demo@full"));
+    }
+
+    [Fact]
+    public void UninstallRetainsLockedPayloadAfterCommittedRemoval()
+    {
+        if (!OperatingSystem.IsWindows()) return; // Windows payload deletion sharing refusal.
+        string current = manager.Install(app, "v1", Exe(), "Demo.exe", true);
+        using (var held = new FileStream(current, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            manager.Uninstall("demo");
+            Assert.False(manager.Manifest(strict: true).ContainsKey("demo"));
+            Assert.Null(manager.InstalledPath("demo"));
+            Assert.True(File.Exists(current));
+            Assert.False(Shortcuts.Start.ContainsKey("Demo"));
+            Assert.False(Shortcuts.Desktop.ContainsKey("Demo"));
+        }
+    }
+
     public void Dispose() => Directory.Delete(root, recursive: true);
 }
