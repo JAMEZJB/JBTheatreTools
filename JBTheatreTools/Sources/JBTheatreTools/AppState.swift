@@ -2773,15 +2773,21 @@ final class AppState: ObservableObject {
     /// CFBundleShortVersionString, stamped by build.sh from JBTT_VERSION). OFF: the latest release — and when
     /// THIS copy is a dev build, that release even if it's older ("back to release").
     func launcherTarget(client: GitHubClient, owner: String, repo: String) async throws -> ReleaseInfo? {
-        let current = currentVersion
-        if Self.devChannel {
-            guard let pick = Self.latest(from: try await client.releases(owner: owner, repo: repo), devChannel: true)
-            else { return nil }
-            return Self.versionIsNewer(pick.tagName, than: current) ? pick : nil
-        }
-        let latest = try await client.latestRelease(owner: owner, repo: repo)
-        if Self.versionIsNewer(latest.tagName, than: current) { return latest }
-        return Self.isDevTag(current) ? latest : nil
+        // Only a release that has THIS Mac's build: a development build can be published for one platform only.
+        let asset = selfInfo.map { CatalogApp.forSelf($0) }?.macAssetName(variantId: nil)
+        let releases = try await client.releases(owner: owner, repo: repo)
+        return Self.pickLauncher(releases, hasBuild: { r in asset.map { a in r.assets.contains { $0.name == a } } ?? false },
+                                 current: currentVersion, devChannel: Self.devChannel)
+    }
+
+    /// The launcher release to offer, or nil: the newest release that CARRIES this platform's build when it's newer than
+    /// `current`; or, running a development build with the Dev channel off, the latest release ("back to the release").
+    /// Pure; the Windows and Android launchers carry the same rule.
+    nonisolated static func pickLauncher(_ releases: [ReleaseInfo], hasBuild: (ReleaseInfo) -> Bool, current: String,
+                                         devChannel: Bool) -> ReleaseInfo? {
+        guard let pick = latest(from: releases.filter(hasBuild), devChannel: devChannel) else { return nil }
+        if versionIsNewer(pick.tagName, than: current) { return pick }
+        return !devChannel && isDevTag(current) ? pick : nil
     }
 
     /// Updates the launcher in place: download + verify, unpack, swap the running bundle for the new one (same folder and

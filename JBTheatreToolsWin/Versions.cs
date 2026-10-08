@@ -44,20 +44,18 @@ public static class Versions
         a.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
         a.Name.Contains("Windows", StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>The launcher release to offer, or null when there's nothing to do. Dev channel ON: the highest
-    /// release including the launcher's own dev builds (a dev build reports its full tag via
-    /// InformationalVersion, stamped by build-win.sh from JBTT_VERSION). OFF: the latest release — and when THIS
-    /// copy is a dev build, that release even if it's older ("back to release").</summary>
-    public static async Task<ReleaseInfo?> LauncherTargetAsync(GitHubClient client, string owner, string repo, string current)
+    /// <summary>The launcher release to offer, or null when there's nothing to do — among the releases that carry this
+    /// PC's build: Dev channel ON, the highest including the launcher's own dev builds (a dev build reports its full tag
+    /// via InformationalVersion, stamped by build-win.sh from JBTT_VERSION); OFF, the latest release — and when THIS copy
+    /// is a dev build, that release even if it's older ("back to release"). See VersionCompare.PickLauncher.</summary>
+    public static async Task<ReleaseInfo?> LauncherTargetAsync(GitHubClient client, SelfInfo self, string current)
     {
-        if (DevChannel)
-        {
-            var pick = VersionCompare.PickLatest(await client.ReleasesAsync(owner, repo), r => r.TagName, r => r.Prerelease, true);
-            return pick != null && IsNewer(pick.TagName, current) ? pick : null;
-        }
-        var latest = await client.LatestReleaseAsync(owner, repo);
-        if (IsNewer(latest.TagName, current)) return latest;
-        return VersionCompare.IsDev(current) ? latest : null;
+        // Only a release that has THIS PC's build: a development build can be published for one platform only (a
+        // Mac-only dev build was offered here and failed with "no asset named JBTheatreTools-Windows-x64.exe").
+        self.Assets.TryGetValue(Platform.AssetKey, out var assetName);
+        var releases = (await client.ReleasesAsync(self.Owner, self.Repo)).Where(r => !r.Draft);
+        return VersionCompare.PickLauncher(releases, r => r.TagName, r => r.Prerelease,
+            r => assetName != null && r.Assets.Any(a => a.Name == assetName), current, DevChannel);
     }
 
     /// <summary>The releases a person is shown or offered (release notes, the ⋯ version list, Roll Back): development

@@ -863,7 +863,7 @@ public sealed class SettingsDialog : Form
         try
         {
             using var client = AuthClient.SelfUpdate(_settings, _downloadServer);   // public repo; never blocks on creds
-            var info = await Versions.LauncherTargetAsync(client, _selfInfo.Owner, _selfInfo.Repo, _currentVersion);
+            var info = await Versions.LauncherTargetAsync(client, _selfInfo, _currentVersion);
             if (IsDisposed) return;
             if (info != null)
             {

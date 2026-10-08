@@ -19,6 +19,10 @@ object ReleasePick {
         return pool.maxWithOrNull { x, y -> VersionCompare.compare(x.tagName, y.tagName) }
     }
 
+    /** [latest] among the releases [hasBuild] accepts (this platform's build is there); without any, plain [latest]. */
+    fun latestWithBuild(releases: List<ReleaseInfo>, devChannel: Boolean, hasBuild: (ReleaseInfo) -> Boolean): ReleaseInfo? =
+        latest(releases.filter(hasBuild), devChannel) ?: latest(releases, devChannel)
+
     /**
      * The release a setup file's held [version] names: matched by version equality ("1.2.0" finds the tag "v1.2.0"),
      * so the caller installs from the release's REAL tag. A development build is never a match unless [allowDev].

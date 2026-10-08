@@ -73,6 +73,19 @@ public static class VersionCompare
         return best;
     }
 
+    /// <summary>The launcher release to offer this machine, or null: the newest release that CARRIES this platform's
+    /// build (<paramref name="hasBuild"/> — a development build may be published for one platform only) when it's newer
+    /// than <paramref name="current"/>; or, running a development build with the Dev channel off, the latest release
+    /// ("back to the release").</summary>
+    public static T? PickLauncher<T>(IEnumerable<T> releases, Func<T, string> tag, Func<T, bool> isPre, Func<T, bool> hasBuild,
+                                     string current, bool devChannel) where T : class
+    {
+        var pick = PickLatest(releases.Where(hasBuild), tag, isPre, devChannel);
+        if (pick == null) return null;
+        if (IsNewer(tag(pick), current)) return pick;
+        return !devChannel && IsDev(current) ? pick : null;
+    }
+
     private static (string Core, string[]? Pre) SplitPre(string s)
     {
         var n = Norm(s);

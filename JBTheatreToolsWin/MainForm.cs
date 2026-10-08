@@ -2574,7 +2574,7 @@ public sealed class MainForm : Form
         try
         {
             using var client = AuthClient.SelfUpdate(_settings, _catalog.DownloadServer);   // launcher repo is public; never blocks on creds
-            var info = await Versions.LauncherTargetAsync(client, s.Owner, s.Repo, CurrentVersion());
+            var info = await Versions.LauncherTargetAsync(client, s, CurrentVersion());
             if (info != null)
             {
                 _updateBannerText.Text = Versions.IsNewer(info.TagName, CurrentVersion())

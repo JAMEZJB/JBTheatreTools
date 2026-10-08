@@ -32,7 +32,7 @@ public static class LauncherUpdate
                                                    IProgress<double>? progress = null)
     {
         using var _ = client;
-        var info = await Versions.LauncherTargetAsync(client, self.Owner, self.Repo, currentVersion)
+        var info = await Versions.LauncherTargetAsync(client, self, currentVersion)
             ?? throw new Exception("You're up to date.");
         if (!self.Assets.TryGetValue(Platform.AssetKey, out var assetName))
             throw new Exception("No Windows asset configured for this platform.");

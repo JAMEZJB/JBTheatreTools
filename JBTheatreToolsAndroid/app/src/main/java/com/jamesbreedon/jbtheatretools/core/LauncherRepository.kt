@@ -174,10 +174,16 @@ class LauncherRepository(private val context: Context) {
      * pre-release — so a `-dev.N` build is never offered. ON: the full list, picked by [ReleasePick] (highest
      * semver including dev builds; a stable X.Y.Z supersedes its own dev builds).
      */
+    /**
+     * The newest release (on this channel) that carries an Android build — a development build may be published for
+     * the desktops only, and must not hide the newest build this device CAN install (apps and the launcher alike).
+     * With no Android build anywhere, the plain latest release (its row then says "No Android build yet").
+     */
     private fun pickRelease(client: GitHubClient, app: CatalogApp): ReleaseInfo {
-        if (!settings.devChannel) return client.latestRelease(app.owner, app.repo)
-        return ReleasePick.latest(client.releases(app.owner, app.repo), devChannel = true)
-            ?: throw GitHubException.noRelease()
+        val releases = client.releases(app.owner, app.repo)
+        return ReleasePick.latestWithBuild(releases, settings.devChannel) { r ->
+            AndroidAsset.resolve(app, r.tagName, r.assets.map { it.name }) != null
+        } ?: throw GitHubException.noRelease()
     }
 
     /**
