@@ -695,7 +695,8 @@ public sealed class InstallManager
     /// downloaded by it (<c>--install-file</c>): the release's SHA256SUMS and SHA256SUMS.minisig travel with the file,
     /// and the embedded suite key must verify them for THIS release (<c>&lt;repo&gt; &lt;tag&gt;</c>) before the file's
     /// hash is compared. Strict: anything missing or wrong throws <see cref="InstallVerificationException"/>.</summary>
-    public static void VerifyLocalFile(string file, string assetName, string sumsPath, string repo, string tag)
+    public static void VerifyLocalFile(string file, string assetName, string sumsPath, string repo, string tag,
+                                       string? publicKey = null)
     {
         var sigPath = sumsPath + ".minisig";
         if (!File.Exists(sumsPath))
@@ -703,7 +704,7 @@ public sealed class InstallManager
         if (!File.Exists(sigPath))
             throw new InstallVerificationException($"No signature at {sigPath}. Copy the release's SHA256SUMS.minisig next to its SHA256SUMS.");
         var sumsBytes = File.ReadAllBytes(sumsPath);
-        try { Minisign.Verify(sumsBytes, File.ReadAllText(sigPath), $"{repo} {tag}"); }
+        try { Minisign.Verify(sumsBytes, File.ReadAllText(sigPath), $"{repo} {tag}", publicKey); }
         catch (Minisign.VerifyException ex) { throw new InstallVerificationException($"Refusing {assetName}: {ex.Message}"); }
         var expected = ExpectedSha256(assetName, System.Text.Encoding.UTF8.GetString(sumsBytes))
             ?? throw new InstallVerificationException($"{assetName} isn't listed in that SHA256SUMS ({repo} {tag}).");

@@ -10,6 +10,7 @@ import Foundation
 ///   JBTheatreTools --installed
 ///   JBTheatreTools --releases <id>        [--token X]
 ///   JBTheatreTools --install  <id>        [--tag vX.Y.Z] [--token X]
+///   JBTheatreTools --download <id> --tag vX.Y.Z --asset <name> --to <folder> [--json]
 ///   JBTheatreTools --uninstall <id>
 ///   JBTheatreTools --launch   <id>
 ///   JBTheatreTools --self-check           [--token X]
@@ -18,7 +19,7 @@ import Foundation
 ///   JBTheatreTools --help
 enum CLI {
     static let commands: Set<String> = [
-        "--list", "--installed", "--releases", "--install", "--uninstall",
+        "--list", "--installed", "--releases", "--install", "--download", "--uninstall",
         "--launch", "--self-check", "--self-download", "--self-update", "--code-id", "--help", "-h",
         "--backup-all", "--restore-all",
     ]
@@ -60,6 +61,9 @@ enum CLI {
         var catalogPath: String?
         var tag: String?
         var toApplications = false
+        var json = false
+        var assetName: String?
+        var toFolder: String?
         var positional: [String] = []
         var skippedCmd = false
         var i = 0
@@ -71,6 +75,9 @@ enum CLI {
             case "--catalog":          i += 1; catalogPath = i < args.count ? args[i] : nil
             case "--tag":              i += 1; tag = i < args.count ? args[i] : nil
             case "--to-applications":  toApplications = true
+            case "--json":             json = true
+            case "--asset":            i += 1; assetName = i < args.count ? args[i] : nil
+            case "--to":               i += 1; toFolder = i < args.count ? args[i] : nil
             case "--server":           i += 1; serverBase = i < args.count ? args[i] : nil
             case "--server-pass":      i += 1; serverPass = i < args.count ? args[i] : nil
             default:                   positional.append(a)
@@ -117,6 +124,9 @@ enum CLI {
         case "--installed":  installed(catalog: catalog)
         case "--releases":   releases(catalog: catalog, token: token, id: positional.first)
         case "--install":    install(catalog: catalog, token: token, id: positional.first, tag: tag, toApplications: toApplications)
+        case "--download":
+            exit(download(catalog: catalog, token: token, id: positional.first, tag: tag, assetName: assetName,
+                          folder: toFolder, json: json))
         case "--uninstall":  uninstall(catalog: catalog, id: positional.first)
         case "--launch":     launch(catalog: catalog, id: positional.first)
         case "--self-check": selfCheck(catalog: catalog, token: token)
@@ -264,6 +274,95 @@ enum CLI {
         }
     }
 
+    /// Exit codes for the verbs another program drives (the same numbers as the Windows CLI's table).
+    enum ExitCode {
+        static let ok: Int32 = 0, failed: Int32 = 1, usage: Int32 = 2, noAccess: Int32 = 3, notFound: Int32 = 4
+        static let download: Int32 = 5, rejected: Int32 = 6
+    }
+
+    /// One "error: …" line on stderr; returns the exit code.
+    private static func fail(_ code: Int32, _ message: String) -> Int32 {
+        let line = message.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: " ")
+        fputs("error: \(line)\n", stderr)
+        return code
+    }
+
+    private static func exitCode(for error: Error) -> Int32 {
+        switch error {
+        case ReleaseDownload.Failure.missingFile: return ExitCode.download
+        case ReleaseDownload.Failure.badAssetName: return ExitCode.usage
+        case is ReleaseDownload.Failure, is Minisign.VerifyError:
+            return ExitCode.rejected
+        case GitHubError.unauthorized, GitHubError.notAccessible: return ExitCode.noAccess
+        case GitHubError.noRelease, GitHubError.assetNotFound: return ExitCode.notFound
+        case is GitHubError, is URLError: return ExitCode.download
+        default: return ExitCode.failed
+        }
+    }
+
+    /// --download <id> --tag vX.Y.Z --asset <name> --to <folder> [--json]: fetches one build of a release (any
+    /// platform's, e.g. a Windows exe from this Mac) with SHA256SUMS + SHA256SUMS.minisig into <folder>, verified as
+    /// --install-file will check them, for a PC without internet. Uses this launcher's saved credentials (never printed).
+    private static func download(catalog: Catalog, token: String?, id: String?, tag: String?, assetName: String?,
+                                 folder: String?, json: Bool) -> Int32 {
+        let usage = "usage: --download <id> --tag vX.Y.Z --asset <file name> --to <folder> [--json]"
+        guard let id else { return fail(ExitCode.usage, usage) }
+        guard let app = appFor(id, catalog) else {
+            return fail(ExitCode.usage, "unknown app id \"\(id)\". Known ids: \(catalog.apps.map { $0.id }.joined(separator: ", "))")
+        }
+        guard let tag, !tag.isEmpty else { return fail(ExitCode.usage, "--download needs --tag (the release, e.g. v1.16.2).") }
+        guard let assetName, !assetName.isEmpty else { return fail(ExitCode.usage, "--download needs --asset (the build's file name, e.g. ShowDashboard-Windows-x64.exe).") }
+        guard ReleaseDownload.isPlainAssetName(assetName) else { return fail(ExitCode.usage, "“\(assetName)” isn't a release file name.") }
+        guard let folder, !folder.isEmpty else { return fail(ExitCode.usage, "--download needs --to <folder>.") }
+        guard hasAuth(token: token) else {
+            return fail(ExitCode.noAccess, "no auth (save a token or the suite passphrase in the app, set $GITHUB_TOKEN, or pass --server + --server-pass).")
+        }
+        let dir = URL(fileURLWithPath: (folder as NSString).expandingTildeInPath).standardizedFileURL
+        let client = makeClient(token: token)
+        var code = ExitCode.failed
+        runBlocking {
+            do {
+                let all = try await client.releases(owner: app.owner, repo: app.repo)
+                guard let rel = all.first(where: { VersionDisplay.equal($0.tagName, tag) }) else {
+                    code = fail(ExitCode.notFound, "\(app.name) has no release \(tag).")
+                    return
+                }
+                guard let asset = rel.assets.first(where: { $0.name == assetName }) else {
+                    let builds = rel.assets.map(\.name).filter(ReleaseDownload.isPlainAssetName)
+                    code = fail(ExitCode.notFound, "\(app.name) \(rel.tagName) has no file named \(assetName). It has: \(builds.joined(separator: ", ")).")
+                    return
+                }
+                let files = [asset] + [ReleaseDownload.sumsName, ReleaseDownload.sigName].compactMap { n in rel.assets.first { $0.name == n } }
+                guard files.count == 3 else {
+                    code = fail(ExitCode.rejected, "\(app.name) \(rel.tagName) isn't signed (no SHA256SUMS + SHA256SUMS.minisig), so a PC can't check it.")
+                    return
+                }
+                if !json { print("Downloading \(asset.name) (\(byteString(asset.size))) @ \(rel.tagName)…") }
+                let result = try await ReleaseDownload.run(folder: dir, assetName: asset.name, expectedSize: asset.size,
+                                                           repo: app.repo, tag: rel.tagName) { name, dest in
+                    guard let a = files.first(where: { $0.name == name }) else { throw GitHubError.assetNotFound(name) }
+                    try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: a.id, to: dest)
+                }
+                AppLog.shared.log("cli: downloaded \(app.id) \(rel.tagName) \(asset.name) (sha256 ok)")
+                if json {
+                    let out: [String: Any] = ["path": result.path.path, "sums": result.sums.path, "sig": result.sig.path,
+                                              "size": result.size, "sha256": result.sha256]
+                    let data = try JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+                    print(String(decoding: data, as: UTF8.self))
+                } else {
+                    print("Verified \(asset.name) (signed sha256, \(app.repo) \(rel.tagName)).")
+                    print("Saved → \(result.path.path)")
+                    print("      + \(result.sums.lastPathComponent), \(result.sig.lastPathComponent)")
+                }
+                code = ExitCode.ok
+            } catch {
+                AppLog.shared.log("cli: download \(app.id) \(tag) \(assetName) failed: \(error.localizedDescription)")
+                code = fail(exitCode(for: error), error.localizedDescription)
+            }
+        }
+        return code
+    }
+
     private static func uninstall(catalog: Catalog, id: String?) {
         guard let app = appFor(id, catalog) else { fputs("error: pass an app id.\n", stderr); exit(1) }
         do {
@@ -378,6 +477,10 @@ enum CLI {
           --installed            Show locally installed apps
           --releases  <id>       List all available versions of an app
           --install   <id>       Download & install (latest, or --tag vX.Y.Z for an older one)
+          --download  <id> --tag vX.Y.Z --asset <file name> --to <folder>
+                                 Fetch one build of a release (any platform's) with its SHA256SUMS and
+                                 SHA256SUMS.minisig into <folder>, verified, for a PC without internet
+                                 (it installs them with --install-file). --json: path, sums, sig, size, sha256
           --uninstall <id>       Remove an installed app
           --launch    <id>       Launch an installed app
           --self-check           Check whether a newer launcher release exists
@@ -392,6 +495,7 @@ enum CLI {
                  --tag <vX.Y.Z>      Install a specific release (with --install)
                  --to-applications   Install into the Applications folder (with --install)
                  --catalog <path>    Use a specific catalog.json
+                 --json              Machine-readable answer (with --download)
                  --include-passwords Also back up saved passwords (with --backup-all)
                  --no-passwords      Leave this computer's passwords as they are (with --restore-all)
                  --passphrase-stdin  Read the backup passphrase from one line of stdin
@@ -400,6 +504,9 @@ enum CLI {
 
         Note: a secret passed via --token / --server-pass is visible to other local users (process
               list / shell history). Prefer $GITHUB_TOKEN or the saved Keychain values where possible.
+
+        Exit codes (--download): 0 ok · 1 failed · 2 usage · 3 no access · 4 not found
+                    5 download failed (retry) · 6 verification failed. Errors are one line on stderr, "error: ".
         """)
     }
 

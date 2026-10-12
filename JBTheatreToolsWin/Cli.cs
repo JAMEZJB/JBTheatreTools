@@ -13,6 +13,7 @@ namespace JBTheatreTools;
 ///   JBTheatreTools.exe --releases &lt;id&gt;        [--token X]
 ///   JBTheatreTools.exe --install  &lt;id&gt;        [--tag vX.Y.Z] [--token X]
 ///   JBTheatreTools.exe --install-file &lt;id&gt; &lt;file&gt; --tag vX.Y.Z [--sums SHA256SUMS]
+///   JBTheatreTools.exe --download &lt;id&gt; --tag vX.Y.Z --asset &lt;name&gt; --to &lt;folder&gt; [--json]
 ///   JBTheatreTools.exe --uninstall &lt;id&gt;
 ///   JBTheatreTools.exe --launch   &lt;id&gt;
 ///   JBTheatreTools.exe --self-check           [--token X]
@@ -26,7 +27,7 @@ public static partial class Cli
     // the dispatch allowlist can't drift from what Run actually handles.
     public static readonly HashSet<string> Commands = new()
     {
-        "--list", "--installed", "--releases", "--install", "--install-file", "--uninstall",
+        "--list", "--installed", "--releases", "--install", "--install-file", "--download", "--uninstall",
         "--launch", "--self-check", "--self-update", "--help", "-h",
         "--backup-all", "--restore-all",
     };
@@ -71,7 +72,7 @@ public static partial class Cli
         string? catalogPath = null;
         string? tag = null;
         bool toApplications = false, json = false;
-        string? sums = null;
+        string? sums = null, assetName = null, toFolder = null;
         var positional = new List<string>();
         bool cmdSkipped = false;
         for (int i = 0; i < args.Length; i++)
@@ -86,6 +87,8 @@ public static partial class Cli
                 case "--to-applications": toApplications = true; break;
                 case "--json": json = true; break;
                 case "--sums": if (++i < args.Length) sums = args[i]; break;
+                case "--asset": if (++i < args.Length) assetName = args[i]; break;
+                case "--to": if (++i < args.Length) toFolder = args[i]; break;
                 case "--server": if (++i < args.Length) _serverBase = args[i]; break;
                 case "--server-pass": if (++i < args.Length) _serverPass = args[i]; break;
                 default: positional.Add(a); break;
@@ -146,6 +149,7 @@ public static partial class Cli
             "--releases"   => await ReleasesAsync(catalog, token, positional.FirstOrDefault()),
             "--install"    => await InstallAsync(catalog, token, positional.FirstOrDefault(), tag, toApplications),
             "--install-file" => InstallFile(catalog, positional, tag, sums, toApplications),
+            "--download"   => await DownloadAsync(catalog, token, positional.FirstOrDefault(), tag, assetName, toFolder, json),
             "--uninstall"  => Uninstall(catalog, positional.FirstOrDefault()),
             "--launch"     => Launch(catalog, positional.FirstOrDefault()),
             "--self-check" => await SelfCheckAsync(catalog, token),
@@ -392,6 +396,10 @@ public static partial class Cli
                                  Install a build already on this PC. The release's SHA256SUMS and
                                  SHA256SUMS.minisig must sit next to it (or pass --sums <path>); they're
                                  checked against the suite key, so an altered or wrong file is refused.
+          --download  <id> --tag vX.Y.Z --asset <file name> --to <folder>
+                                 Fetch one build of a release (any platform's) with its SHA256SUMS and
+                                 SHA256SUMS.minisig into <folder>, verified, for a PC without internet
+                                 (it installs them with --install-file). --json: path, sums, sig, size, sha256
           --uninstall <id>       Remove an installed app
           --launch    <id>       Launch an installed app
           --self-check           Check whether a newer launcher release exists
@@ -406,6 +414,7 @@ public static partial class Cli
                  --tag <vX.Y.Z>      Install a specific release (with --install)
                  --to-applications   Also create Start Menu + Desktop shortcuts (with --install)
                  --catalog <path>    Use a specific catalog.json
+                 --json              Machine-readable answer (with --list, --installed, --download)
                  --include-passwords Also back up saved passwords (with --backup-all)
                  --no-passwords      Leave this PC's passwords as they are (with --restore-all)
                  --passphrase-stdin  Read the backup passphrase from one line of stdin

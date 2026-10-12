@@ -145,4 +145,61 @@ public static partial class Cli
         }
         finally { InstallManager.TryDelete(cache); }
     }
+
+    /// <summary>--download &lt;id&gt; --tag vX.Y.Z --asset &lt;name&gt; --to &lt;folder&gt; [--json]: fetches one build of a
+    /// release (any platform's) with SHA256SUMS + SHA256SUMS.minisig into the folder, verified as --install-file will
+    /// check them, for a PC without internet. Uses this launcher's saved credentials or the server flags (never printed).</summary>
+    private static async Task<int> DownloadAsync(Catalog catalog, string? token, string? id, string? tag, string? assetName,
+                                                 string? folder, bool json)
+    {
+        const string usage = "usage: --download <id> --tag vX.Y.Z --asset <file name> --to <folder> [--json]";
+        if (id == null) return Fail(ExitCode.Usage, usage);
+        var app = catalog.Apps.FirstOrDefault(a => a.Id == id);
+        if (app == null) return Fail(ExitCode.Usage, $"unknown app id \"{id}\". Known ids: {string.Join(", ", catalog.Apps.Select(a => a.Id))}");
+        if (string.IsNullOrWhiteSpace(tag)) return Fail(ExitCode.Usage, "--download needs --tag (the release, e.g. v1.16.2).");
+        if (string.IsNullOrWhiteSpace(assetName)) return Fail(ExitCode.Usage, "--download needs --asset (the build's file name, e.g. ShowDashboard-Windows-x64.exe).");
+        if (!ReleaseDownload.IsPlainAssetName(assetName)) return Fail(ExitCode.Usage, $"\"{assetName}\" isn't a release file name.");
+        if (string.IsNullOrWhiteSpace(folder)) return Fail(ExitCode.Usage, "--download needs --to <folder>.");
+        if (!HasAuth(token)) return Fail(ExitCode.NoAccess, "no auth (save a token or the suite passphrase in the app, set %GITHUB_TOKEN%, or pass --server + --server-pass).");
+
+        using var client = MakeClient(token);
+        try
+        {
+            var all = await client.ReleasesAsync(app.Owner, app.Repo);
+            var rel = all.FirstOrDefault(r => VersionCompare.Equal(r.TagName, tag));
+            if (rel == null) return Fail(ExitCode.NotFound, $"{app.Name} has no release {tag}.");
+            var asset = rel.Assets.FirstOrDefault(a => a.Name == assetName);
+            if (asset == null)
+                return Fail(ExitCode.NotFound, $"{app.Name} {rel.TagName} has no file named {assetName}. It has: {string.Join(", ", rel.Assets.Select(a => a.Name).Where(ReleaseDownload.IsPlainAssetName))}.");
+            var files = new[] { asset }.Concat(rel.Assets.Where(a => a.Name is ReleaseDownload.SumsName or ReleaseDownload.SigName)).ToList();
+            if (files.Count != 3) return Fail(ExitCode.Rejected, $"{app.Name} {rel.TagName} isn't signed (no SHA256SUMS + SHA256SUMS.minisig), so a PC can't check it.");
+
+            if (!json) Console.WriteLine($"Downloading {asset.Name} ({ByteString(asset.Size)}) @ {rel.TagName}…");
+            var result = await ReleaseDownload.RunAsync(folder, asset.Name, asset.Size, app.Repo, rel.TagName, async (name, dest) =>
+            {
+                var a = files.First(f => f.Name == name);
+                try { await client.DownloadAssetAsync(app.Owner, app.Repo, a.Id, dest, null); }
+                catch (IOException ex) { throw new HttpRequestException(ex.Message, ex); }   // a failed write mid-download is a download failure
+            });
+            Log.Write($"cli: downloaded {app.Id} {rel.TagName} {asset.Name} (sha256 ok)");
+            if (json)
+                PrintJson(new JsonObject
+                {
+                    ["path"] = result.Path, ["sums"] = result.Sums, ["sig"] = result.Sig, ["size"] = result.Size, ["sha256"] = result.Sha256,
+                });
+            else
+            {
+                Console.WriteLine($"Verified {asset.Name} (signed sha256, {app.Repo} {rel.TagName}).");
+                Console.WriteLine($"Saved → {result.Path}");
+                Console.WriteLine($"      + {ReleaseDownload.SumsName}, {ReleaseDownload.SigName}");
+            }
+            return ExitCode.Ok;
+        }
+        catch (ArgumentException ex) { return Fail(ExitCode.Usage, ex.Message); }   // e.g. a --to path Windows can't use
+        catch (Exception ex)
+        {
+            Log.Write($"cli: download {app.Id} {tag} {assetName} failed: {ex.Message}");
+            return Fail(CodeFor(ex), ex.Message);
+        }
+    }
 }

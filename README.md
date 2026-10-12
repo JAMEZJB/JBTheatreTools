@@ -106,10 +106,15 @@ The same features on every launcher (the few that don't apply to Android are mar
   menu once Stagehand is installed. Every launcher run (the window, or any command) checks those links and remakes
   one that's missing or out of date, and launcher processes running at once take turns, so none undoes another's
   install.
-- **Set up a PC from another computer** *(Windows command line)* — `--installed --json` and `--list --json` list apps
-  by catalog id; `--install-file <id> <file> --tag vX.Y.Z` installs a build copied onto a PC with no internet, checked
-  against the release's own signed `SHA256SUMS` + `SHA256SUMS.minisig` (copied with it); every command exits with a
-  fixed code (listed in `--help`) and a one-line `error:` message.
+- **Set up a PC from another computer** *(Windows command line; `--download` on Mac and Windows)* — `--installed --json`
+  and `--list --json` list apps by catalog id; `--install-file <id> <file> --tag vX.Y.Z` installs a build copied onto a
+  PC with no internet, checked against the release's own signed `SHA256SUMS` + `SHA256SUMS.minisig` (copied with it).
+  The computer that does the copying fetches those three files with
+  `--download <id> --tag vX.Y.Z --asset <file name> --to <folder> [--json]`: any platform's build (a Windows exe from a
+  Mac), using this launcher's saved token or suite passphrase (never printed), verified with the same rules before it
+  reports success (a failure leaves nothing in the folder); `--json` answers `{"path","sums","sig","size","sha256"}`.
+  Every command exits with a fixed code (listed in `--help`: 0 ok, 2 usage, 3 no access, 4 not found, 5 download,
+  6 rejected, …) and a one-line `error:` message.
 
 ## App catalog (the installable apps it launches)
 
