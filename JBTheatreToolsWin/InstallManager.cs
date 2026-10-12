@@ -61,13 +61,17 @@ public sealed class InstallManager
     public string CacheDir { get; }
     public string ManifestPath { get; }
 
+    /// <summary>Held for every change to installed.json, the apps folder and the connector entry points — across
+    /// processes, so the window and a command-line install running at the same time can't lose each other's
+    /// records or work from an old copy of the manifest.</summary>
+    public SupportLock Lock { get; }
+
     // Resolution caches for the read hot path. InstalledVersion/InstalledPath/InstalledDisplayName are called
     // per app on every refresh; each used to deserialize installed.json from disk (and DisplayName re-read the
     // exe's version info) every call. Cache a manifest snapshot + the resolved path/name per id, invalidated
     // on any manifest write (the only thing that changes what's on disk). `lock` is re-entrant, so the
     // resolution methods can call one another under one lock.
     private readonly object _readLock = new();
-    private readonly object _mutationLock = new();
     private Dictionary<string, InstalledRecord>? _snapshot;
     private readonly Dictionary<string, string?> _pathCache = new();
     private readonly Dictionary<string, string?> _nameCache = new();
@@ -81,6 +85,7 @@ public sealed class InstallManager
         AppsDir = Path.Combine(SupportDir, "apps");
         CacheDir = Path.Combine(SupportDir, "cache");
         ManifestPath = Path.Combine(SupportDir, "installed.json");
+        Lock = new SupportLock(SupportDir);
         Directory.CreateDirectory(AppsDir);
         Directory.CreateDirectory(CacheDir);
     }
@@ -121,11 +126,17 @@ public sealed class InstallManager
         try { ManifestChanged?.Invoke(); } catch (Exception ex) { Log.Write($"after manifest write: {ex.Message}"); }
     }
 
+    /// <summary>Drops the read caches so the next read comes from disk — another process may have changed it.</summary>
+    public void Refresh()
+    {
+        lock (_readLock) { _snapshot = null; _pathCache.Clear(); _nameCache.Clear(); }
+    }
+
     /// <summary>Raised after every manifest write (install, update, removal) — connectors.json follows it.</summary>
     public event Action? ManifestChanged;
 
-    /// <summary>A cached manifest snapshot for the read hot path (this app is the only writer, so a snapshot
-    /// is authoritative between writes). Caller holds <c>_readLock</c>.</summary>
+    /// <summary>A cached manifest snapshot for the read hot path, current between this process's writes (another
+    /// launcher process's change shows after <see cref="Refresh"/>). Caller holds <c>_readLock</c>.</summary>
     private Dictionary<string, InstalledRecord> Snapshot() => _snapshot ??= Manifest();
 
     public string? InstalledVersion(string id)
@@ -199,7 +210,11 @@ public sealed class InstallManager
     /// distinct name on Windows, so no rename is needed.) No-op when nothing matches.</summary>
     public void MigrateVariantSlots(IEnumerable<CatalogApp> apps)
     {
-        lock (_mutationLock)
+        // Almost always nothing to do: only take the shared lock (which may wait on another process) when there is.
+        var current = Manifest();
+        if (!apps.Any(a => a.HasVariants && current.TryGetValue(a.Id, out var r) && r.Variant != null && !a.IsDefaultVariant(r.Variant)))
+            return;
+        using (Lock.Hold())
         {
             var m = Manifest();
             bool changed = false;
@@ -227,7 +242,7 @@ public sealed class InstallManager
         var payload = InstallTransaction.Install(dir, key, downloadedExe, assetName,
             FullApp.ExpectedStem(app.Name, app.VariantLabel(variant)), staged =>
             {
-                lock (_mutationLock)
+                using (Lock.Hold())
                 {
                     // Never overwrite unreadable metadata with an apparently empty inventory.
                     var m = Manifest(strict: true);
@@ -251,7 +266,7 @@ public sealed class InstallManager
         {
             // Shortcuts change only AFTER payload + manifest commit. Preserve an old shortcut and its
             // payload if recreating it fails, rather than removing the user's working link first.
-            lock (_mutationLock)
+            using (Lock.Hold())
             {
                 var m = Manifest(strict: true);
                 if (m.TryGetValue(key, out var current) && current.Path == payload.Executable)
@@ -336,7 +351,7 @@ public sealed class InstallManager
             if (!Directory.Exists(appDirectory) || !File.Exists(ManifestPath)) return;
             var prefix = slot + "-";
             List<string> orphans;
-            lock (_mutationLock)
+            using (Lock.Hold())
             {
                 var referenced = Manifest(strict: true).Values
                     .SelectMany(r => new[] { r.InstallDir, r.Path })
@@ -373,8 +388,33 @@ public sealed class InstallManager
     }
 
     /// <summary>True when a running process's image IS <paramref name="path"/> (a single-file install) or lives under
-    /// it (a one-dir install).</summary>
-    private static bool AnyProcessRunsFrom(string path)
+    /// it (a one-dir install), or when Windows reports one of its programs in use.</summary>
+    private static bool AnyProcessRunsFrom(string path) => ProcessImageUnder(path) || ExecutableInUse(path);
+
+    /// <summary>A program started through its connector entry point (bin\&lt;id&gt;, a junction — how Claude starts
+    /// every app's connector) names that path as its image, not the version folder, so the process list misses it. A
+    /// running program still can't be opened for writing, whatever path started it.</summary>
+    private static bool ExecutableInUse(string path)
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        IEnumerable<string> exes;
+        try
+        {
+            exes = File.Exists(path) ? new[] { path }
+                 : Directory.Exists(path) ? Directory.EnumerateFiles(path, "*.exe", SearchOption.AllDirectories)
+                 : Array.Empty<string>();
+            foreach (var exe in exes)
+            {
+                try { using var probe = new FileStream(exe, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete); }
+                catch (IOException) { return true; }
+                catch (UnauthorizedAccessException) { /* read-only file: says nothing about use */ }
+            }
+        }
+        catch (Exception) { /* unreadable folder: the process list decides */ }
+        return false;
+    }
+
+    private static bool ProcessImageUnder(string path)
     {
         var full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
         var prefix = full + Path.DirectorySeparatorChar;
@@ -408,7 +448,7 @@ public sealed class InstallManager
     /// sibling variant (Light and Full share apps/&lt;id&gt;/) survives.</summary>
     public void Uninstall(string installKey)
     {
-        lock (_mutationLock)
+        using (Lock.Hold())
         {
             var m = Manifest(strict: true);
             if (m.Remove(installKey, out var rec))
@@ -458,7 +498,7 @@ public sealed class InstallManager
     /// is the display name to use (already carrying any variant suffix).</summary>
     public void SyncShortcuts(string installKey, string shortcutName, bool toApplications)
     {
-        lock (_mutationLock)
+        using (Lock.Hold())
         {
             var m = Manifest();
             if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
@@ -484,7 +524,7 @@ public sealed class InstallManager
 
     public void SetDesktopShortcut(string installKey, string shortcutName, bool on)
     {
-        lock (_mutationLock)
+        using (Lock.Hold())
         {
             var m = Manifest();
             if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
@@ -504,7 +544,7 @@ public sealed class InstallManager
 
     public void SetStartMenuShortcut(string installKey, string shortcutName, bool on)
     {
-        lock (_mutationLock)
+        using (Lock.Hold())
         {
             var m = Manifest();
             if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
@@ -605,7 +645,7 @@ public sealed class InstallManager
         if (asset.Size > 0 && fi.Exists && fi.Length != asset.Size)
         {
             TryDelete(file);
-            throw new Exception($"Download is {fi.Length} bytes but the release lists {asset.Size}. Aborting install.");
+            throw new InstallVerificationException($"Download is {fi.Length} bytes but the release lists {asset.Size}. Aborting install.");
         }
         var sumsAsset = release.Assets.FirstOrDefault(a => a.Name == "SHA256SUMS");
         if (sumsAsset == null) return VerifyResult.NoManifest;
@@ -633,7 +673,7 @@ public sealed class InstallManager
             catch (Minisign.VerifyException ex)
             {
                 TryDelete(file);
-                throw new Exception($"Refusing {asset.Name}: {ex.Message} Aborting install.");
+                throw new InstallVerificationException($"Refusing {asset.Name}: {ex.Message} Aborting install.");
             }
             signed = true;
         }
@@ -645,10 +685,30 @@ public sealed class InstallManager
         if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
         {
             TryDelete(file);
-            throw new Exception($"Checksum mismatch for {asset.Name} — the download does not match the release's SHA256SUMS. Aborting install.");
+            throw new InstallVerificationException($"Checksum mismatch for {asset.Name} — the download does not match the release's SHA256SUMS. Aborting install.");
         }
         if (signed) onVerifiedHash?.Invoke(expected.ToLowerInvariant());
         return signed ? VerifyResult.Verified : VerifyResult.Unsigned;
+    }
+
+    /// <summary>The offline twin of <see cref="VerifyDownloadAsync"/>, for a build copied onto this PC rather than
+    /// downloaded by it (<c>--install-file</c>): the release's SHA256SUMS and SHA256SUMS.minisig travel with the file,
+    /// and the embedded suite key must verify them for THIS release (<c>&lt;repo&gt; &lt;tag&gt;</c>) before the file's
+    /// hash is compared. Strict: anything missing or wrong throws <see cref="InstallVerificationException"/>.</summary>
+    public static void VerifyLocalFile(string file, string assetName, string sumsPath, string repo, string tag)
+    {
+        var sigPath = sumsPath + ".minisig";
+        if (!File.Exists(sumsPath))
+            throw new InstallVerificationException($"No SHA256SUMS at {sumsPath}. Copy the release's SHA256SUMS and SHA256SUMS.minisig next to the file (or pass --sums).");
+        if (!File.Exists(sigPath))
+            throw new InstallVerificationException($"No signature at {sigPath}. Copy the release's SHA256SUMS.minisig next to its SHA256SUMS.");
+        var sumsBytes = File.ReadAllBytes(sumsPath);
+        try { Minisign.Verify(sumsBytes, File.ReadAllText(sigPath), $"{repo} {tag}"); }
+        catch (Minisign.VerifyException ex) { throw new InstallVerificationException($"Refusing {assetName}: {ex.Message}"); }
+        var expected = ExpectedSha256(assetName, System.Text.Encoding.UTF8.GetString(sumsBytes))
+            ?? throw new InstallVerificationException($"{assetName} isn't listed in that SHA256SUMS ({repo} {tag}).");
+        if (!string.Equals(expected, Sha256Hex(file), StringComparison.OrdinalIgnoreCase))
+            throw new InstallVerificationException($"Checksum mismatch for {assetName}: the file doesn't match {repo} {tag}'s signed SHA256SUMS.");
     }
 
     /// <summary>Why a non-Verified outcome blocks a strict (current-release) install — shared by the GUI
@@ -679,3 +739,6 @@ public sealed class InstallManager
         try { if (File.Exists(path)) File.Delete(path); } catch { /* best effort */ }
     }
 }
+
+/// <summary>A build that failed its integrity check (size, signed SHA256SUMS or hash) — never installed.</summary>
+public sealed class InstallVerificationException(string message) : Exception(message);

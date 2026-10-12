@@ -103,7 +103,13 @@ The same features on every launcher (the few that don't apply to Android are mar
   `connectors.json` next to the install list (on Windows through a folder link that follows updates), shares
   show lock with Stagehand and the apps through `claude.json` ("Show lock for every app" in Settings → Claude, and each
   app's own Show lock in its details, marked "Show lock on" on its row), and has Open Stagehand in Settings and the More
-  menu once Stagehand is installed.
+  menu once Stagehand is installed. Every launcher run (the window, or any command) checks those links and remakes
+  one that's missing or out of date, and launcher processes running at once take turns, so none undoes another's
+  install.
+- **Set up a PC from another computer** *(Windows command line)* — `--installed --json` and `--list --json` list apps
+  by catalog id; `--install-file <id> <file> --tag vX.Y.Z` installs a build copied onto a PC with no internet, checked
+  against the release's own signed `SHA256SUMS` + `SHA256SUMS.minisig` (copied with it); every command exits with a
+  fixed code (listed in `--help`) and a one-line `error:` message.
 
 ## App catalog (the installable apps it launches)
 

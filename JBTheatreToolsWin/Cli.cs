@@ -8,10 +8,11 @@ namespace JBTheatreTools;
 ///
 /// Token order: <c>--token &lt;pat&gt;</c>, then <c>$GITHUB_TOKEN</c>, then Credential Manager.
 ///
-///   JBTheatreTools.exe --list                 [--token X] [--catalog path]
-///   JBTheatreTools.exe --installed
+///   JBTheatreTools.exe --list                 [--json] [--token X] [--catalog path]
+///   JBTheatreTools.exe --installed            [--json]
 ///   JBTheatreTools.exe --releases &lt;id&gt;        [--token X]
 ///   JBTheatreTools.exe --install  &lt;id&gt;        [--tag vX.Y.Z] [--token X]
+///   JBTheatreTools.exe --install-file &lt;id&gt; &lt;file&gt; --tag vX.Y.Z [--sums SHA256SUMS]
 ///   JBTheatreTools.exe --uninstall &lt;id&gt;
 ///   JBTheatreTools.exe --launch   &lt;id&gt;
 ///   JBTheatreTools.exe --self-check           [--token X]
@@ -25,7 +26,7 @@ public static partial class Cli
     // the dispatch allowlist can't drift from what Run actually handles.
     public static readonly HashSet<string> Commands = new()
     {
-        "--list", "--installed", "--releases", "--install", "--uninstall",
+        "--list", "--installed", "--releases", "--install", "--install-file", "--uninstall",
         "--launch", "--self-check", "--self-update", "--help", "-h",
         "--backup-all", "--restore-all",
     };
@@ -69,7 +70,8 @@ public static partial class Cli
         string? token = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
         string? catalogPath = null;
         string? tag = null;
-        bool toApplications = false;
+        bool toApplications = false, json = false;
+        string? sums = null;
         var positional = new List<string>();
         bool cmdSkipped = false;
         for (int i = 0; i < args.Length; i++)
@@ -82,6 +84,8 @@ public static partial class Cli
                 case "--catalog": if (++i < args.Length) catalogPath = args[i]; break;
                 case "--tag": if (++i < args.Length) tag = args[i]; break;
                 case "--to-applications": toApplications = true; break;
+                case "--json": json = true; break;
+                case "--sums": if (++i < args.Length) sums = args[i]; break;
                 case "--server": if (++i < args.Length) _serverBase = args[i]; break;
                 case "--server-pass": if (++i < args.Length) _serverPass = args[i]; break;
                 default: positional.Add(a); break;
@@ -89,17 +93,23 @@ public static partial class Cli
         }
         // Only verbs that talk to GitHub need credentials. Local verbs (--installed / --uninstall /
         // --launch) must never touch the Credential Manager / Keychain-equivalent (audit F14).
-        var needsAuth = cmd is not ("--installed" or "--uninstall" or "--launch" or "--self-update");
+        var needsAuth = cmd is not ("--installed" or "--uninstall" or "--launch" or "--self-update" or "--install-file");
         if (needsAuth) token ??= SafeLoadToken();
 
         Catalog catalog;
         try { catalog = Catalog.Load(catalogPath); }
-        catch (Exception ex) { Console.Error.WriteLine($"error: could not load catalog: {ex.Message}"); return 1; }
-        // Normalise the shared install manifest the same way the GUI does (v1.15.0 → per-variant slots),
-        // so the CLI sees the same slots as the app.
-        InstallManager.Shared.MigrateVariantSlots(catalog.Apps);
+        catch (Exception ex) { return Fail(ExitCode.Failed, $"could not load catalog: {ex.Message}"); }
+        try
+        {
+            // Normalise the shared install manifest the same way the GUI does (v1.15.0 → per-variant slots),
+            // so the CLI sees the same slots as the app.
+            InstallManager.Shared.MigrateVariantSlots(catalog.Apps);
+        }
+        catch (Exception ex) { return Fail(CodeFor(ex), ex.Message); }
+        // Every run brings connectors.json and the entry points in step (and repairs them): Claude starts apps through
+        // them, and another launcher process may have changed what's installed since they were last written.
+        if (OperatingSystem.IsWindows()) ConnectorShims.Start(catalog.Apps);
         if (cmd is "--backup-all" or "--restore-all") return await BackupCommandAsync(cmd, catalog, args);
-        if (cmd is "--install" or "--uninstall" && OperatingSystem.IsWindows()) ConnectorShims.Start(catalog.Apps);
 
         // Resolve download auth: explicit server flags win (either flag implies server mode, the URL
         // defaulting to the built-in relay); then a usable token; then the GUI-configured server mode
@@ -126,18 +136,16 @@ public static partial class Cli
         }
 
         // Show lock (set in the app) pauses installs, updates and removals — the command line honours it too.
-        if ((settings.ShowLock || ClaudeSettingsFile.SuiteShowLock() == true) && cmd is "--install" or "--uninstall")
-        {
-            Console.Error.WriteLine("error: show lock is on — installs, updates and uninstalls are paused. Turn it off in JB Theatre Tools (More ▾ → Show lock) first.");
-            return 1;
-        }
+        if ((settings.ShowLock || ClaudeSettingsFile.SuiteShowLock() == true) && cmd is "--install" or "--install-file" or "--uninstall")
+            return Fail(ExitCode.ShowLock, "show lock is on — installs, updates and uninstalls are paused. Turn it off in JB Theatre Tools (More ▾ → Show lock) first.");
 
         return cmd switch
         {
-            "--list"       => await ListAsync(catalog, token),
-            "--installed"  => Installed(catalog),
+            "--list"       => json ? await ListJsonAsync(catalog, token) : await ListAsync(catalog, token),
+            "--installed"  => json ? InstalledJson(catalog) : Installed(catalog),
             "--releases"   => await ReleasesAsync(catalog, token, positional.FirstOrDefault()),
             "--install"    => await InstallAsync(catalog, token, positional.FirstOrDefault(), tag, toApplications),
+            "--install-file" => InstallFile(catalog, positional, tag, sums, toApplications),
             "--uninstall"  => Uninstall(catalog, positional.FirstOrDefault()),
             "--launch"     => Launch(catalog, positional.FirstOrDefault()),
             "--self-check" => await SelfCheckAsync(catalog, token),
@@ -208,8 +216,8 @@ public static partial class Cli
     private static async Task<int> ReleasesAsync(Catalog catalog, string? token, string? id)
     {
         var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
-        if (app == null) { Console.Error.WriteLine($"error: pass an app id. Known ids: {string.Join(", ", catalog.Apps.Select(a => a.Id))}"); return 1; }
-        if (!HasAuth(token)) { Console.Error.WriteLine("error: no auth (token or --server + --server-pass)."); return 1; }
+        if (app == null) return Fail(ExitCode.Usage, $"pass an app id. Known ids: {string.Join(", ", catalog.Apps.Select(a => a.Id))}");
+        if (!HasAuth(token)) return Fail(ExitCode.NoAccess, "no auth (token or --server + --server-pass).");
         using var client = MakeClient(token);
         try
         {
@@ -223,30 +231,27 @@ public static partial class Cli
             }
             return 0;
         }
-        catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
+        catch (Exception ex) { return Fail(CodeFor(ex), ex.Message); }
     }
 
     private static async Task<int> InstallAsync(Catalog catalog, string? token, string? id, string? tag, bool toApplications)
     {
         var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
-        if (app == null)
-        {
-            Console.Error.WriteLine($"error: pass an app id. Known ids: {string.Join(", ", catalog.Apps.Select(a => a.Id))}");
-            return 1;
-        }
-        if (!HasAuth(token)) { Console.Error.WriteLine("error: no auth (set $GITHUB_TOKEN, pass --token, save one in the app, or use --server + --server-pass)."); return 1; }
+        if (app == null) return Fail(ExitCode.Usage, $"pass an app id. Known ids: {string.Join(", ", catalog.Apps.Select(a => a.Id))}");
+        if (!HasAuth(token)) return Fail(ExitCode.NoAccess, "no auth (set $GITHUB_TOKEN, pass --token, save one in the app, or use --server + --server-pass).");
 
         using var client = MakeClient(token);
+        bool downloading = false;
         try
         {
             var all = await client.ReleasesAsync(app.Owner, app.Repo);
             var rel = tag != null
                 ? all.FirstOrDefault(r => VersionCompare.Equal(r.TagName, tag))   // "1.2.0" finds "v1.2.0"
                 : Versions.Latest(all);
-            if (rel == null) { Console.Error.WriteLine($"error: version {tag ?? "latest"} not found."); return 1; }
+            if (rel == null) return Fail(ExitCode.NotFound, $"version {tag ?? "latest"} not found.");
             var name = AssetName(app);
             var asset = rel.Assets.FirstOrDefault(a => a.Name == name);
-            if (asset == null) { Console.Error.WriteLine($"error: release {rel.TagName} has no Windows asset{(name == null ? "" : $" ({name})")}."); return 1; }
+            if (asset == null) return Fail(ExitCode.NotFound, $"release {rel.TagName} has no Windows asset{(name == null ? "" : $" ({name})")}.");
 
             Console.WriteLine($"Downloading {asset.Name} ({ByteString(asset.Size)}) @ {rel.TagName}…");
             var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{app.Id}-{rel.TagName}-{asset.Name}");
@@ -256,7 +261,9 @@ public static partial class Cli
                 int pct = (int)(p * 100);
                 if (pct != last && pct % 10 == 0) { last = pct; Console.WriteLine($"  {pct}%"); }
             });
+            downloading = true;
             await client.DownloadAssetAsync(app.Owner, app.Repo, asset.Id, cache, progress);
+            downloading = false;
             var verification = await InstallManager.VerifyDownloadAsync(cache, asset, rel, app.Owner, app.Repo, client);
             // Strict for current releases (no --tag): must checksum-verify. An explicit --tag install
             // (older build) stays verify-if-present. A hash mismatch always aborts (throws above).
@@ -265,8 +272,7 @@ public static partial class Cli
                 InstallManager.TryDelete(cache);
                 var reason = InstallManager.StrictFailureReason(verification, asset.Name);
                 Log.Write($"cli: install {app.Id} {rel.TagName} BLOCKED (strict) — {reason}");
-                Console.Error.WriteLine($"error: refusing to install {app.Name} {rel.TagName} — {reason}. (Re-run with --tag {rel.TagName} to install it anyway, unverified.)");
-                return 1;
+                return Fail(ExitCode.Rejected, $"refusing to install {app.Name} {rel.TagName} — {reason}. (Re-run with --tag {rel.TagName} to install it anyway, unverified.)");
             }
             Console.WriteLine(verification switch
             {
@@ -283,13 +289,13 @@ public static partial class Cli
             Console.WriteLine($"Installed {app.Name} {rel.TagName} → {dest}");
             return 0;
         }
-        catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
+        catch (Exception ex) { return Fail(CodeFor(ex, downloading), ex.Message); }
     }
 
     private static int Uninstall(Catalog catalog, string? id)
     {
         var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
-        if (app == null) { Console.Error.WriteLine("error: pass an app id."); return 1; }
+        if (app == null) return Fail(ExitCode.Usage, "pass an app id.");
         try
         {
             var before = InstallManager.Shared.InstalledVersion(app.Id);
@@ -297,15 +303,16 @@ public static partial class Cli
             if (before != null) History.Add(app.Id, app.Name, "uninstall", before);
             Log.Write($"cli: uninstalled {app.Id}"); Console.WriteLine($"Uninstalled {app.Name}."); return 0;
         }
-        catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
+        catch (Exception ex) { return Fail(CodeFor(ex), ex.Message); }
     }
 
     private static int Launch(Catalog catalog, string? id)
     {
         var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
-        if (app == null) { Console.Error.WriteLine("error: pass an app id."); return 1; }
+        if (app == null) return Fail(ExitCode.Usage, "pass an app id.");
+        if (InstallManager.Shared.InstalledPath(app.Id) == null) return Fail(ExitCode.NotFound, $"{app.Name} isn't installed.");
         try { InstallManager.Shared.Launch(app); Log.Write($"cli: launched {app.Id}"); Console.WriteLine($"Launched {app.Name}."); return 0; }
-        catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); return 1; }
+        catch (Exception ex) { return Fail(CodeFor(ex), ex.Message); }
     }
 
     /// <summary>--self-update: the launcher's in-place update, headless — this exe is replaced where it is (same name),
@@ -317,10 +324,7 @@ public static partial class Cli
         if (s == null) { Console.Error.WriteLine("error: no `self` entry in catalog."); return 1; }
         // The launcher's own show lock, or the suite-wide one set from Stagehand or an app (claude.json).
         if (settings.ShowLock || ClaudeSettingsFile.SuiteShowLock() == true)
-        {
-            Console.Error.WriteLine("error: show lock is on — turn it off in JB Theatre Tools first.");
-            return 1;
-        }
+            return Fail(ExitCode.ShowLock, "show lock is on — turn it off in JB Theatre Tools first.");
         Versions.DevChannel = settings.DevChannel;   // the same pick the window makes on this machine
         var current = MainForm.CurrentVersion();
         try
@@ -337,11 +341,7 @@ public static partial class Cli
             Console.WriteLine($"JB Theatre Tools v{current} is up to date.");
             return 0;
         }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"error: {ex.Message}");
-            return 1;
-        }
+        catch (Exception ex) { return Fail(CodeFor(ex), ex.Message); }
     }
 
     private static async Task<int> SelfCheckAsync(Catalog catalog, string? token)
@@ -384,10 +384,14 @@ public static partial class Cli
         """
         JBTheatreTools — theatre/AV app launcher (headless CLI)
 
-          --list                 List the catalog with installed & latest versions
-          --installed            Show locally installed apps
+          --list                 List the catalog with installed & latest versions (--json: by catalog id)
+          --installed            Show locally installed apps (--json: by catalog id)
           --releases  <id>       List all available versions of an app
           --install   <id>       Download & install (latest, or --tag vX.Y.Z for an older one)
+          --install-file <id> <file> --tag vX.Y.Z
+                                 Install a build already on this PC. The release's SHA256SUMS and
+                                 SHA256SUMS.minisig must sit next to it (or pass --sums <path>); they're
+                                 checked against the suite key, so an altered or wrong file is refused.
           --uninstall <id>       Remove an installed app
           --launch    <id>       Launch an installed app
           --self-check           Check whether a newer launcher release exists
@@ -407,6 +411,10 @@ public static partial class Cli
                  --passphrase-stdin  Read the backup passphrase from one line of stdin
                                      (else %JBTT_SETTINGS_PASSPHRASE%; never on the command line)
                  --apps <a,b>        Only these app ids;  --no-launcher: leave the launcher's own settings out
+
+        Exit codes: 0 ok · 1 failed · 2 usage · 3 no access · 4 not found · 5 download failed (retry)
+                    6 verification failed / wrong file · 7 show lock on · 8 busy (another install) — retry
+                    Errors are one line on stderr, starting "error: ".
 
         Note: a secret passed via --token / --server-pass is visible to other local users (process
               list / shell history). Prefer $GITHUB_TOKEN or the saved Credential Manager values.

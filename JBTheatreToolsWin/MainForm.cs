@@ -752,8 +752,12 @@ public sealed class MainForm : Form
             return;
         }
 
-        InstallManager.Shared.MigrateVariantSlots(_catalog.Apps);   // v1.15.0 → per-variant install slots
-        ConnectorShims.Start(_catalog.Apps);   // connectors.json + stable entry points follow every install from here
+        try { InstallManager.Shared.MigrateVariantSlots(_catalog.Apps); }   // v1.15.0 → per-variant install slots
+        catch (Exception ex) { Log.Write($"variant slots: {ex.Message}"); }
+        // connectors.json + stable entry points follow every install from here. Off the window's thread: the first pass
+        // may make every app's entry point, and waits while another launcher process is installing.
+        var apps = _catalog.Apps;
+        _ = Task.Run(() => ConnectorShims.Start(apps));
         _list.Controls.Clear();
         _rows.Clear();
         foreach (var app in _catalog.Apps)
@@ -1399,10 +1403,25 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Per-app shortcut toggle from the row menu (desktop: true=Desktop, false=Start Menu).</summary>
-    private void ToggleShortcut(AppRowControl row, bool desktop, bool add)
+    private async void ToggleShortcut(AppRowControl row, bool desktop, bool add)
     {
-        if (desktop) InstallManager.Shared.SetDesktopShortcut(InstallKey(row.App), ShortcutName(row), add);
-        else InstallManager.Shared.SetStartMenuShortcut(InstallKey(row.App), ShortcutName(row), add);
+        var key = InstallKey(row.App);
+        var name = ShortcutName(row);
+        // Off the window's thread: it waits while another launcher process (a command-line install) is installing.
+        try
+        {
+            await Task.Run(() =>
+            {
+                if (desktop) InstallManager.Shared.SetDesktopShortcut(key, name, add);
+                else InstallManager.Shared.SetStartMenuShortcut(key, name, add);
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"shortcut for {row.App.Id}: {ex.Message}");
+            HouseMessage.Show(this, ex.Message, "JB Theatre Tools", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
         Log.Write($"{(add ? "added" : "removed")} {(desktop ? "desktop" : "start-menu")} shortcut for {row.App.Id}");
     }
 
@@ -2204,8 +2223,8 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Errors worth ONE automatic retry in a batch: network/transport and I/O hiccups. Verification
-    /// failures (strict-verify BLOCKED, checksum/size mismatch, minisign) throw plain Exception and are
-    /// deliberately NOT retried; nor are auth/access errors or "no asset".</summary>
+    /// failures (strict-verify BLOCKED, checksum/size mismatch, minisign) are deliberately NOT retried; nor are
+    /// auth/access errors or "no asset". Another launcher process holding the install lock past its wait is.</summary>
     private static bool IsTransient(Exception ex) =>
         ex is HttpRequestException or IOException or OperationCanceledException
         || (ex is GitHubException ge && ge.Kind == GitHubErrorKind.Http);
@@ -2636,7 +2655,7 @@ public sealed class MainForm : Form
 
     /// <summary>When the install-location setting changes, offer to add/remove shortcuts for ALL
     /// installed apps so they don't end up split. (Windows: the exe never moves — only its shortcuts.)</summary>
-    private void ReconcileInstallLocation(bool toApplications)
+    private async void ReconcileInstallLocation(bool toApplications)
     {
         // Consider every installed slot (both variants of a variant app), not just the selected ones.
         var affected = AllSlots().Where(s =>
@@ -2652,8 +2671,13 @@ public sealed class MainForm : Form
                 "Install location changed", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
             return;
 
-        foreach (var s in affected)
-            InstallManager.Shared.SyncShortcuts(s.key, s.name, toApplications);
+        // Off the window's thread: it waits while another launcher process (a command-line install) is installing.
+        try { await Task.Run(() => { foreach (var s in affected) InstallManager.Shared.SyncShortcuts(s.key, s.name, toApplications); }); }
+        catch (Exception ex)
+        {
+            Log.Write($"shortcuts: {ex.Message}");
+            HouseMessage.Show(this, ex.Message, "JB Theatre Tools", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     // ── After a check: notifications, automatic updates, the scheduler ───────────────────────────
