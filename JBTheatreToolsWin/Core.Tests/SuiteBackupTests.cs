@@ -259,6 +259,8 @@ public sealed class SuiteBackupTests : IDisposable
         var doc = Connectors.Document(entries, x => $"C:\\stable\\{x.Id}\\app.exe");
         Assert.Equal(1, doc["schema"]!.GetValue<int>());
         Assert.Equal("C:\\stable\\pdftools\\app.exe", doc["apps"]!["pdftools"]!["command"]!.GetValue<string>());
+        // The program itself, for an elevated caller that won't follow the stable command's folder link.
+        Assert.Equal("C:\\apps\\pdftools@full\\app.exe", doc["apps"]!["pdftools"]!["path"]!.GetValue<string>());
         Assert.Equal("--mcp", doc["apps"]!["pdftools"]!["args"]![0]!.GetValue<string>());
         var path = Path.Combine(_dir, "connectors.json");
         Connectors.Write(path, doc);

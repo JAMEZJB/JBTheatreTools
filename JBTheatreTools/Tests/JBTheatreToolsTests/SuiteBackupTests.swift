@@ -252,6 +252,7 @@ final class SuiteBackupTests: XCTestCase {
         XCTAssertEqual(Set(e.keys), ["pdftools"], "DMX is older than its first connector build; Stagehand's dev build predates v0.1.0")
         XCTAssertEqual(e["pdftools"]?["edition"] as? String, "full")
         XCTAssertEqual(e["pdftools"]?["command"] as? String, full.appendingPathComponent("Contents/MacOS/PDF Full").path)
+        XCTAssertEqual(e["pdftools"]?["path"] as? String, e["pdftools"]?["command"] as? String, "a bundle keeps its place: path = command")
         XCTAssertEqual(e["pdftools"]?["args"] as? [String], ["--mcp"])
 
         let url = dir.appendingPathComponent("connectors.json")

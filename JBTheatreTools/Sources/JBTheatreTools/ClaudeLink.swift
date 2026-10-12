@@ -97,7 +97,10 @@ enum Connectors {
                 let key = app.installKey(variantId: vid)
                 guard let rec = manifest[key], hasConnector(app, installed: rec.version),
                       let exe = SuiteBackup.executable(ofApp: URL(fileURLWithPath: rec.path)) else { continue }
-                var e: [String: Any] = ["name": app.name, "command": exe.path, "args": ["--mcp"], "version": rec.version]
+                // "path" is the program itself. On a Mac it is the command too (a bundle keeps its place across updates);
+                // Windows' command goes through a folder link elevated processes won't follow, so they use "path".
+                var e: [String: Any] = ["name": app.name, "command": exe.path, "path": exe.path, "args": ["--mcp"],
+                                        "version": rec.version]
                 if app.hasVariants, let vid { e["edition"] = vid }
                 out[app.id] = e
                 break

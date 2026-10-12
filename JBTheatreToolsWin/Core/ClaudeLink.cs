@@ -96,7 +96,9 @@ public static class ShowLockWords
 /// <summary><c>connectors.json</c> — for every installed app whose build is a Claude connector (<c>&lt;app&gt; --mcp</c>),
 /// a command that keeps working across updates. Stagehand starts only these (an app without a connector would open its
 /// window instead). Next to installed.json (%LOCALAPPDATA%\JBTheatreTools\), rewritten after every install, update and
-/// removal.</summary>
+/// removal. Each entry also gives <c>path</c>, the installed program itself: on Windows the command goes through a
+/// folder link (bin\&lt;id&gt;) that an ELEVATED process won't follow (Windows' redirection guard refuses a link a normal
+/// user made, WinError 448), so an elevated caller uses <c>path</c>, which changes with each update.</summary>
 public static class Connectors
 {
     /// <summary>One app as the connector list sees it: the first release with a connector, and its install slots
@@ -131,7 +133,11 @@ public static class Connectors
         var apps = new JsonObject();
         foreach (var e in entries)
         {
-            var o = new JsonObject { ["name"] = e.Name, ["command"] = stableCommand(e), ["args"] = new JsonArray("--mcp"), ["version"] = e.Version };
+            var o = new JsonObject
+            {
+                ["name"] = e.Name, ["command"] = stableCommand(e), ["path"] = e.Executable, ["args"] = new JsonArray("--mcp"),
+                ["version"] = e.Version,
+            };
             if (e.Edition != null) o["edition"] = e.Edition;
             apps[e.Id] = o;
         }

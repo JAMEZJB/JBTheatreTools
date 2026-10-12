@@ -100,7 +100,8 @@ The same features on every launcher (the few that don't apply to Android are mar
   version can't back up yet says so. The command line does the same with `--backup-all` / `--restore-all`.
 - **Claude and Stagehand** *(desktop)* — Stagehand, installed like any app, sets which apps Claude can use and what
   it may do in each. The launcher keeps a stable command for every installed app that can work with Claude, in
-  `connectors.json` next to the install list (on Windows through a folder link that follows updates), shares
+  `connectors.json` next to the install list (on Windows through a folder link that follows updates; each entry's
+  `path` is the program itself, for a process running as administrator, which Windows won't let follow that link), shares
   show lock with Stagehand and the apps through `claude.json` ("Show lock for every app" in Settings → Claude, and each
   app's own Show lock in its details, marked "Show lock on" on its row), and has Open Stagehand in Settings and the More
   menu once Stagehand is installed. Every launcher run (the window, or any command) checks those links and remakes
