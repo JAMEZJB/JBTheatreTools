@@ -6,12 +6,12 @@ import Foundation
 ///
 /// Token resolution order: `--token <pat>`, then `$GITHUB_TOKEN`, then the Keychain.
 ///
-///   JBTheatreTools --list                 [--token X] [--catalog path]
+///   JBTheatreTools --list                 [--json] [--token X] [--catalog path]
 ///   JBTheatreTools --installed
 ///   JBTheatreTools --releases <id>        [--token X]
-///   JBTheatreTools --install  <id>        [--tag vX.Y.Z] [--token X]
-///   JBTheatreTools --download <id> --tag vX.Y.Z --asset <name> --to <folder> [--json]
-///   JBTheatreTools --uninstall <id>
+///   JBTheatreTools --install  <id>        [--tag vX.Y.Z] [--edition E] [--token X]
+///   JBTheatreTools --download <id> --tag vX.Y.Z --asset <name> --to <folder> [--edition E] [--json]
+///   JBTheatreTools --uninstall <id>       [--edition E]
 ///   JBTheatreTools --launch   <id>
 ///   JBTheatreTools --self-check           [--token X]
 ///   JBTheatreTools --backup-all  <file>   [--include-passwords] [--passphrase-stdin] [--apps a,b] [--no-launcher]
@@ -64,6 +64,7 @@ enum CLI {
         var json = false
         var assetName: String?
         var toFolder: String?
+        var edition: String?
         var positional: [String] = []
         var skippedCmd = false
         var i = 0
@@ -78,6 +79,7 @@ enum CLI {
             case "--json":             json = true
             case "--asset":            i += 1; assetName = i < args.count ? args[i] : nil
             case "--to":               i += 1; toFolder = i < args.count ? args[i] : nil
+            case "--edition":          i += 1; edition = i < args.count ? args[i] : nil
             case "--server":           i += 1; serverBase = i < args.count ? args[i] : nil
             case "--server-pass":      i += 1; serverPass = i < args.count ? args[i] : nil
             default:                   positional.append(a)
@@ -120,14 +122,14 @@ enum CLI {
         }
 
         switch cmd {
-        case "--list":       list(catalog: catalog, token: token)
+        case "--list":       if json { listJSON(catalog: catalog, token: token) } else { list(catalog: catalog, token: token) }
         case "--installed":  installed(catalog: catalog)
         case "--releases":   releases(catalog: catalog, token: token, id: positional.first)
-        case "--install":    install(catalog: catalog, token: token, id: positional.first, tag: tag, toApplications: toApplications)
+        case "--install":    install(catalog: catalog, token: token, id: positional.first, tag: tag, edition: edition, toApplications: toApplications)
         case "--download":
             exit(download(catalog: catalog, token: token, id: positional.first, tag: tag, assetName: assetName,
-                          folder: toFolder, json: json))
-        case "--uninstall":  uninstall(catalog: catalog, id: positional.first)
+                          folder: toFolder, edition: edition, json: json))
+        case "--uninstall":  uninstall(catalog: catalog, id: positional.first, edition: edition)
         case "--launch":     launch(catalog: catalog, id: positional.first)
         case "--self-check": selfCheck(catalog: catalog, token: token)
         case "--self-download": selfDownload(catalog: catalog, token: token, dir: positional.first)
@@ -140,6 +142,52 @@ enum CLI {
     }
 
     // MARK: - Commands
+
+    /// One app in `--list --json`, before the release lookup: the same shape as the Windows CLI's. `assets` is every
+    /// platform's file name; `editions` (Light/Full apps only, the first is the default) gives each edition's.
+    static func listEntry(_ app: CatalogApp, installed: String?) -> [String: Any] {
+        var o: [String: Any] = ["id": app.id, "name": app.name, "installed": installed ?? NSNull(), "latest": NSNull(),
+                                "asset": app.macAssetName ?? NSNull(), "size": NSNull(), "status": "no-auth",
+                                "assets": app.assets, "editions": NSNull()]
+        if app.hasVariants, let vs = app.variants {
+            o["editions"] = vs.map { v -> [String: Any] in
+                ["id": v.id, "label": v.label, "default": app.isDefaultVariant(v.id),
+                 "slot": app.installKey(variantId: v.id), "assets": v.assets]
+            }
+        }
+        return o
+    }
+
+    /// --list --json: the catalog with what's installed, the build this Mac would get, and every platform's file names.
+    private static func listJSON(catalog: Catalog, token: String?) {
+        let im = InstallManager.shared
+        var apps: [[String: Any]] = []
+        runBlocking {
+            let client: GitHubClient? = hasAuth(token: token) ? makeClient(token: token) : nil
+            for app in catalog.apps {
+                var o = listEntry(app, installed: im.installedVersion(app.id))
+                if let client {
+                    do {
+                        let all = try await client.releases(owner: app.owner, repo: app.repo)
+                        if let rel = AppState.latest(from: all) {
+                            o["latest"] = rel.tagName
+                            let a = rel.assets.first { $0.name == app.macAssetName }
+                            o["size"] = a?.size ?? NSNull()
+                            o["status"] = a != nil ? "ok" : "no-build"
+                        } else { o["status"] = "no-release" }
+                    } catch GitHubError.notAccessible { o["status"] = "no-access" }
+                    catch GitHubError.unauthorized { o["status"] = "unauthorized" }
+                    catch { o["status"] = "error"; o["error"] = error.localizedDescription }
+                }
+                apps.append(o)
+            }
+        }
+        let doc: [String: Any] = ["schema": 1, "platform": "macos", "apps": apps]
+        guard let data = try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else {
+            exit(fail(ExitCode.failed, "couldn't write the list as JSON."))
+        }
+        print(String(decoding: data, as: UTF8.self))
+    }
 
     private static func list(catalog: Catalog, token: String?) {
         print("JBTheatreTools — \(catalog.apps.count) apps (platform: macOS)\n")
@@ -217,11 +265,16 @@ enum CLI {
         }
     }
 
-    private static func install(catalog: Catalog, token: String?, id: String?, tag: String?, toApplications: Bool) {
+    private static func install(catalog: Catalog, token: String?, id: String?, tag: String?, edition: String?, toApplications: Bool) {
         guard let app = appFor(id, catalog) else {
             fputs("error: pass an app id. Known ids: \(catalog.apps.map { $0.id }.joined(separator: ", "))\n", stderr)
             exit(1)
         }
+        guard let variant = app.resolveEdition(edition) else {
+            exit(fail(ExitCode.usage, "\(app.name) has no edition \"\(edition ?? "")\". Editions: \(app.editionChoices)."))
+        }
+        let slot = app.installKey(variantId: variant)
+        let appName = app.name + app.variantSuffix(variant)
         guard hasAuth(token: token) else {
             fputs("error: no auth (set $GITHUB_TOKEN, pass --token, save one in the app, or use --server + --server-pass).\n", stderr)
             exit(1)
@@ -235,11 +288,11 @@ enum CLI {
                     ? all.first { VersionDisplay.equal($0.tagName, tag!) }
                     : AppState.latest(from: all)
                 guard let rel = release else { fputs("error: version \(tag ?? "latest") not found.\n", stderr); exit(1) }
-                guard let asset = rel.assets.first(where: { $0.name == app.macAssetName }) else {
+                guard let asset = rel.assets.first(where: { $0.name == app.macAssetName(variantId: variant) }) else {
                     fputs("error: release \(rel.tagName) has no macOS asset.\n", stderr); exit(1)
                 }
                 print("Downloading \(asset.name) (\(byteString(asset.size))) @ \(rel.tagName)…")
-                let zip = im.cacheDir.appendingPathComponent("\(app.id)-\(PathSafe.component(rel.tagName)).zip")
+                let zip = im.cacheDir.appendingPathComponent("\(PathSafe.component(slot))-\(PathSafe.component(rel.tagName)).zip")
                 final class PctBox: @unchecked Sendable { var last = -1 }
                 let pctBox = PctBox()
                 try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: asset.id, to: zip) { p in
@@ -252,8 +305,8 @@ enum CLI {
                 if tag == nil, verification != .verified {
                     try? FileManager.default.removeItem(at: zip)
                     let reason = AppState.strictFailureReason(verification, assetName: asset.name)
-                    AppLog.shared.log("cli: install \(app.id) \(rel.tagName) BLOCKED (strict) — \(reason)")
-                    fputs("error: refusing to install \(app.name) \(rel.tagName) — \(reason). (Re-run with --tag \(rel.tagName) to install it anyway, unverified.)\n", stderr)
+                    AppLog.shared.log("cli: install \(slot) \(rel.tagName) BLOCKED (strict) — \(reason)")
+                    fputs("error: refusing to install \(appName) \(rel.tagName) — \(reason). (Re-run with --tag \(rel.tagName) to install it anyway, unverified.)\n", stderr)
                     exit(1)
                 }
                 switch verification {
@@ -262,14 +315,15 @@ enum CLI {
                 case .noManifest:     print("⚠︎ \(asset.name) installed unverified (older tag; no SHA256SUMS).")
                 case .assetNotListed: print("⚠︎ \(asset.name) installed unverified (older tag; not in SHA256SUMS).")
                 }
-                let before = im.installedVersion(app.id)
-                let dest = try im.install(app: app, version: rel.tagName, downloadedZip: zip, toApplications: toApplications)
+                let before = im.installedVersion(slot)
+                let dest = try im.install(app: app, version: rel.tagName, downloadedZip: zip, toApplications: toApplications,
+                                          variant: variant)
                 try? FileManager.default.removeItem(at: zip)
-                HistoryStore.add(app: app.id, name: app.name, action: ActivityHistory.action(from: before, to: rel.tagName),
+                HistoryStore.add(app: app.id, name: appName, action: ActivityHistory.action(from: before, to: rel.tagName),
                                  from: before, to: rel.tagName)
                 HistoryStore.flush()   // written before the process exits
-                AppLog.shared.log("cli: installed \(app.id) \(rel.tagName)\(toApplications ? " (Applications)" : "")\(verification == .verified ? " (sha256 ok)" : " (unverified)")")
-                print("Installed \(app.name) \(rel.tagName) → \(dest.path)")
+                AppLog.shared.log("cli: installed \(slot) \(rel.tagName)\(toApplications ? " (Applications)" : "")\(verification == .verified ? " (sha256 ok)" : " (unverified)")")
+                print("Installed \(appName) \(rel.tagName) → \(dest.path)")
             } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
         }
     }
@@ -304,8 +358,8 @@ enum CLI {
     /// platform's, e.g. a Windows exe from this Mac) with SHA256SUMS + SHA256SUMS.minisig into <folder>, verified as
     /// --install-file will check them, for a PC without internet. Uses this launcher's saved credentials (never printed).
     private static func download(catalog: Catalog, token: String?, id: String?, tag: String?, assetName: String?,
-                                 folder: String?, json: Bool) -> Int32 {
-        let usage = "usage: --download <id> --tag vX.Y.Z --asset <file name> --to <folder> [--json]"
+                                 folder: String?, edition: String?, json: Bool) -> Int32 {
+        let usage = "usage: --download <id> --tag vX.Y.Z --asset <file name> --to <folder> [--edition <edition>] [--json]"
         guard let id else { return fail(ExitCode.usage, usage) }
         guard let app = appFor(id, catalog) else {
             return fail(ExitCode.usage, "unknown app id \"\(id)\". Known ids: \(catalog.apps.map { $0.id }.joined(separator: ", "))")
@@ -314,6 +368,16 @@ enum CLI {
         guard let assetName, !assetName.isEmpty else { return fail(ExitCode.usage, "--download needs --asset (the build's file name, e.g. ShowDashboard-Windows-x64.exe).") }
         guard ReleaseDownload.isPlainAssetName(assetName) else { return fail(ExitCode.usage, "“\(assetName)” isn't a release file name.") }
         guard let folder, !folder.isEmpty else { return fail(ExitCode.usage, "--download needs --to <folder>.") }
+        // --edition: the file must be one of that edition's builds (any platform's), so a Light name can't stand in for Full.
+        if edition != nil {
+            guard let variant = app.resolveEdition(edition) else {
+                return fail(ExitCode.usage, "\(app.name) has no edition \"\(edition!)\". Editions: \(app.editionChoices).")
+            }
+            let names = Set(app.assets(variantId: variant).values)
+            guard names.contains(assetName) else {
+                return fail(ExitCode.usage, "\(assetName) isn't a build of \(app.name)\(app.variantSuffix(variant)). Its builds: \(names.sorted().joined(separator: ", ")).")
+            }
+        }
         guard hasAuth(token: token) else {
             return fail(ExitCode.noAccess, "no auth (save a token or the suite passphrase in the app, set $GITHUB_TOKEN, or pass --server + --server-pass).")
         }
@@ -363,17 +427,22 @@ enum CLI {
         return code
     }
 
-    private static func uninstall(catalog: Catalog, id: String?) {
+    private static func uninstall(catalog: Catalog, id: String?, edition: String?) {
         guard let app = appFor(id, catalog) else { fputs("error: pass an app id.\n", stderr); exit(1) }
+        guard let variant = app.resolveEdition(edition) else {
+            exit(fail(ExitCode.usage, "\(app.name) has no edition \"\(edition ?? "")\". Editions: \(app.editionChoices)."))
+        }
+        let slot = app.installKey(variantId: variant)
+        let appName = app.name + app.variantSuffix(variant)
         do {
-            let before = InstallManager.shared.installedVersion(app.id)
-            try InstallManager.shared.uninstall(app.id)
+            let before = InstallManager.shared.installedVersion(slot)
+            try InstallManager.shared.uninstall(slot)
             if let before {
-                HistoryStore.add(app: app.id, name: app.name, action: "uninstall", from: before)
+                HistoryStore.add(app: app.id, name: appName, action: "uninstall", from: before)
                 HistoryStore.flush()   // written before the process exits
             }
-            AppLog.shared.log("cli: uninstalled \(app.id)")
-            print("Uninstalled \(app.name).")
+            AppLog.shared.log("cli: uninstalled \(slot)")
+            print("Uninstalled \(appName).")
         } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
     }
 
@@ -473,7 +542,8 @@ enum CLI {
         print("""
         JBTheatreTools — theatre/AV app launcher (headless CLI)
 
-          --list                 List the catalog with installed & latest versions
+          --list                 List the catalog with installed & latest versions (--json: by catalog id,
+                                 with every platform's file name per edition)
           --installed            Show locally installed apps
           --releases  <id>       List all available versions of an app
           --install   <id>       Download & install (latest, or --tag vX.Y.Z for an older one)
@@ -494,8 +564,10 @@ enum CLI {
                  --server-pass <p>   Suite passphrase for --server (else the saved Keychain one)
                  --tag <vX.Y.Z>      Install a specific release (with --install)
                  --to-applications   Install into the Applications folder (with --install)
+                 --edition <e>       An app's Light or Full edition (light / full; default: its first) — with
+                                     --install, --uninstall and --download
                  --catalog <path>    Use a specific catalog.json
-                 --json              Machine-readable answer (with --download)
+                 --json              Machine-readable answer (with --list, --download)
                  --include-passwords Also back up saved passwords (with --backup-all)
                  --no-passwords      Leave this computer's passwords as they are (with --restore-all)
                  --passphrase-stdin  Read the backup passphrase from one line of stdin
@@ -505,7 +577,7 @@ enum CLI {
         Note: a secret passed via --token / --server-pass is visible to other local users (process
               list / shell history). Prefer $GITHUB_TOKEN or the saved Keychain values where possible.
 
-        Exit codes (--download): 0 ok · 1 failed · 2 usage · 3 no access · 4 not found
+        Exit codes (--download, --list --json): 0 ok · 1 failed · 2 usage · 3 no access · 4 not found
                     5 download failed (retry) · 6 verification failed. Errors are one line on stderr, "error: ".
         """)
     }

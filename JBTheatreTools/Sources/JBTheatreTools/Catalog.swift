@@ -107,6 +107,23 @@ struct CatalogApp: Decodable, Identifiable, Sendable {
         MacArch.canChoose(assets(variantId: variantId), appleSilicon: MacArch.isAppleSilicon)
     }
 
+    /// The variant an `--edition` names, matched by id or label ("full", "Full", "light"): `.some(nil)` = no edition named
+    /// (the default edition), `nil` = the app has no such edition (or only one edition and one was named).
+    func resolveEdition(_ edition: String?) -> String?? {
+        guard let edition, !edition.trimmingCharacters(in: .whitespaces).isEmpty else { return .some(nil) }
+        guard hasVariants, let v = variants?.first(where: {
+            $0.id.caseInsensitiveCompare(edition) == .orderedSame || $0.label.caseInsensitiveCompare(edition) == .orderedSame
+        }) else { return nil }
+        return .some(v.id)
+    }
+
+    /// What `--edition` accepts for this app, for an error message.
+    var editionChoices: String {
+        guard hasVariants, let vs = variants else { return "none — it has one edition" }
+        return vs.map { $0.label.caseInsensitiveCompare($0.id) == .orderedSame ? $0.id : "\($0.label.lowercased()) (\($0.id))" }
+            .joined(separator: ", ")
+    }
+
     /// True when `variantId` is this app's default (first) variant, or the app has no variants.
     func isDefaultVariant(_ variantId: String?) -> Bool {
         guard hasVariants, let first = variants?.first?.id else { return true }

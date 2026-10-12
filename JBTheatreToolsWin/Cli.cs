@@ -12,8 +12,8 @@ namespace JBTheatreTools;
 ///   JBTheatreTools.exe --installed            [--json]
 ///   JBTheatreTools.exe --releases &lt;id&gt;        [--token X]
 ///   JBTheatreTools.exe --install  &lt;id&gt;        [--tag vX.Y.Z] [--token X]
-///   JBTheatreTools.exe --install-file &lt;id&gt; &lt;file&gt; --tag vX.Y.Z [--sums SHA256SUMS]
-///   JBTheatreTools.exe --download &lt;id&gt; --tag vX.Y.Z --asset &lt;name&gt; --to &lt;folder&gt; [--json]
+///   JBTheatreTools.exe --install-file &lt;id&gt; &lt;file&gt; --tag vX.Y.Z [--edition E] [--sums SHA256SUMS]
+///   JBTheatreTools.exe --download &lt;id&gt; --tag vX.Y.Z --asset &lt;name&gt; --to &lt;folder&gt; [--edition E] [--json]
 ///   JBTheatreTools.exe --uninstall &lt;id&gt;
 ///   JBTheatreTools.exe --launch   &lt;id&gt;
 ///   JBTheatreTools.exe --self-check           [--token X]
@@ -72,7 +72,7 @@ public static partial class Cli
         string? catalogPath = null;
         string? tag = null;
         bool toApplications = false, json = false;
-        string? sums = null, assetName = null, toFolder = null;
+        string? sums = null, assetName = null, toFolder = null, edition = null;
         var positional = new List<string>();
         bool cmdSkipped = false;
         for (int i = 0; i < args.Length; i++)
@@ -89,6 +89,7 @@ public static partial class Cli
                 case "--sums": if (++i < args.Length) sums = args[i]; break;
                 case "--asset": if (++i < args.Length) assetName = args[i]; break;
                 case "--to": if (++i < args.Length) toFolder = args[i]; break;
+                case "--edition": if (++i < args.Length) edition = args[i]; break;
                 case "--server": if (++i < args.Length) _serverBase = args[i]; break;
                 case "--server-pass": if (++i < args.Length) _serverPass = args[i]; break;
                 default: positional.Add(a); break;
@@ -147,10 +148,10 @@ public static partial class Cli
             "--list"       => json ? await ListJsonAsync(catalog, token) : await ListAsync(catalog, token),
             "--installed"  => json ? InstalledJson(catalog) : Installed(catalog),
             "--releases"   => await ReleasesAsync(catalog, token, positional.FirstOrDefault()),
-            "--install"    => await InstallAsync(catalog, token, positional.FirstOrDefault(), tag, toApplications),
-            "--install-file" => InstallFile(catalog, positional, tag, sums, toApplications),
-            "--download"   => await DownloadAsync(catalog, token, positional.FirstOrDefault(), tag, assetName, toFolder, json),
-            "--uninstall"  => Uninstall(catalog, positional.FirstOrDefault()),
+            "--install"    => await InstallAsync(catalog, token, positional.FirstOrDefault(), tag, edition, toApplications),
+            "--install-file" => InstallFile(catalog, positional, tag, sums, edition, toApplications),
+            "--download"   => await DownloadAsync(catalog, token, positional.FirstOrDefault(), tag, assetName, toFolder, edition, json),
+            "--uninstall"  => Uninstall(catalog, positional.FirstOrDefault(), edition),
             "--launch"     => Launch(catalog, positional.FirstOrDefault()),
             "--self-check" => await SelfCheckAsync(catalog, token),
             "--self-update" => await SelfUpdateAsync(catalog, settings, token),
@@ -238,10 +239,14 @@ public static partial class Cli
         catch (Exception ex) { return Fail(CodeFor(ex), ex.Message); }
     }
 
-    private static async Task<int> InstallAsync(Catalog catalog, string? token, string? id, string? tag, bool toApplications)
+    private static async Task<int> InstallAsync(Catalog catalog, string? token, string? id, string? tag, string? edition, bool toApplications)
     {
         var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
         if (app == null) return Fail(ExitCode.Usage, $"pass an app id. Known ids: {string.Join(", ", catalog.Apps.Select(a => a.Id))}");
+        if (!app.TryResolveEdition(edition, out var variant))
+            return Fail(ExitCode.Usage, $"{app.Name} has no edition \"{edition}\". Editions: {app.EditionChoices}.");
+        var slot = app.InstallKey(variant);
+        var appName = app.Name + app.VariantSuffix(variant);
         if (!HasAuth(token)) return Fail(ExitCode.NoAccess, "no auth (set $GITHUB_TOKEN, pass --token, save one in the app, or use --server + --server-pass).");
 
         using var client = MakeClient(token);
@@ -253,12 +258,12 @@ public static partial class Cli
                 ? all.FirstOrDefault(r => VersionCompare.Equal(r.TagName, tag))   // "1.2.0" finds "v1.2.0"
                 : Versions.Latest(all);
             if (rel == null) return Fail(ExitCode.NotFound, $"version {tag ?? "latest"} not found.");
-            var name = AssetName(app);
+            var name = app.WindowsAsset(variant, _x64Slots);
             var asset = rel.Assets.FirstOrDefault(a => a.Name == name);
             if (asset == null) return Fail(ExitCode.NotFound, $"release {rel.TagName} has no Windows asset{(name == null ? "" : $" ({name})")}.");
 
             Console.WriteLine($"Downloading {asset.Name} ({ByteString(asset.Size)}) @ {rel.TagName}…");
-            var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{app.Id}-{rel.TagName}-{asset.Name}");
+            var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{slot.Replace('@', '-')}-{rel.TagName}-{asset.Name}");
             int last = -1;
             var progress = new Progress<double>(p =>
             {
@@ -275,8 +280,8 @@ public static partial class Cli
             {
                 InstallManager.TryDelete(cache);
                 var reason = InstallManager.StrictFailureReason(verification, asset.Name);
-                Log.Write($"cli: install {app.Id} {rel.TagName} BLOCKED (strict) — {reason}");
-                return Fail(ExitCode.Rejected, $"refusing to install {app.Name} {rel.TagName} — {reason}. (Re-run with --tag {rel.TagName} to install it anyway, unverified.)");
+                Log.Write($"cli: install {slot} {rel.TagName} BLOCKED (strict) — {reason}");
+                return Fail(ExitCode.Rejected, $"refusing to install {appName} {rel.TagName} — {reason}. (Re-run with --tag {rel.TagName} to install it anyway, unverified.)");
             }
             Console.WriteLine(verification switch
             {
@@ -285,27 +290,31 @@ public static partial class Cli
                 VerifyResult.NoManifest => $"⚠ {asset.Name} installed unverified (older tag; no SHA256SUMS).",
                 _ => $"⚠ {asset.Name} installed unverified (older tag; not in SHA256SUMS).",
             });
-            var before = InstallManager.Shared.InstalledVersion(app.Id);
-            var dest = InstallManager.Shared.Install(app, rel.TagName, cache, asset.Name, toApplications);
+            var before = InstallManager.Shared.InstalledVersion(slot);
+            var dest = InstallManager.Shared.Install(app, rel.TagName, cache, asset.Name, toApplications, variant);
             InstallManager.TryDelete(cache);
-            History.Add(app.Id, app.Name, ActivityHistory.ActionFor(before, rel.TagName), before, rel.TagName);
-            Log.Write($"cli: installed {app.Id} {rel.TagName}{(toApplications ? " (+shortcuts)" : "")}{(verification == VerifyResult.Verified ? " (sha256 ok)" : " (unverified)")}");
-            Console.WriteLine($"Installed {app.Name} {rel.TagName} → {dest}");
+            History.Add(app.Id, appName, ActivityHistory.ActionFor(before, rel.TagName), before, rel.TagName);
+            Log.Write($"cli: installed {slot} {rel.TagName}{(toApplications ? " (+shortcuts)" : "")}{(verification == VerifyResult.Verified ? " (sha256 ok)" : " (unverified)")}");
+            Console.WriteLine($"Installed {appName} {rel.TagName} → {dest}");
             return 0;
         }
         catch (Exception ex) { return Fail(CodeFor(ex, downloading), ex.Message); }
     }
 
-    private static int Uninstall(Catalog catalog, string? id)
+    private static int Uninstall(Catalog catalog, string? id, string? edition)
     {
         var app = id != null ? catalog.Apps.FirstOrDefault(a => a.Id == id) : null;
         if (app == null) return Fail(ExitCode.Usage, "pass an app id.");
+        if (!app.TryResolveEdition(edition, out var variant))
+            return Fail(ExitCode.Usage, $"{app.Name} has no edition \"{edition}\". Editions: {app.EditionChoices}.");
+        var slot = app.InstallKey(variant);
+        var appName = app.Name + app.VariantSuffix(variant);
         try
         {
-            var before = InstallManager.Shared.InstalledVersion(app.Id);
-            InstallManager.Shared.Uninstall(app.Id);
-            if (before != null) History.Add(app.Id, app.Name, "uninstall", before);
-            Log.Write($"cli: uninstalled {app.Id}"); Console.WriteLine($"Uninstalled {app.Name}."); return 0;
+            var before = InstallManager.Shared.InstalledVersion(slot);
+            InstallManager.Shared.Uninstall(slot);
+            if (before != null) History.Add(app.Id, appName, "uninstall", before);
+            Log.Write($"cli: uninstalled {slot}"); Console.WriteLine($"Uninstalled {appName}."); return 0;
         }
         catch (Exception ex) { return Fail(CodeFor(ex), ex.Message); }
     }
@@ -388,7 +397,8 @@ public static partial class Cli
         """
         JBTheatreTools — theatre/AV app launcher (headless CLI)
 
-          --list                 List the catalog with installed & latest versions (--json: by catalog id)
+          --list                 List the catalog with installed & latest versions (--json: by catalog id,
+                                 with every platform's file name per edition)
           --installed            Show locally installed apps (--json: by catalog id)
           --releases  <id>       List all available versions of an app
           --install   <id>       Download & install (latest, or --tag vX.Y.Z for an older one)
@@ -412,6 +422,8 @@ public static partial class Cli
                  --server <url>      Download-server (relay) base URL — use instead of a token
                  --server-pass <p>   Suite passphrase for --server (else the saved one)
                  --tag <vX.Y.Z>      Install a specific release (with --install)
+                 --edition <e>       An app's Light or Full edition (light / full; default: its first) — with
+                                     --install, --install-file, --uninstall and --download
                  --to-applications   Also create Start Menu + Desktop shortcuts (with --install)
                  --catalog <path>    Use a specific catalog.json
                  --json              Machine-readable answer (with --list, --installed, --download)

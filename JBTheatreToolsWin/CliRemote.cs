@@ -79,6 +79,8 @@ public static partial class Cli
             {
                 ["id"] = app.Id, ["name"] = app.Name, ["installed"] = InstallManager.Shared.InstalledVersion(app.Id),
                 ["latest"] = null, ["asset"] = AssetName(app), ["size"] = null, ["status"] = "no-auth",
+                // Every platform's file name, per edition: what another computer fetches for this one (--download).
+                ["assets"] = AssetsJson(app.Assets), ["editions"] = EditionsJson(app),
             };
             if (client != null)
             {
@@ -104,23 +106,55 @@ public static partial class Cli
         return ExitCode.Ok;
     }
 
+    private static JsonObject AssetsJson(Dictionary<string, string> assets)
+    {
+        var o = new JsonObject();
+        foreach (var (platform, name) in assets.OrderBy(kv => kv.Key, StringComparer.Ordinal)) o[platform] = name;
+        return o;
+    }
+
+    /// <summary>A Light/Full app's editions (the first is the default, installed as the plain id); null for one edition.</summary>
+    private static JsonArray? EditionsJson(CatalogApp app)
+    {
+        if (!app.HasVariants) return null;
+        var list = new JsonArray();
+        foreach (var v in app.Variants!)
+            list.Add(new JsonObject
+            {
+                ["id"] = v.Id, ["label"] = v.Label, ["default"] = app.IsDefaultVariant(v.Id), ["slot"] = app.InstallKey(v.Id),
+                ["assets"] = AssetsJson(v.Assets),
+            });
+        return list;
+    }
+
     /// <summary>--install-file &lt;id&gt; &lt;file&gt; --tag vX.Y.Z [--sums SHA256SUMS]: installs a build that is already on this
     /// PC, exactly as --install would have (manifest, connector entry point, shortcuts with --to-applications). It is
     /// checked here, not trusted: the release's SHA256SUMS + SHA256SUMS.minisig (next to the file unless --sums says
-    /// where) must verify with the suite key for that app and tag, and the file must be the build this PC uses.</summary>
-    private static int InstallFile(Catalog catalog, List<string> positional, string? tag, string? sums, bool toApplications)
+    /// where) must verify with the suite key for that app and tag, and the file must be the build this PC uses for that
+    /// edition (<c>--edition full</c> installs the Full slot beside Light; omitted = the default edition).</summary>
+    private static int InstallFile(Catalog catalog, List<string> positional, string? tag, string? sums, string? edition, bool toApplications)
     {
-        if (positional.Count < 2) return Fail(ExitCode.Usage, "usage: --install-file <id> <file> --tag vX.Y.Z [--sums <SHA256SUMS>]");
+        if (positional.Count < 2) return Fail(ExitCode.Usage, "usage: --install-file <id> <file> --tag vX.Y.Z [--edition <edition>] [--sums <SHA256SUMS>]");
         var app = catalog.Apps.FirstOrDefault(a => a.Id == positional[0]);
         if (app == null) return Fail(ExitCode.Usage, $"unknown app id \"{positional[0]}\". Known ids: {string.Join(", ", catalog.Apps.Select(a => a.Id))}");
+        if (!app.TryResolveEdition(edition, out var variant))
+            return Fail(ExitCode.Usage, $"{app.Name} has no edition \"{edition}\". Editions: {app.EditionChoices}.");
+        var slot = app.InstallKey(variant);
+        var appName = app.Name + app.VariantSuffix(variant);
         if (string.IsNullOrWhiteSpace(tag)) return Fail(ExitCode.Usage, "--install-file needs --tag (the release the file came from, e.g. v1.16.2).");
         var tagName = tag.StartsWith('v') ? tag : "v" + tag;
         var file = Path.GetFullPath(positional[1]);
         if (!File.Exists(file)) return Fail(ExitCode.NotFound, $"no file at {file}.");
-        var assetName = AssetName(app);
-        if (assetName == null) return Fail(ExitCode.NotFound, $"{app.Name} has no Windows build.");
+        var assetName = app.WindowsAsset(variant, _x64Slots);
+        if (assetName == null) return Fail(ExitCode.NotFound, $"{appName} has no Windows build.");
         if (!string.Equals(Path.GetFileName(file), assetName, StringComparison.OrdinalIgnoreCase))
-            return Fail(ExitCode.Rejected, $"this PC installs {assetName} for {app.Name}, not {Path.GetFileName(file)}.");
+        {
+            // The other edition's build: say how to install it instead.
+            var other = app.HasVariants ? app.Variants!.FirstOrDefault(v => v.Id != variant &&
+                string.Equals(app.WindowsAsset(v.Id, _x64Slots), Path.GetFileName(file), StringComparison.OrdinalIgnoreCase)) : null;
+            return Fail(ExitCode.Rejected, $"this PC installs {assetName} for {appName}, not {Path.GetFileName(file)}." +
+                (other != null ? $" That's the {other.Label} build: add --edition {other.Id}." : ""));
+        }
         var sumsPath = Path.GetFullPath(sums ?? Path.Combine(Path.GetDirectoryName(file)!, "SHA256SUMS"));
 
         // Verify and install the same bytes: a private copy in the download cache, never the file a caller can change —
@@ -131,16 +165,16 @@ public static partial class Cli
             File.Copy(file, cache, overwrite: true);
             InstallManager.VerifyLocalFile(cache, assetName, sumsPath, app.Repo, tagName);
             Console.WriteLine($"Verified {assetName} (signed sha256, {app.Repo} {tagName}).");
-            var before = InstallManager.Shared.InstalledVersion(app.Id);
-            var dest = InstallManager.Shared.Install(app, tagName, cache, assetName, toApplications);
-            History.Add(app.Id, app.Name, ActivityHistory.ActionFor(before, tagName), before, tagName);
-            Log.Write($"cli: installed {app.Id} {tagName} from a file{(toApplications ? " (+shortcuts)" : "")} (sha256 ok)");
-            Console.WriteLine($"Installed {app.Name} {tagName} → {dest}");
+            var before = InstallManager.Shared.InstalledVersion(slot);
+            var dest = InstallManager.Shared.Install(app, tagName, cache, assetName, toApplications, variant);
+            History.Add(app.Id, appName, ActivityHistory.ActionFor(before, tagName), before, tagName);
+            Log.Write($"cli: installed {slot} {tagName} from a file{(toApplications ? " (+shortcuts)" : "")} (sha256 ok)");
+            Console.WriteLine($"Installed {appName} {tagName} → {dest}");
             return ExitCode.Ok;
         }
         catch (Exception ex)
         {
-            Log.Write($"cli: install-file {app.Id} {tagName} failed: {ex.Message}");
+            Log.Write($"cli: install-file {slot} {tagName} failed: {ex.Message}");
             return Fail(CodeFor(ex), ex.Message);
         }
         finally { InstallManager.TryDelete(cache); }
@@ -150,9 +184,9 @@ public static partial class Cli
     /// release (any platform's) with SHA256SUMS + SHA256SUMS.minisig into the folder, verified as --install-file will
     /// check them, for a PC without internet. Uses this launcher's saved credentials or the server flags (never printed).</summary>
     private static async Task<int> DownloadAsync(Catalog catalog, string? token, string? id, string? tag, string? assetName,
-                                                 string? folder, bool json)
+                                                 string? folder, string? edition, bool json)
     {
-        const string usage = "usage: --download <id> --tag vX.Y.Z --asset <file name> --to <folder> [--json]";
+        const string usage = "usage: --download <id> --tag vX.Y.Z --asset <file name> --to <folder> [--edition <edition>] [--json]";
         if (id == null) return Fail(ExitCode.Usage, usage);
         var app = catalog.Apps.FirstOrDefault(a => a.Id == id);
         if (app == null) return Fail(ExitCode.Usage, $"unknown app id \"{id}\". Known ids: {string.Join(", ", catalog.Apps.Select(a => a.Id))}");
@@ -160,6 +194,15 @@ public static partial class Cli
         if (string.IsNullOrWhiteSpace(assetName)) return Fail(ExitCode.Usage, "--download needs --asset (the build's file name, e.g. ShowDashboard-Windows-x64.exe).");
         if (!ReleaseDownload.IsPlainAssetName(assetName)) return Fail(ExitCode.Usage, $"\"{assetName}\" isn't a release file name.");
         if (string.IsNullOrWhiteSpace(folder)) return Fail(ExitCode.Usage, "--download needs --to <folder>.");
+        // --edition: the file must be one of that edition's builds (any platform's), so a Light name can't stand in for Full.
+        if (edition != null)
+        {
+            if (!app.TryResolveEdition(edition, out var variant))
+                return Fail(ExitCode.Usage, $"{app.Name} has no edition \"{edition}\". Editions: {app.EditionChoices}.");
+            var names = app.AssetsFor(variant).Values;
+            if (!names.Contains(assetName))
+                return Fail(ExitCode.Usage, $"{assetName} isn't a build of {app.Name}{app.VariantSuffix(variant)}. Its builds: {string.Join(", ", names.OrderBy(n => n, StringComparer.Ordinal))}.");
+        }
         if (!HasAuth(token)) return Fail(ExitCode.NoAccess, "no auth (save a token or the suite passphrase in the app, set %GITHUB_TOKEN%, or pass --server + --server-pass).");
 
         using var client = MakeClient(token);

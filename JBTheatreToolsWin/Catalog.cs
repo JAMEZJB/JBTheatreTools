@@ -118,6 +118,24 @@ public sealed class CatalogApp
     /// <summary>"Use the x64 build (emulated)" is offered for this slot: an ARM64 PC, and both builds exist.</summary>
     public bool CanChooseX64(string? variantId) => Platform.CanChoose(AssetsFor(variantId), Platform.OsIsArm64);
 
+    /// <summary>The variant an <c>--edition</c> names, matched by id or label ("full", "Full", "light"); null/empty = the
+    /// default edition. False when the app has no such edition (or only one edition and one was named).</summary>
+    public bool TryResolveEdition(string? edition, out string? variantId)
+    {
+        variantId = null;
+        if (string.IsNullOrWhiteSpace(edition)) return true;
+        var v = HasVariants ? Variants!.FirstOrDefault(x => string.Equals(x.Id, edition, StringComparison.OrdinalIgnoreCase) ||
+                                                            string.Equals(x.Label, edition, StringComparison.OrdinalIgnoreCase)) : null;
+        if (v == null) return false;
+        variantId = v.Id;
+        return true;
+    }
+
+    /// <summary>What <c>--edition</c> accepts for this app, for an error message.</summary>
+    public string EditionChoices => HasVariants
+        ? string.Join(", ", Variants!.Select(v => v.Label.Equals(v.Id, StringComparison.OrdinalIgnoreCase) ? v.Id : $"{v.Label.ToLowerInvariant()} ({v.Id})"))
+        : "none — it has one edition";
+
     /// <summary>True when <paramref name="variantId"/> is the default (first) variant, or the app has no variants.</summary>
     public bool IsDefaultVariant(string? variantId)
     {
