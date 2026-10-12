@@ -95,7 +95,7 @@ enum CLI {
         // Normalise the shared install manifest the same way the GUI does (v1.15.0 → per-variant slots),
         // so the CLI sees the same slots as the app.
         InstallManager.shared.migrateVariantSlots(catalog.apps)
-        if cmd == "--install" || cmd == "--uninstall" { InstallManager.shared.connectorApps = catalog.apps }
+        if cmd == "--install" || cmd == "--uninstall" { InstallManager.shared.followConnectors(catalog.apps) }
 
         // Resolve download auth: explicit server flags win (either flag implies server mode, the URL
         // defaulting to the built-in relay); then a usable token; then the GUI-configured server mode

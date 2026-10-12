@@ -320,8 +320,12 @@ final class AppState: ObservableObject {
             let catalog = try Catalog.load()
             selfInfo = catalog.selfInfo
             serverBase = Self.serverOverride ?? catalog.downloadServer
-            InstallManager.shared.migrateVariantSlots(catalog.apps)   // v1.15.0 → per-variant install slots
-            InstallManager.shared.connectorApps = catalog.apps          // connectors.json follows every install from here
+            // v1.15.0 → per-variant install slots. Briefly: a command-line run holding the lock migrates them itself.
+            InstallManager.shared.migrateVariantSlots(catalog.apps, wait: 5)
+            // connectors.json follows every install from here; brought in step now off the main thread (it may wait
+            // for another launcher process that is installing — that one brings it in step itself after).
+            let apps = catalog.apps
+            Task.detached(priority: .utility) { InstallManager.shared.followConnectors(apps, wait: 10) }
             let known = Set(catalog.apps.map(\.id))
             // Load the per-app variant choice BEFORE building rows, so each row reads its selected slot.
             if let saved = UserDefaults.standard.dictionary(forKey: Self.variantKey) as? [String: String] {
@@ -1113,15 +1117,14 @@ final class AppState: ObservableObject {
         return Dock.isPinned(path)
     }
 
+    /// Off the main thread: the manifest change may wait for another launcher process.
     func toggleDesktopAlias(_ id: String) {
         guard let key = slotKey(id) else { return }
-        if hasDesktopAlias(id) {
-            InstallManager.shared.removeDesktopAlias(key)
-            AppLog.shared.log("removed desktop alias for \(key)")
-        } else {
+        let remove = hasDesktopAlias(id)
+        Task.detached(priority: .userInitiated) {
             do {
-                try InstallManager.shared.addDesktopAlias(key)
-                AppLog.shared.log("added desktop alias for \(key)")
+                if remove { try InstallManager.shared.removeDesktopAlias(key) } else { try InstallManager.shared.addDesktopAlias(key) }
+                AppLog.shared.log("\(remove ? "removed" : "added") desktop alias for \(key)")
             } catch {
                 AppLog.shared.log("desktop alias for \(key) FAILED: \(error.localizedDescription)")
             }
@@ -2049,19 +2052,23 @@ final class AppState: ObservableObject {
             inform("Show Lock Is On", "Installed apps weren't moved. Turn off show lock to move them.")
             return
         }
-        var moved = 0
-        var failed: [String] = []
         // Move every installed slot (both variants of a variant app), then refresh each row from its
-        // selected slot.
-        for key in InstallManager.shared.manifest().keys.sorted() {
-            let needed = InstallManager.shared.needsRelocation(key, toApplications: toApplications)
-            do {
-                try InstallManager.shared.relocate(key, toApplications: toApplications)
-                if needed { moved += 1 }
-            } catch {
-                failed.append(rows.first { installKey(for: $0.app) == key }?.displayName ?? key)
+        // selected slot. Off the main thread: bundles move, and each move may wait for another launcher process.
+        let (moved, failedKeys) = await Task.detached(priority: .userInitiated) { () -> (Int, [String]) in
+            var moved = 0
+            var failed: [String] = []
+            for key in InstallManager.shared.manifest().keys.sorted() {
+                let needed = InstallManager.shared.needsRelocation(key, toApplications: toApplications)
+                do {
+                    try InstallManager.shared.relocate(key, toApplications: toApplications)
+                    if needed { moved += 1 }
+                } catch {
+                    failed.append(key)
+                }
             }
-        }
+            return (moved, failed)
+        }.value
+        let failed = failedKeys.map { key in rows.first { installKey(for: $0.app) == key }?.displayName ?? key }
         for i in rows.indices {
             let key = installKey(for: rows[i].app)
             rows[i].installed = InstallManager.shared.installedVersion(key)

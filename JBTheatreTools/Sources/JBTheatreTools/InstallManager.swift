@@ -91,6 +91,10 @@ enum InstallGuard {
 /// the apps dir → record the version in a JSON manifest. Launch = `open` the bundle.
 /// `@unchecked Sendable`: `AppState.install` runs the extract+move on a detached task so a 300 MB `ditto`
 /// never blocks the main thread; the manifest is lock-guarded and the rest is per-call local state.
+///
+/// Every change to installed.json, the installed bundles and connectors.json holds `lock`, shared with every other
+/// launcher process on this Mac (the window and a command-line install can run at once), and starts from the
+/// manifest on disk — never this process's copy, which may predate another process's install.
 final class InstallManager: @unchecked Sendable {
     static let shared = InstallManager()
 
@@ -99,11 +103,18 @@ final class InstallManager: @unchecked Sendable {
     let appsDir: URL
     let cacheDir: URL
     let manifestURL: URL
+    let lock: SupportLock
+    private var connectorsURL: URL { supportDir.appendingPathComponent("connectors.json") }
 
-    init() {
+    convenience init() {
         // JBTT_SUPPORT_DIR: a test stand-in for the whole support folder (installed.json, apps, connectors.json).
         let testSupport = ProcessInfo.processInfo.environment["JBTT_SUPPORT_DIR"].flatMap { $0.isEmpty ? nil : $0 }
-        let support = testSupport.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        self.init(supportDir: testSupport.map { URL(fileURLWithPath: $0, isDirectory: true) })
+    }
+
+    /// `supportDir` nil = the real one; a folder = a stand-in that also holds the download cache (tests).
+    init(supportDir testSupport: URL?) {
+        let support = testSupport
             ?? fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("JBTheatreTools", isDirectory: true)
         supportDir = support
@@ -111,6 +122,7 @@ final class InstallManager: @unchecked Sendable {
         manifestURL = support.appendingPathComponent("installed.json")
         cacheDir = testSupport != nil ? support.appendingPathComponent("cache", isDirectory: true)
             : fm.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("JBTheatreTools", isDirectory: true)
+        lock = SupportLock(directory: support)
         try? fm.createDirectory(at: appsDir, withIntermediateDirectories: true)
         try? fm.createDirectory(at: cacheDir, withIntermediateDirectories: true)
     }
@@ -120,9 +132,10 @@ final class InstallManager: @unchecked Sendable {
     /// In-memory cache of the manifest. `manifest()` is on the hot path — the launcher UI calls
     /// `installedPath` / `installedVersion` from `AppIconImage` and every row on each redraw, and a
     /// drag-reorder redraws all rows per frame. Reading + JSON-decoding `installed.json` from disk on
-    /// every one of those calls was blocking the main thread and making drag-reorder stutter. This app
-    /// is the only writer of the file, so an in-memory copy (kept in sync by `writeManifest`, guarded by
-    /// a lock for the off-main-actor CLI callers) is authoritative for the process's lifetime.
+    /// every one of those calls was blocking the main thread and making drag-reorder stutter. The in-memory
+    /// copy (guarded by `manifestLock` for the off-main-actor callers) is current between this process's
+    /// changes; every change re-reads the file under `lock` first, so another launcher process's install
+    /// is never written over (and shows here from then on).
     private let manifestLock = NSLock()
     private var manifestCache: [String: InstalledRecord]?
     /// Resolution caches for the render hot path. `installedPath`/`installedVersion` (called by every row and
@@ -144,29 +157,60 @@ final class InstallManager: @unchecked Sendable {
     /// The manifest without taking the lock — for callers that already hold `manifestLock`.
     private func manifestUnlocked() -> [String: InstalledRecord] {
         if let cached = manifestCache { return cached }
-        let m: [String: InstalledRecord]
-        if let data = try? Data(contentsOf: manifestURL),
-           let decoded = try? JSONDecoder().decode([String: InstalledRecord].self, from: data) {
-            m = decoded
-        } else {
-            m = [:]
-        }
+        let m = readManifestFile()
         manifestCache = m
+        return m
+    }
+
+    private func readManifestFile() -> [String: InstalledRecord] {
+        guard let data = try? Data(contentsOf: manifestURL),
+              let decoded = try? JSONDecoder().decode([String: InstalledRecord].self, from: data) else { return [:] }
+        return decoded
+    }
+
+    /// The manifest as it is on disk now, adopted as this process's copy. The start of every change, under `lock`.
+    private func reloadManifest() -> [String: InstalledRecord] {
+        let m = readManifestFile()
+        adopt(m)
         return m
     }
 
     /// The catalog, once known (set at start-up by the app and the command line): every manifest change then also
     /// refreshes connectors.json, so Stagehand's stable entry points follow installs, updates, removals and moves.
-    var connectorApps: [CatalogApp] = [] {
-        didSet { Connectors.sync(apps: connectorApps, manifest: manifest()) }
+    private var connectorAppsValue: [CatalogApp] = []
+    var connectorApps: [CatalogApp] {
+        manifestLock.lock(); defer { manifestLock.unlock() }
+        return connectorAppsValue
     }
 
+    /// Starts following the manifest with connectors.json and brings it in step now — which also repairs what
+    /// another launcher process left behind. May wait for the lock: the window calls it off the main thread.
+    func followConnectors(_ apps: [CatalogApp], wait: TimeInterval = SupportLock.defaultWait) {
+        manifestLock.lock(); connectorAppsValue = apps; manifestLock.unlock()
+        syncConnectors(wait: wait)
+    }
+
+    /// Rewrites connectors.json from the manifest on disk, holding the lock (another process may be installing).
+    func syncConnectors(wait: TimeInterval = SupportLock.defaultWait) {
+        let apps = connectorApps
+        guard !apps.isEmpty else { return }
+        do { try lock.hold(wait: wait) { Connectors.sync(apps: apps, manifest: reloadManifest(), at: connectorsURL) } }
+        catch { AppLog.shared.log("connectors.json: \(error.localizedDescription)") }
+    }
+
+    /// Caller holds `lock` (and started from `reloadManifest()`). Atomic, so another process never reads half a file.
     private func writeManifest(_ m: [String: InstalledRecord]) {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? enc.encode(m) { try? data.write(to: manifestURL) }
-        defer { if !connectorApps.isEmpty { Connectors.sync(apps: connectorApps, manifest: m) } }
-        manifestLock.lock()
+        if let data = try? enc.encode(m) { try? data.write(to: manifestURL, options: .atomic) }
+        adopt(m)
+        let apps = connectorApps
+        if !apps.isEmpty { Connectors.sync(apps: apps, manifest: m, at: connectorsURL) }
+    }
+
+    /// Makes `m` this process's copy of the manifest.
+    private func adopt(_ m: [String: InstalledRecord]) {
+        manifestLock.lock(); defer { manifestLock.unlock() }
         // Invalidate only the slots whose record actually changed (path or version) — wiping every entry made
         // the next render re-stat all 21 installed paths on the main thread after each install.
         let old = manifestCache ?? [:]
@@ -175,8 +219,7 @@ final class InstallManager: @unchecked Sendable {
             resolvedPath[key] = nil; resolvedPathDone.remove(key)
             resolvedName[key] = nil; resolvedNameDone.remove(key)
         }
-        manifestCache = m                       // keep the in-memory copy in sync
-        manifestLock.unlock()
+        manifestCache = m
     }
 
     /// The installed path if the recorded bundle still exists — existence checked once, then cached (the lock
@@ -237,8 +280,20 @@ final class InstallManager: @unchecked Sendable {
     /// One-time migration from v1.15.0, where a non-default variant (e.g. NDI "Full") was recorded under
     /// the plain app id. Re-keys such a record to its own variant slot and renames the bundle with the
     /// variant suffix, so a later default-variant install can't clobber it. No-op when nothing matches.
-    func migrateVariantSlots(_ apps: [CatalogApp]) {
-        var m = manifest()
+    func migrateVariantSlots(_ apps: [CatalogApp], wait: TimeInterval = SupportLock.defaultWait) {
+        // Almost always nothing to do: only take the shared lock (which may wait on another process) when there is.
+        func pending(_ m: [String: InstalledRecord]) -> Bool {
+            apps.contains { app in
+                app.hasVariants && m[app.id].map { r in r.variant.map { !app.isDefaultVariant($0) } ?? false } == true
+            }
+        }
+        guard pending(manifest()) else { return }
+        do { try lock.hold(wait: wait) { migrateVariantSlotsHeld(apps) } }
+        catch { AppLog.shared.log("variant slots not migrated now: \(error.localizedDescription)") }
+    }
+
+    private func migrateVariantSlotsHeld(_ apps: [CatalogApp]) {
+        var m = reloadManifest()
         var changed = false
         for app in apps where app.hasVariants {
             guard let rec = m[app.id], let vid = rec.variant, !app.isDefaultVariant(vid) else { continue }
@@ -261,8 +316,8 @@ final class InstallManager: @unchecked Sendable {
 
     @discardableResult
     func install(app: CatalogApp, version: String, downloadedZip: URL, toApplications: Bool, variant: String? = nil) throws -> URL {
-        let extractDir = cacheDir.appendingPathComponent("extract-\(app.id)", isDirectory: true)
-        try? fm.removeItem(at: extractDir)
+        // Its own folder: another launcher process may be extracting the same app into this cache at the same time.
+        let extractDir = cacheDir.appendingPathComponent("extract-\(app.id)-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: extractDir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: extractDir) }
 
@@ -283,33 +338,37 @@ final class InstallManager: @unchecked Sendable {
             ? bundle.lastPathComponent
             : bundle.deletingPathExtension().lastPathComponent + suffix + ".app"
         let dest = destDir.appendingPathComponent(bundleName)
-        let ourPath = manifest()[key]?.path
+        // From here to the manifest write, another launcher process mustn't change what's installed: it could
+        // record this slot elsewhere, or write installed.json from a copy without this install.
+        return try lock.hold {
+            var m = reloadManifest()
+            let ourPath = m[key]?.path
 
-        let running = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
-        // F4: never replace a bundle that's currently running — our old install, or whatever sits at dest.
-        for candidate in ([ourPath.map { URL(fileURLWithPath: $0) }, dest].compactMap { $0 }) {
-            if InstallGuard.isRunning(candidate, amongRunning: running) { throw InstallError.appRunning(app.name) }
-        }
-        // F6: a bundle at dest that we didn't install is a stranger — surface it, don't destroy it.
-        if InstallGuard.isStranger(destExists: fm.fileExists(atPath: dest.path), destPath: dest.path, ourPath: ourPath) {
-            throw InstallError.destinationOccupied(dest.path)
-        }
-        // Remove our old install (may be elsewhere if the location setting changed) and our own dest copy.
-        if let ourPath, ourPath != dest.path { try? fm.removeItem(at: URL(fileURLWithPath: ourPath)) }
-        if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }   // reached only for our own copy
-        try fm.moveItem(at: bundle, to: dest)
+            let running = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
+            // F4: never replace a bundle that's currently running — our old install, or whatever sits at dest.
+            for candidate in ([ourPath.map { URL(fileURLWithPath: $0) }, dest].compactMap { $0 }) {
+                if InstallGuard.isRunning(candidate, amongRunning: running) { throw InstallError.appRunning(app.name) }
+            }
+            // F6: a bundle at dest that we didn't install is a stranger — surface it, don't destroy it.
+            if InstallGuard.isStranger(destExists: fm.fileExists(atPath: dest.path), destPath: dest.path, ourPath: ourPath) {
+                throw InstallError.destinationOccupied(dest.path)
+            }
+            // Remove our old install (may be elsewhere if the location setting changed) and our own dest copy.
+            if let ourPath, ourPath != dest.path { try? fm.removeItem(at: URL(fileURLWithPath: ourPath)) }
+            if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }   // reached only for our own copy
+            try fm.moveItem(at: bundle, to: dest)
 
-        var m = manifest()
-        // Preserve any desktop-alias path already recorded for this slot; update version/path/variant, and remember
-        // what this install replaced (a reinstall of the same version keeps the older one).
-        let prior = m[key]
-        let previous: String? = prior.flatMap { p in
-            VersionDisplay.equal(p.version, version) ? p.previousVersion : p.version
+            // Preserve any desktop-alias path already recorded for this slot; update version/path/variant, and remember
+            // what this install replaced (a reinstall of the same version keeps the older one).
+            let prior = m[key]
+            let previous: String? = prior.flatMap { p in
+                VersionDisplay.equal(p.version, version) ? p.previousVersion : p.version
+            }
+            m[key] = InstalledRecord(version: version, path: dest.path, installedAt: Self.isoNow(),
+                                     desktopAlias: prior?.desktopAlias, variant: variant, previousVersion: previous)
+            writeManifest(m)
+            return dest
         }
-        m[key] = InstalledRecord(version: version, path: dest.path, installedAt: Self.isoNow(),
-                                 desktopAlias: prior?.desktopAlias, variant: variant, previousVersion: previous)
-        writeManifest(m)
-        return dest
     }
 
 
@@ -336,35 +395,36 @@ final class InstallManager: @unchecked Sendable {
     /// manifest path. No-op if it's already in the right place. Throws if the move fails (e.g. the app
     /// is running) so the caller can report it.
     func relocate(_ appId: String, toApplications: Bool) throws {
-        guard needsRelocation(appId, toApplications: toApplications) else { return }
-        var m = manifest()
-        guard let rec = m[appId] else { return }
-        let current = URL(fileURLWithPath: rec.path)
-        let targetDir = toApplications ? applicationsInstallDir() : appsDir
-        try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
-        let dest = targetDir.appendingPathComponent(current.lastPathComponent)
-        let running = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
-        // F4: don't move a bundle that's currently running (breaks the live process).
-        if InstallGuard.isRunning(current, amongRunning: running) {
-            throw InstallError.appRunning(installedDisplayName(appId) ?? appId)
-        }
-        if dest.standardizedFileURL.path != current.standardizedFileURL.path {
-            // F6: don't destroy a stranger already sitting at the destination.
-            if InstallGuard.isStranger(destExists: fm.fileExists(atPath: dest.path), destPath: dest.path, ourPath: rec.path) {
-                throw InstallError.destinationOccupied(dest.path)
+        try lock.hold {
+            var m = reloadManifest()
+            guard needsRelocation(appId, toApplications: toApplications), let rec = m[appId] else { return }
+            let current = URL(fileURLWithPath: rec.path)
+            let targetDir = toApplications ? applicationsInstallDir() : appsDir
+            try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
+            let dest = targetDir.appendingPathComponent(current.lastPathComponent)
+            let running = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
+            // F4: don't move a bundle that's currently running (breaks the live process).
+            if InstallGuard.isRunning(current, amongRunning: running) {
+                throw InstallError.appRunning(installedDisplayName(appId) ?? appId)
             }
-            if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
+            if dest.standardizedFileURL.path != current.standardizedFileURL.path {
+                // F6: don't destroy a stranger already sitting at the destination.
+                if InstallGuard.isStranger(destExists: fm.fileExists(atPath: dest.path), destPath: dest.path, ourPath: rec.path) {
+                    throw InstallError.destinationOccupied(dest.path)
+                }
+                if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
+            }
+            let wasPinned = Dock.isPinned(rec.path)
+            try fm.moveItem(at: current, to: dest)
+            // A Dock tile stores the absolute path, so re-pin at the new location (one Dock restart).
+            // Desktop aliases are bookmark-based and follow the move on their own.
+            if wasPinned {
+                Dock.unpin(rec.path, restartDock: false)
+                Dock.pin(dest.path)
+            }
+            m[appId]?.path = dest.path
+            writeManifest(m)
         }
-        let wasPinned = Dock.isPinned(rec.path)
-        try fm.moveItem(at: current, to: dest)
-        // A Dock tile stores the absolute path, so re-pin at the new location (one Dock restart).
-        // Desktop aliases are bookmark-based and follow the move on their own.
-        if wasPinned {
-            Dock.unpin(rec.path, restartDock: false)
-            Dock.pin(dest.path)
-        }
-        m[appId]?.path = dest.path
-        writeManifest(m)
     }
 
     private func isApplicationsParent(_ path: String) -> Bool {
@@ -393,14 +453,16 @@ final class InstallManager: @unchecked Sendable {
     /// Removes the installed `.app` bundle, any Desktop alias / Dock pin we created, and the
     /// manifest entry.
     func uninstall(_ appId: String) throws {
-        var m = manifest()
-        if let rec = m[appId] {
-            if let alias = rec.desktopAlias { try? fm.removeItem(at: URL(fileURLWithPath: alias)) }
-            Dock.unpin(rec.path)
-            try? fm.removeItem(at: URL(fileURLWithPath: rec.path))
+        try lock.hold {
+            var m = reloadManifest()
+            if let rec = m[appId] {
+                if let alias = rec.desktopAlias { try? fm.removeItem(at: URL(fileURLWithPath: alias)) }
+                Dock.unpin(rec.path)
+                try? fm.removeItem(at: URL(fileURLWithPath: rec.path))
+            }
+            m.removeValue(forKey: appId)
+            writeManifest(m)
         }
-        m.removeValue(forKey: appId)
-        writeManifest(m)
     }
 
     // MARK: - Desktop alias (per-app, user-requested from the row menu)
@@ -420,18 +482,22 @@ final class InstallManager: @unchecked Sendable {
         let aliasURL = desktop.appendingPathComponent(name)
         let data = try appURL.bookmarkData(options: .suitableForBookmarkFile,
                                            includingResourceValuesForKeys: nil, relativeTo: nil)
-        try? fm.removeItem(at: aliasURL)
-        try URL.writeBookmarkData(data, to: aliasURL)
-        var m = manifest()
-        m[appId]?.desktopAlias = aliasURL.path
-        writeManifest(m)
+        try lock.hold {
+            try? fm.removeItem(at: aliasURL)
+            try URL.writeBookmarkData(data, to: aliasURL)
+            var m = reloadManifest()
+            m[appId]?.desktopAlias = aliasURL.path
+            writeManifest(m)
+        }
     }
 
-    func removeDesktopAlias(_ appId: String) {
-        var m = manifest()
-        if let alias = m[appId]?.desktopAlias { try? fm.removeItem(at: URL(fileURLWithPath: alias)) }
-        m[appId]?.desktopAlias = nil
-        writeManifest(m)
+    func removeDesktopAlias(_ appId: String) throws {
+        try lock.hold {
+            var m = reloadManifest()
+            if let alias = m[appId]?.desktopAlias { try? fm.removeItem(at: URL(fileURLWithPath: alias)) }
+            m[appId]?.desktopAlias = nil
+            writeManifest(m)
+        }
     }
 
     // MARK: - Details, storage, free space
