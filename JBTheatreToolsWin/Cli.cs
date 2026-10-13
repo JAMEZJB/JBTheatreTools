@@ -120,6 +120,9 @@ public static partial class Cli
         // (built-in URL + saved passphrase) so a machine set up in the app works with no flags at all.
         var settings = AppSettings.Load();
         _x64Slots = settings.X64Slots;
+        // The same release pick the window makes on this PC: with Development builds on, "latest" (--list, --install
+        // without --tag) includes dev builds, so a PC on a dev build is neither told nothing is newer nor downgraded.
+        Versions.DevChannel = settings.DevChannel;
         var builtInServer = AuthClient.ResolveServerUrl(settings, catalog.DownloadServer);
         if (!needsAuth)
         {
@@ -338,7 +341,6 @@ public static partial class Cli
         // The launcher's own show lock, or the suite-wide one set from Stagehand or an app (claude.json).
         if (settings.ShowLock || ClaudeSettingsFile.SuiteShowLock() == true)
             return Fail(ExitCode.ShowLock, "show lock is on — turn it off in JB Theatre Tools first.");
-        Versions.DevChannel = settings.DevChannel;   // the same pick the window makes on this machine
         var current = MainForm.CurrentVersion();
         try
         {

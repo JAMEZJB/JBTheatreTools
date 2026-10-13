@@ -31,8 +31,11 @@ public sealed class AppSettings
     public string ServerUrl { get; set; } = "";           // user-INVISIBLE relay-URL override (settings.json only, no UI); normally
                                                           // empty — the URL comes from the catalog's downloadServer
 
-    private static string Dir => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JBTheatreTools");
+    // JBTT_SETTINGS_DIR: a test stand-in for the settings folder (like JBTT_SUPPORT_DIR), so a test run never reads or
+    // writes this PC's real settings.
+    private static string Dir =>
+        Environment.GetEnvironmentVariable("JBTT_SETTINGS_DIR") is { Length: > 0 } testDir ? testDir
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JBTheatreTools");
     private static string FilePath => Path.Combine(Dir, "settings.json");
 
     public static AppSettings Load()
