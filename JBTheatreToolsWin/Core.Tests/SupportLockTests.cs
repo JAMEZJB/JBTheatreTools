@@ -45,6 +45,24 @@ public sealed class SupportLockTests : IDisposable
     }
 
     [Fact]
+    public void TheWindowSeesAnotherProcessesInstallUpdateAndRemovalAfterRefresh()
+    {
+        var window = new InstallManager(root);
+        var cli = new InstallManager(root);
+        Assert.Null(window.InstalledVersion("sh"));   // read (and cached) by the window
+        cli.Install(App("sh"), "v1", Exe(cli, "1"), "sh.exe", false);
+        Assert.Null(window.InstalledVersion("sh"));   // its old copy, until it re-reads
+        window.Refresh();
+        Assert.Equal("v1", window.InstalledVersion("sh"));
+        cli.Install(App("sh"), "v2", Exe(cli, "2"), "sh.exe", false);
+        window.Refresh();
+        Assert.Equal("v2", window.InstalledVersion("sh"));   // an update made elsewhere stops being offered
+        cli.Uninstall("sh");
+        window.Refresh();
+        Assert.Null(window.InstalledVersion("sh"));
+    }
+
+    [Fact]
     public void AnInstallWaitsForAnotherProcessHoldingTheLock()
     {
         var a = new InstallManager(root);

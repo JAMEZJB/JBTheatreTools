@@ -118,6 +118,7 @@ The same features on every launcher (the few that don't apply to Android are mar
   `--edition light|full` picks a Light/Full app's edition for `--install`, `--install-file`, `--uninstall` and
   `--download` (default: its first). Every command exits with a fixed code (listed in `--help`: 0 ok, 2 usage, 3 no access, 4 not found, 5 download,
   6 rejected, …) and a one-line `error:` message.
+  An install, update or removal made from the command line shows in an open launcher window straight away.
 
 ## App catalog (the installable apps it launches)
 

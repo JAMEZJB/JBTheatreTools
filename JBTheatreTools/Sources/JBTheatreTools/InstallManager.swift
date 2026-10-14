@@ -208,6 +208,10 @@ final class InstallManager: @unchecked Sendable {
         if !apps.isEmpty { Connectors.sync(apps: apps, manifest: m, at: connectorsURL) }
     }
 
+    /// installed.json as it is on disk now, adopted as this process's copy: for the window when another launcher process
+    /// (the command line, which Stagehand runs) has installed, updated or removed something.
+    func reloadFromDisk() { _ = reloadManifest() }
+
     /// Makes `m` this process's copy of the manifest.
     private func adopt(_ m: [String: InstalledRecord]) {
         manifestLock.lock(); defer { manifestLock.unlock() }

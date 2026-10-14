@@ -124,4 +124,40 @@ final class SupportLockTests: XCTestCase {
         }
         XCTAssertEqual(done.wait(timeout: .now() + 5), .success)
     }
+
+    // MARK: - The window following installs another process made
+
+    func testTheWindowSeesAnotherProcessesInstallUpdateAndRemovalAfterReloading() throws {
+        let window = manager(), cli = manager()
+        XCTAssertNil(window.installedVersion("sh"))   // the window has read (and cached) the list
+        try cli.install(app: app("sh"), version: "v1", downloadedZip: try zip("sh"), toApplications: false)
+        XCTAssertNil(window.installedVersion("sh"), "without a reload the window still shows its old copy")
+        window.reloadFromDisk()
+        XCTAssertEqual(window.installedVersion("sh"), "v1")
+        try cli.install(app: app("sh"), version: "v2", downloadedZip: try zip("sh"), toApplications: false)
+        window.reloadFromDisk()
+        XCTAssertEqual(window.installedVersion("sh"), "v2", "an update made elsewhere stops being offered")
+        try cli.uninstall("sh")
+        window.reloadFromDisk()
+        XCTAssertNil(window.installedVersion("sh"))
+    }
+
+    func testTheFolderWatchFiresWhenInstalledJsonIsReplaced() throws {
+        // installed.json is written atomically (a temp file renamed over it): the window's watch on the support folder
+        // must see that.
+        let file = root.appendingPathComponent("installed.json")
+        try Data("{}".utf8).write(to: file, options: .atomic)
+        let fd = open(root.path, O_EVTONLY)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        let fired = expectation(description: "folder watch fired")
+        fired.assertForOverFulfill = false
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete],
+                                                               queue: .main)
+        source.setEventHandler { fired.fulfill() }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        defer { source.cancel() }
+        try Data(#"{"sh":{}}"#.utf8).write(to: file, options: .atomic)
+        wait(for: [fired], timeout: 3)
+    }
 }

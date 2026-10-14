@@ -326,6 +326,7 @@ final class AppState: ObservableObject {
             // for another launcher process that is installing — that one brings it in step itself after).
             let apps = catalog.apps
             Task.detached(priority: .utility) { InstallManager.shared.followConnectors(apps, wait: 10) }
+            watchManifest()   // installs another launcher process makes (Stagehand runs the command line) show here too
             let known = Set(catalog.apps.map(\.id))
             // Load the per-app variant choice BEFORE building rows, so each row reads its selected slot.
             if let saved = UserDefaults.standard.dictionary(forKey: Self.variantKey) as? [String: String] {
@@ -955,6 +956,54 @@ final class AppState: ObservableObject {
         bumpRows()
         AppLog.shared.log("launcher settings restored from a backup")
         Task { await refreshAll() }
+    }
+
+    // MARK: - Installs made by another launcher process (the command line, or Stagehand driving it)
+
+    private var manifestWatch: DispatchSourceFileSystemObject?
+    private var manifestReload: DispatchWorkItem?
+
+    /// Follows the support folder, where installed.json is replaced atomically on every change. When another launcher
+    /// process installs, updates or removes an app, the rows show it at once instead of offering an update that's
+    /// already done until the launcher restarts.
+    private func watchManifest() {
+        guard manifestWatch == nil else { return }
+        let fd = open(InstallManager.shared.supportDir.path, O_EVTONLY)
+        guard fd >= 0 else { AppLog.shared.log("install list watch: can't open the support folder"); return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete],
+                                                               queue: .main)
+        source.setEventHandler { [weak self] in Task { @MainActor in self?.queueManifestReload() } }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        manifestWatch = source
+    }
+
+    /// One reload per burst of writes (installed.json, connectors.json and their temp files land together).
+    private func queueManifestReload() {
+        manifestReload?.cancel()
+        let work = DispatchWorkItem { [weak self] in Task { @MainActor in self?.reloadInstalledFromDisk() } }
+        manifestReload = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    /// Re-reads installed.json and updates every row whose slot changed. A row this window is busy with is left alone:
+    /// its own install or removal shows when it ends.
+    func reloadInstalledFromDisk() {
+        InstallManager.shared.reloadFromDisk()
+        var changed = 0
+        for i in rows.indices {
+            let key = installKey(for: rows[i].app)
+            if rows[i].installing || slotsInFlight.contains(key) { continue }
+            let now = InstallManager.shared.installedVersion(key)
+            guard now != rows[i].installed else { continue }
+            rows[i].installed = now
+            rows[i].resolvedName = now == nil ? nil : InstallManager.shared.installedDisplayName(key)
+            recomputeRow(i)
+            changed += 1
+        }
+        guard changed > 0 else { return }
+        bumpRows()
+        AppLog.shared.log("install list changed outside this window: \(changed) row(s) updated")
     }
 
     /// Re-derives latestAssetId + status for a row from its cached releases (after a variant change).

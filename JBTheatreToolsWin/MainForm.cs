@@ -758,6 +758,7 @@ public sealed class MainForm : Form
         // may make every app's entry point, and waits while another launcher process is installing.
         var apps = _catalog.Apps;
         _ = Task.Run(() => ConnectorShims.Start(apps));
+        WatchManifest();   // installs another launcher process makes (Stagehand runs the command line) show here too
         _list.Controls.Clear();
         _rows.Clear();
         foreach (var app in _catalog.Apps)
@@ -874,6 +875,63 @@ public sealed class MainForm : Form
         RecomputeRow(row);
         RefreshDownloadAllButton();   // the edition the row shows is the one Download All installs
         Log.Write($"variant for {row.App.Id} → {variantId}");
+    }
+
+    // ── Installs made by another launcher process (the command line, or Stagehand driving it) ─────────────
+
+    private FileSystemWatcher? _manifestWatch;
+    private System.Windows.Forms.Timer? _manifestDebounce;
+
+    /// <summary>Follows installed.json. When another launcher process installs, updates or removes an app (Stagehand runs
+    /// the command line, even on this PC while the window is open), the rows show it at once instead of offering an
+    /// update that's already done until the launcher restarts.</summary>
+    private void WatchManifest()
+    {
+        if (_manifestWatch != null) return;
+        try
+        {
+            _manifestDebounce = new System.Windows.Forms.Timer { Interval = 400 };   // one reload per burst of writes
+            _manifestDebounce.Tick += (_, _) => { _manifestDebounce.Stop(); ReloadInstalledFromDisk(); };
+            _manifestWatch = new FileSystemWatcher(InstallManager.Shared.SupportDir, "installed.json")
+            {
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size,
+            };
+            _manifestWatch.Changed += (_, _) => QueueManifestReload();
+            _manifestWatch.Created += (_, _) => QueueManifestReload();
+            _manifestWatch.Renamed += (_, _) => QueueManifestReload();   // written atomically: a temp file renamed over it
+            _manifestWatch.EnableRaisingEvents = true;
+        }
+        catch (Exception ex) { Log.Write($"install list watch: {ex.Message}"); }
+    }
+
+    /// <summary>From the watcher's thread: (re)start the short wait on the window's thread.</summary>
+    private void QueueManifestReload()
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try { BeginInvoke(new Action(() => { _manifestDebounce?.Stop(); _manifestDebounce?.Start(); })); }
+        catch (InvalidOperationException) { /* closing */ }
+    }
+
+    /// <summary>Re-reads installed.json and updates every row whose slot changed. A row this window is busy with is left
+    /// alone: its own install or removal shows when it ends.</summary>
+    private void ReloadInstalledFromDisk()
+    {
+        InstallManager.Shared.Refresh();
+        int changed = 0;
+        foreach (var row in _rows)
+        {
+            var key = InstallKey(row.App);
+            if (row.IsBusy || _slotsInFlight.Contains(key)) continue;
+            var now = InstallManager.Shared.InstalledVersion(key);
+            if (now == row.Installed) continue;
+            row.SetState(now, row.Latest, row.LatestAssetId, row.Status);
+            RecomputeRow(row);
+            row.SetResolvedName(now == null ? null : InstallManager.Shared.InstalledDisplayName(key));
+            changed++;
+        }
+        if (changed == 0) return;
+        RefreshDownloadAllButton();
+        Log.Write($"install list changed outside this window: {changed} row(s) updated");
     }
 
     /// <summary>Re-derives a row's latest-asset id + status from its cached releases (after a variant change).</summary>
