@@ -347,10 +347,15 @@ final class AppState: ObservableObject {
             collapsedGroups = Set(UserDefaults.standard.stringArray(forKey: Self.collapsedKey) ?? [])
             rows = Self.applyingSavedOrder(rows)
             // Pre-decode + downscale every row icon OFF the main thread, so the first frame doesn't stall on
-            // NSWorkspace.icon(forFile:) / PNG decode for 21 rows.
+            // NSWorkspace.icon(forFile:) / PNG decode for every row. Only once the app has finished launching: drawing
+            // an NSImage on another thread while it still launches can run AppKit's one-time menu set-up there, which
+            // waits on SwiftUI while the main thread waits on that set-up — the Dock icon bounced for ever. A block on
+            // the main queue runs only when the main run loop does, i.e. after launch.
             let prewarmPaths = rows.compactMap { InstallManager.shared.installedPath($0.id)?.path }
             let prewarmIds = rows.map(\.id)
-            Task.detached(priority: .utility) { AppIconImage.prewarm(paths: prewarmPaths, ids: prewarmIds) }
+            DispatchQueue.main.async {
+                Task.detached(priority: .utility) { AppIconImage.prewarm(paths: prewarmPaths, ids: prewarmIds) }
+            }
             pinnedIds = Set(UserDefaults.standard.stringArray(forKey: Self.pinnedKey) ?? []).intersection(known)
             hiddenIds = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? []).intersection(known)
             heldIds = Set(UserDefaults.standard.stringArray(forKey: Self.heldKey) ?? []).intersection(known)
