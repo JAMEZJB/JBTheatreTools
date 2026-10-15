@@ -12,9 +12,9 @@ internal static class Log
 
     static Log()
     {
-        var dir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "JBTheatreTools", "logs");
+        // JBTT_LOG_DIR: a test stand-in (like JBTT_SUPPORT_DIR), so a test run never writes to this PC's real log.
+        var dir = Environment.GetEnvironmentVariable("JBTT_LOG_DIR") is { Length: > 0 } testDir ? testDir
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "JBTheatreTools", "logs");
         try { Directory.CreateDirectory(dir); } catch { /* best effort */ }
         FilePath = Path.Combine(dir, "JBTheatreTools.log");
         TrimIfLarge();

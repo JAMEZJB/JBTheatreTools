@@ -52,4 +52,20 @@ final class EditionTests: XCTestCase {
         XCTAssertTrue(single["editions"] is NSNull)
         XCTAssertTrue(single["installed"] is NSNull)
     }
+
+    // MARK: - "Is it open?" ignores headless helpers (connectors, back up / restore, self-check)
+
+    func testHeadlessHelpersAreNotOpen() {
+        XCTAssertTrue(InstallGuard.isHeadlessHelper(["--mcp"]))
+        XCTAssertTrue(InstallGuard.isHeadlessHelper(["--settings-export", "/tmp/x.json"]))
+        XCTAssertTrue(InstallGuard.isHeadlessHelper(["--SelfCheck"]))
+        XCTAssertFalse(InstallGuard.isHeadlessHelper([]))
+        XCTAssertFalse(InstallGuard.isHeadlessHelper(["/Users/x/show.xlsx"]))
+        XCTAssertFalse(InstallGuard.isHeadlessHelper(["--mcpx"]))
+    }
+
+    func testProcessArgumentsReadsARunningProcess() throws {
+        let args = try XCTUnwrap(InstallGuard.processArguments(getpid()))
+        XCTAssertEqual(args, Array(CommandLine.arguments.dropFirst()))
+    }
 }

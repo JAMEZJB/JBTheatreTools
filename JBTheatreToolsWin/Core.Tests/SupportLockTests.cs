@@ -9,6 +9,7 @@ namespace JBTheatreTools.Tests;
 /// <summary>Several launcher processes share one support folder on a PC (the window, a command-line install, one
 /// started remotely by Stagehand). Two managers on the same folder stand in for two processes: each has its own lock
 /// file handle, as separate processes would.</summary>
+[Collection("Installs")]
 public sealed class SupportLockTests : IDisposable
 {
     private readonly string root = Path.Combine(Environment.GetEnvironmentVariable("JBTT_TEST_ROOT") ?? Path.GetTempPath(),

@@ -78,6 +78,47 @@ enum InstallGuard {
         return running.contains { $0.standardizedFileURL.path == t }
     }
 
+    /// The bundles of the apps running right now that a person has open: a headless helper (Claude's `--mcp` connector,
+    /// a settings back up / restore, a self-check) isn't "open". Nobody can quit it, and it restarts itself on the new
+    /// version.
+    static func openBundles() -> [URL] {
+        NSWorkspace.shared.runningApplications.compactMap { app in
+            guard let url = app.bundleURL else { return nil }
+            if let args = processArguments(app.processIdentifier), isHeadlessHelper(args) { return nil }
+            return url
+        }
+    }
+
+    static let headlessSwitches = ["--mcp", "--remote", "--describe", "--settings-describe", "--settings-export",
+                                   "--settings-import", "--selfcheck"]
+
+    /// True when a process's arguments run one of the headless helper modes.
+    static func isHeadlessHelper(_ args: [String]) -> Bool {
+        args.contains { a in headlessSwitches.contains { a.caseInsensitiveCompare($0) == .orderedSame || a.lowercased().hasPrefix($0 + "=") } }
+    }
+
+    /// A process's arguments (argv after the program), from the kernel; nil when they can't be read.
+    static func processArguments(_ pid: pid_t) -> [String]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return nil }
+        // argc, then the executable path, NUL padding, then argc NUL-terminated strings (argv[0] first).
+        let argc = buffer.withUnsafeBytes { $0.load(as: Int32.self) }
+        var i = MemoryLayout<Int32>.size
+        while i < size, buffer[i] != 0 { i += 1 }   // the executable path
+        while i < size, buffer[i] == 0 { i += 1 }   // its padding
+        var args: [String] = []
+        while i < size, args.count < Int(argc) {
+            let start = i
+            while i < size, buffer[i] != 0 { i += 1 }
+            args.append(String(decoding: buffer[start..<i], as: UTF8.self))
+            i += 1
+        }
+        return Array(args.dropFirst())
+    }
+
     /// True when something occupies `destPath` that ISN'T the install this launcher recorded for the
     /// slot (`ourPath`) — i.e. replacing it would destroy a stranger. Nothing at dest → not a stranger.
     static func isStranger(destExists: Bool, destPath: String, ourPath: String?) -> Bool {
@@ -233,7 +274,8 @@ final class InstallManager: @unchecked Sendable {
     func runningInstance(_ key: String) -> NSRunningApplication? {
         guard let path = installedPath(key) else { return nil }
         return NSWorkspace.shared.runningApplications.first { app in
-            app.bundleURL.map { InstallGuard.isRunning(path, amongRunning: [$0]) } ?? false
+            guard let url = app.bundleURL, InstallGuard.isRunning(path, amongRunning: [url]) else { return false }
+            return !(InstallGuard.processArguments(app.processIdentifier).map(InstallGuard.isHeadlessHelper) ?? false)
         }
     }
 
@@ -348,7 +390,7 @@ final class InstallManager: @unchecked Sendable {
             var m = reloadManifest()
             let ourPath = m[key]?.path
 
-            let running = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
+            let running = InstallGuard.openBundles()
             // F4: never replace a bundle that's currently running — our old install, or whatever sits at dest.
             for candidate in ([ourPath.map { URL(fileURLWithPath: $0) }, dest].compactMap { $0 }) {
                 if InstallGuard.isRunning(candidate, amongRunning: running) { throw InstallError.appRunning(app.name) }
@@ -406,7 +448,7 @@ final class InstallManager: @unchecked Sendable {
             let targetDir = toApplications ? applicationsInstallDir() : appsDir
             try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
             let dest = targetDir.appendingPathComponent(current.lastPathComponent)
-            let running = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
+            let running = InstallGuard.openBundles()
             // F4: don't move a bundle that's currently running (breaks the live process).
             if InstallGuard.isRunning(current, amongRunning: running) {
                 throw InstallError.appRunning(installedDisplayName(appId) ?? appId)

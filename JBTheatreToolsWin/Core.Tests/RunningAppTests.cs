@@ -50,3 +50,24 @@ public sealed class RunningAppTests : IDisposable
         Assert.False(InstallManager.RunsInstalledExe(Path.Combine(older, "SD.exe"), exe));          // a plain folder
     }
 }
+
+/// <summary>Only an app a person has open blocks its update: the headless helpers programs start (Claude's connector,
+/// a Stagehand remote operation, a settings back up / restore, a self-check) don't.</summary>
+public class HeadlessHelperTests
+{
+    [Theory]
+    [InlineData(@"""C:\Users\x\AppData\Local\JBTheatreTools\bin\sd\SD.exe"" --mcp")]
+    [InlineData(@"C:\apps\Stagehand.exe --remote install-app showdashboard")]
+    [InlineData(@"SD.exe --settings-export C:\tmp\out.json")]
+    [InlineData(@"SD.exe --settings-describe")]
+    [InlineData(@"SD.exe --SELFCHECK")]
+    [InlineData(@"SD.exe --mcp=stdio")]
+    public void HelpersAreNotOpen(string commandLine) => Assert.True(InstallManager.IsHeadlessHelper(commandLine));
+
+    [Theory]
+    [InlineData(@"""C:\apps\sd\SD.exe""")]
+    [InlineData(@"C:\apps\sd\SD.exe C:\shows\bible.xlsx")]
+    [InlineData(@"C:\apps\sd\SD.exe --mcpx")]
+    [InlineData(@"C:\apps\remote\SD.exe")]
+    public void APersonsCopyIsOpen(string commandLine) => Assert.False(InstallManager.IsHeadlessHelper(commandLine));
+}

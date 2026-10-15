@@ -158,11 +158,31 @@ public sealed class InstallManager
         return System.Diagnostics.Process.GetProcessesByName(Path.GetFileNameWithoutExtension(exe))
             .Where(p =>
             {
-                try { return p.MainModule?.FileName is { } image && RunsInstalledExe(image, full); }
-                catch { return true; }   // can't read the path (access) → same name counts; asking is harmless
+                // A windowless helper (Claude's --mcp connector, Stagehand's --remote) isn't "open": nobody can close
+                // it, and the update can't break it (on Windows the old version folder stays while it runs).
+                if (OperatingSystem.IsWindows() && ProcessInfo.CommandLine(p.Id) is { } cmd && IsHeadlessHelper(cmd)) return false;
+                var image = OperatingSystem.IsWindows() ? ProcessInfo.ImagePath(p.Id) : TryMainModule(p);
+                return image == null || RunsInstalledExe(image, full);   // unreadable → same name counts; asking is harmless
             })
             .ToArray();
     }
+
+    private static string? TryMainModule(System.Diagnostics.Process p)
+    {
+        try { return p.MainModule?.FileName; } catch { return null; }
+    }
+
+    /// <summary>The switches suite apps run headless with — a Claude connector, a Stagehand remote operation, a settings
+    /// back up / restore or a self-check, all started by a program rather than a person.</summary>
+    private static readonly string[] HeadlessSwitches =
+        { "--mcp", "--remote", "--describe", "--settings-describe", "--settings-export", "--settings-import", "--selfcheck" };
+
+    /// <summary>True when a command line runs one of the headless helper modes (<see cref="HeadlessSwitches"/>).</summary>
+    public static bool IsHeadlessHelper(string commandLine) =>
+        commandLine.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .Select(t => t.Trim('"'))
+            .Any(t => HeadlessSwitches.Any(sw => t.Equals(sw, StringComparison.OrdinalIgnoreCase) ||
+                                                 t.StartsWith(sw + "=", StringComparison.OrdinalIgnoreCase)));
 
     /// <summary>True when a process image path is the installed exe: by its own path, or through a folder link to its
     /// folder. Stagehand and Claude start apps through the connector entry point (bin\&lt;id&gt;, a junction to the
@@ -416,21 +436,14 @@ public sealed class InstallManager
     private static bool ExecutableInUse(string path)
     {
         if (!OperatingSystem.IsWindows()) return false;
-        IEnumerable<string> exes;
         try
         {
-            exes = File.Exists(path) ? new[] { path }
-                 : Directory.Exists(path) ? Directory.EnumerateFiles(path, "*.exe", SearchOption.AllDirectories)
-                 : Array.Empty<string>();
-            foreach (var exe in exes)
-            {
-                try { using var probe = new FileStream(exe, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete); }
-                catch (IOException) { return true; }
-                catch (UnauthorizedAccessException) { /* read-only file: says nothing about use */ }
-            }
+            var exes = File.Exists(path) ? new[] { path }
+                     : Directory.Exists(path) ? Directory.EnumerateFiles(path, "*.exe", SearchOption.AllDirectories).ToArray()
+                     : Array.Empty<string>();
+            return exes.Length > 0 && RestartManager.AnyInUse(exes);
         }
-        catch (Exception) { /* unreadable folder: the process list decides */ }
-        return false;
+        catch (Exception) { return false; }   // unreadable folder: the process list decides
     }
 
     private static bool ProcessImageUnder(string path)
@@ -762,3 +775,88 @@ public sealed class InstallManager
 
 /// <summary>A build that failed its integrity check (size, signed SHA256SUMS or hash) — never installed.</summary>
 public sealed class InstallVerificationException(string message) : Exception(message);
+
+/// <summary>Another process's image path and command line, read with the least access Windows has
+/// (PROCESS_QUERY_LIMITED_INFORMATION), which it grants for a same-user process even when that one runs as administrator
+/// (Process.MainModule needs memory-read access and fails there). Null when it can't be read.</summary>
+internal static class ProcessInfo
+{
+    private const uint QueryLimited = 0x1000;
+    private const int ProcessCommandLineInformation = 60;
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr h);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(IntPtr h, int flags, System.Text.StringBuilder name, ref int size);
+    [System.Runtime.InteropServices.DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(IntPtr h, int cls, IntPtr buffer, int length, out int returned);
+
+    public static string? ImagePath(int pid) => WithHandle(pid, h =>
+    {
+        var sb = new System.Text.StringBuilder(1024);
+        int size = sb.Capacity;
+        return QueryFullProcessImageName(h, 0, sb, ref size) ? sb.ToString(0, size) : null;
+    });
+
+    public static string? CommandLine(int pid) => WithHandle(pid, h =>
+    {
+        NtQueryInformationProcess(h, ProcessCommandLineInformation, IntPtr.Zero, 0, out int needed);
+        if (needed <= 0 || needed > 1 << 20) return null;
+        var buffer = System.Runtime.InteropServices.Marshal.AllocHGlobal(needed);
+        try
+        {
+            if (NtQueryInformationProcess(h, ProcessCommandLineInformation, buffer, needed, out _) != 0) return null;
+            // A UNICODE_STRING: Length (bytes), MaximumLength, then a pointer to the characters (within the buffer).
+            int bytes = System.Runtime.InteropServices.Marshal.ReadInt16(buffer) & 0xFFFF;
+            var chars = System.Runtime.InteropServices.Marshal.ReadIntPtr(buffer, IntPtr.Size);
+            return chars == IntPtr.Zero ? null : System.Runtime.InteropServices.Marshal.PtrToStringUni(chars, bytes / 2);
+        }
+        finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(buffer); }
+    });
+
+    private static string? WithHandle(int pid, Func<IntPtr, string?> read)
+    {
+        var h = OpenProcess(QueryLimited, false, pid);
+        if (h == IntPtr.Zero) return null;
+        try { return read(h); }
+        catch (Exception) { return null; }
+        finally { CloseHandle(h); }
+    }
+}
+
+/// <summary>Windows' Restart Manager: which processes are using a file, the question installers ask. It sees a program
+/// running from an exe whatever path started it (a folder link included), where opening the file can't tell: a running
+/// program's exe can still be opened for writing, and deleted.</summary>
+internal static class RestartManager
+{
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct UniqueProcess { public int ProcessId; public System.Runtime.InteropServices.ComTypes.FILETIME StartTime; }
+
+    [System.Runtime.InteropServices.DllImport("rstrtmgr.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int RmStartSession(out uint session, int flags, System.Text.StringBuilder key);
+    [System.Runtime.InteropServices.DllImport("rstrtmgr.dll")]
+    private static extern int RmEndSession(uint session);
+    [System.Runtime.InteropServices.DllImport("rstrtmgr.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int RmRegisterResources(uint session, uint files, string[] names, uint apps, UniqueProcess[]? procs,
+                                                  uint services, string[]? serviceNames);
+    [System.Runtime.InteropServices.DllImport("rstrtmgr.dll")]
+    private static extern int RmGetList(uint session, out uint needed, ref uint count, IntPtr list, out uint reasons);
+
+    /// <summary>True when any process uses any of <paramref name="files"/>; false when none does or Windows can't say.</summary>
+    public static bool AnyInUse(string[] files)
+    {
+        var key = new System.Text.StringBuilder(64);   // CCH_RM_SESSION_KEY + 1
+        if (RmStartSession(out var session, 0, key) != 0) return false;
+        try
+        {
+            if (RmRegisterResources(session, (uint)files.Length, files, 0, null, 0, null) != 0) return false;
+            uint count = 0;
+            int result = RmGetList(session, out var needed, ref count, IntPtr.Zero, out _);   // only the count is wanted
+            const int ErrorMoreData = 234;
+            return (result == 0 || result == ErrorMoreData) && needed > 0;
+        }
+        finally { RmEndSession(session); }
+    }
+}

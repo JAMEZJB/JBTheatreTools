@@ -120,6 +120,8 @@ The same features on every launcher (the few that don't apply to Android are mar
   6 rejected, 9 the app is open, …) and a one-line `error:` message.
   An install, update or removal made from the command line shows in an open launcher window straight away. The
   command line never installs over or removes an app that's open (exit 9): the window asks you to close it first.
+  A headless helper (Claude's connector, a Stagehand remote operation) doesn't count as open: the update goes ahead,
+  and on Windows the old version stays until the helper stops.
 
 ## App catalog (the installable apps it launches)
 

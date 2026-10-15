@@ -4,6 +4,12 @@ using Xunit;
 
 namespace JBTheatreTools.Tests;
 
+/// <summary>Every class whose installs go through the shared Shortcuts fake (InstallManagerShims.cs): one at a time, so
+/// one test's Shortcuts.Succeed can't flip under another's install.</summary>
+[CollectionDefinition("Installs", DisableParallelization = true)]
+public sealed class InstallsCollection { }
+
+[Collection("Installs")]
 public sealed class InstallManagerIntegrationTests : IDisposable
 {
     private readonly string root = Path.Combine(Environment.GetEnvironmentVariable("JBTT_TEST_ROOT") ?? Path.GetTempPath(),
