@@ -158,10 +158,29 @@ public sealed class InstallManager
         return System.Diagnostics.Process.GetProcessesByName(Path.GetFileNameWithoutExtension(exe))
             .Where(p =>
             {
-                try { return string.Equals(p.MainModule?.FileName, full, StringComparison.OrdinalIgnoreCase); }
+                try { return p.MainModule?.FileName is { } image && RunsInstalledExe(image, full); }
                 catch { return true; }   // can't read the path (access) → same name counts; asking is harmless
             })
             .ToArray();
+    }
+
+    /// <summary>True when a process image path is the installed exe: by its own path, or through a folder link to its
+    /// folder. Stagehand and Claude start apps through the connector entry point (bin\&lt;id&gt;, a junction to the
+    /// installed version's folder), and such a process names that path, not the version folder.</summary>
+    public static bool RunsInstalledExe(string image, string installedExe)
+    {
+        var path = Path.GetFullPath(image);
+        if (string.Equals(path, installedExe, StringComparison.OrdinalIgnoreCase)) return true;
+        if (!string.Equals(Path.GetFileName(path), Path.GetFileName(installedExe), StringComparison.OrdinalIgnoreCase)) return false;
+        try
+        {
+            var dir = new DirectoryInfo(Path.GetDirectoryName(path)!);
+            if ((dir.Attributes & FileAttributes.ReparsePoint) == 0 || dir.LinkTarget is not { } target) return false;
+            var resolved = Path.GetFullPath(target, Path.GetDirectoryName(dir.FullName)!).TrimEnd(Path.DirectorySeparatorChar);
+            return string.Equals(resolved, Path.GetDirectoryName(installedExe)!.TrimEnd(Path.DirectorySeparatorChar),
+                                 StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception) { return false; }
     }
 
     public string? InstalledPath(string id)

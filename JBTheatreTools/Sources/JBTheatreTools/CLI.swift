@@ -275,6 +275,7 @@ enum CLI {
         }
         let slot = app.installKey(variantId: variant)
         let appName = app.name + app.variantSuffix(variant)
+        refuseIfOpen(slot, appName, "install")
         guard hasAuth(token: token) else {
             fputs("error: no auth (set $GITHUB_TOKEN, pass --token, save one in the app, or use --server + --server-pass).\n", stderr)
             exit(1)
@@ -324,6 +325,8 @@ enum CLI {
                 HistoryStore.flush()   // written before the process exits
                 AppLog.shared.log("cli: installed \(slot) \(rel.tagName)\(toApplications ? " (Applications)" : "")\(verification == .verified ? " (sha256 ok)" : " (unverified)")")
                 print("Installed \(appName) \(rel.tagName) → \(dest.path)")
+            } catch InstallError.appRunning {   // opened while it downloaded: install() never replaces a running app
+                exit(fail(ExitCode.appOpen, "\(appName) is open. Close it, then run this again (the command line never closes an open app)."))
             } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }
         }
     }
@@ -332,6 +335,16 @@ enum CLI {
     enum ExitCode {
         static let ok: Int32 = 0, failed: Int32 = 1, usage: Int32 = 2, noAccess: Int32 = 3, notFound: Int32 = 4
         static let download: Int32 = 5, rejected: Int32 = 6
+        /// The app is open: the command line never installs over or removes it (the window asks first; nobody can here).
+        static let appOpen: Int32 = 9
+    }
+
+    /// The command line never installs over or removes an app that's open (the window asks first; nobody can be asked
+    /// here): exits 9 with a one-line error.
+    private static func refuseIfOpen(_ slot: String, _ appName: String, _ doing: String) {
+        guard InstallManager.shared.runningInstance(slot) != nil else { return }
+        AppLog.shared.log("cli: \(doing) \(slot) refused — it's open")
+        exit(fail(ExitCode.appOpen, "\(appName) is open. Close it, then run this again (the command line never closes an open app)."))
     }
 
     /// One "error: …" line on stderr; returns the exit code.
@@ -434,6 +447,7 @@ enum CLI {
         }
         let slot = app.installKey(variantId: variant)
         let appName = app.name + app.variantSuffix(variant)
+        refuseIfOpen(slot, appName, "uninstall")
         do {
             let before = InstallManager.shared.installedVersion(slot)
             try InstallManager.shared.uninstall(slot)
@@ -578,7 +592,8 @@ enum CLI {
               list / shell history). Prefer $GITHUB_TOKEN or the saved Keychain values where possible.
 
         Exit codes (--download, --list --json): 0 ok · 1 failed · 2 usage · 3 no access · 4 not found
-                    5 download failed (retry) · 6 verification failed. Errors are one line on stderr, "error: ".
+                    5 download failed (retry) · 6 verification failed · 9 the app is open (--install and
+                    --uninstall never close it: close it, then retry). Errors are one line on stderr, "error: ".
         """)
     }
 

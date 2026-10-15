@@ -265,6 +265,7 @@ public static partial class Cli
             var asset = rel.Assets.FirstOrDefault(a => a.Name == name);
             if (asset == null) return Fail(ExitCode.NotFound, $"release {rel.TagName} has no Windows asset{(name == null ? "" : $" ({name})")}.");
 
+            if (RefuseIfOpen(slot, appName, "install") is int open) return open;
             Console.WriteLine($"Downloading {asset.Name} ({ByteString(asset.Size)}) @ {rel.TagName}…");
             var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{slot.Replace('@', '-')}-{rel.TagName}-{asset.Name}");
             int last = -1;
@@ -293,6 +294,11 @@ public static partial class Cli
                 VerifyResult.NoManifest => $"⚠ {asset.Name} installed unverified (older tag; no SHA256SUMS).",
                 _ => $"⚠ {asset.Name} installed unverified (older tag; not in SHA256SUMS).",
             });
+            if (RefuseIfOpen(slot, appName, "install") is int openNow)   // opened while it downloaded
+            {
+                InstallManager.TryDelete(cache);
+                return openNow;
+            }
             var before = InstallManager.Shared.InstalledVersion(slot);
             var dest = InstallManager.Shared.Install(app, rel.TagName, cache, asset.Name, toApplications, variant);
             InstallManager.TryDelete(cache);
@@ -312,6 +318,7 @@ public static partial class Cli
             return Fail(ExitCode.Usage, $"{app.Name} has no edition \"{edition}\". Editions: {app.EditionChoices}.");
         var slot = app.InstallKey(variant);
         var appName = app.Name + app.VariantSuffix(variant);
+        if (RefuseIfOpen(slot, appName, "uninstall") is int open) return open;
         try
         {
             var before = InstallManager.Shared.InstalledVersion(slot);
@@ -437,6 +444,7 @@ public static partial class Cli
 
         Exit codes: 0 ok · 1 failed · 2 usage · 3 no access · 4 not found · 5 download failed (retry)
                     6 verification failed / wrong file · 7 show lock on · 8 busy (another install) — retry
+                    9 the app is open (install / install-file / uninstall never close it) — close it, retry
                     Errors are one line on stderr, starting "error: ".
 
         Note: a secret passed via --token / --server-pass is visible to other local users (process

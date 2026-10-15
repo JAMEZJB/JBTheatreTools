@@ -20,6 +20,18 @@ public static partial class Cli
         public const int Rejected = 6;      // the build failed verification (signature, checksum, size) or is the wrong file
         public const int ShowLock = 7;      // show lock is on
         public const int Busy = 8;          // another launcher window or command kept the install lock — retry later
+        public const int AppOpen = 9;       // the app is open: close it, then retry (the command line never closes it)
+    }
+
+    /// <summary>The command line never installs over or removes an app that's open: the window asks first, but here
+    /// nobody can be asked, and on Windows the new version would install beside the old one still running. Exit 9.</summary>
+    private static int? RefuseIfOpen(string slot, string appName, string doing)
+    {
+        var running = InstallManager.Shared.RunningInstances(slot);
+        try { if (running.Length == 0) return null; }
+        finally { foreach (var p in running) p.Dispose(); }
+        Log.Write($"cli: {doing} {slot} refused — it's open");
+        return Fail(ExitCode.AppOpen, $"{appName} is open. Close it, then run this again (the command line never closes an open app).");
     }
 
     private static int Fail(int code, string message)
@@ -162,9 +174,11 @@ public static partial class Cli
         var cache = Path.Combine(InstallManager.Shared.CacheDir, $"{app.Id}-{tagName}-{Guid.NewGuid():N}-{assetName}");
         try
         {
+            if (RefuseIfOpen(slot, appName, "install-file") is int open) return open;
             File.Copy(file, cache, overwrite: true);
             InstallManager.VerifyLocalFile(cache, assetName, sumsPath, app.Repo, tagName);
             Console.WriteLine($"Verified {assetName} (signed sha256, {app.Repo} {tagName}).");
+            if (RefuseIfOpen(slot, appName, "install-file") is int openNow) return openNow;   // opened while it verified
             var before = InstallManager.Shared.InstalledVersion(slot);
             var dest = InstallManager.Shared.Install(app, tagName, cache, assetName, toApplications, variant);
             History.Add(app.Id, appName, ActivityHistory.ActionFor(before, tagName), before, tagName);

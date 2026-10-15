@@ -117,8 +117,9 @@ The same features on every launcher (the few that don't apply to Android are mar
   reports success (a failure leaves nothing in the folder); `--json` answers `{"path","sums","sig","size","sha256"}`.
   `--edition light|full` picks a Light/Full app's edition for `--install`, `--install-file`, `--uninstall` and
   `--download` (default: its first). Every command exits with a fixed code (listed in `--help`: 0 ok, 2 usage, 3 no access, 4 not found, 5 download,
-  6 rejected, …) and a one-line `error:` message.
-  An install, update or removal made from the command line shows in an open launcher window straight away.
+  6 rejected, 9 the app is open, …) and a one-line `error:` message.
+  An install, update or removal made from the command line shows in an open launcher window straight away. The
+  command line never installs over or removes an app that's open (exit 9): the window asks you to close it first.
 
 ## App catalog (the installable apps it launches)
 
