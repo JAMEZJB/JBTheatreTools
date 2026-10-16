@@ -90,7 +90,7 @@ enum InstallGuard {
     }
 
     static let headlessSwitches = ["--mcp", "--remote", "--describe", "--settings-describe", "--settings-export",
-                                   "--settings-import", "--selfcheck"]
+                                   "--settings-import", "--selfcheck", "--trigger-host", "--trigger-hosts"]
 
     /// True when a process's arguments run one of the headless helper modes.
     static func isHeadlessHelper(_ args: [String]) -> Bool {

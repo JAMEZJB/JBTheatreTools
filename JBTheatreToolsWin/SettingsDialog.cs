@@ -16,7 +16,8 @@ public sealed record SettingsExtras(
     Func<(string Text, bool Problem)>? WebTriggerStatus = null,
     Func<IReadOnlyList<(string Id, string Name)>>? WebTriggerApps = null,    // installed apps (and any already ticked)
     Func<bool>? WebTriggerHasToken = null,
-    Action? WebTriggerTokenChanged = null);
+    Action? WebTriggerTokenChanged = null,
+    Func<string>? WebTriggerAnswering = null);                                // "Answering presses: …" ('' when off)
 
 /// <summary>Settings, laid out like the macOS Settings sheet (SettingsView.swift): two equal columns of rounded panels,
 /// each under a caps micro-label, with the same grouping — Download access, Updates, Appearance, When I close the window
@@ -95,6 +96,10 @@ public sealed class SettingsDialog : Form
     // Dashboard web trigger (left column, last): on/off, address, port, token (never shown back), status, the apps a
     // button may open, and the guide.
     private readonly HouseCheckBox _trigOn = new();
+    /// <summary>Who answers presses right now (this window, the background copy Stagehand keeps running, or nobody).</summary>
+    private readonly Label _trigAnswering = new();
+    /// <summary>Refreshes the status line while Settings is open (a taken port is tried again every 3 s).</summary>
+    private readonly System.Windows.Forms.Timer _trigPoll = new() { Interval = 1000 };
     private readonly Label _trigBindLabel = new() { Text = "Listen on" };
     private readonly HouseTextField _trigBindField = new();
     private readonly Label _trigPortLabel = new() { Text = "Port" };
@@ -391,6 +396,7 @@ public sealed class SettingsDialog : Form
         _trigOn.Checked = _settings.WebTriggerEnabled;
         _trigOn.Enabled = _extras?.ApplyWebTrigger != null;
         _trigOn.CheckedChanged += (_, _) => { if (!_trigSyncing) SaveTrigger(); };
+        _trigPoll.Tick += (_, _) => { if (_settings.WebTriggerEnabled && !IsDisposed) RefreshTriggerStatus(); };
         _trigBindField.Box.Text = _settings.WebTriggerBind;
         _trigBindField.Box.AccessibleName = "Listen on";
         _trigBindField.Placeholder = WebTriggerContract.DefaultBind;
@@ -413,6 +419,7 @@ public sealed class SettingsDialog : Form
             {
                 _settings.WebTriggerApps.Remove(id);
                 if (box.Checked) _settings.WebTriggerApps.Add(id);
+                _settings.Save();   // the hidden copy reads the ticks from disk on every press
             };
             _trigApps.Add(box);
         }
@@ -458,6 +465,7 @@ public sealed class SettingsDialog : Form
         UpdateAuthPanels();
         UpdateIntervalEnabled();
         UpdateTriggerState();
+        _trigPoll.Start();
 
         _built = true;
         ApplyDpi();
@@ -507,10 +515,11 @@ public sealed class SettingsDialog : Form
         {
             Full(_trigOn),
             Full(Hint("Lets a Show Dashboard button open an app you tick below, turn show lock on, or read this launcher's " +
-                      "status. It listens only while JB Theatre Tools is running.")),
+                      "status. " + LauncherTrigger.BackgroundNote +
+                      (_extras?.StagehandInstalled?.Invoke() == false ? " " + LauncherTrigger.StagehandMissing : ""))),
             Split(_trigBindLabel, _trigBindField), Split(_trigPortLabel, _trigPortField),
             Full(_trigTokenState), Full(_trigTokenField), Row(null, _trigSave, _trigRemoveToken),
-            Full(_trigStatus), Rule(), Full(_trigAppsLabel),
+            Full(_trigStatus), Full(_trigAnswering, () => _trigAnswering.Text.Length > 0), Rule(), Full(_trigAppsLabel),
         };
         trigger.AddRange(_trigApps.Select(b => Full(b)));
         trigger.Add(Full(_trigNoApps, () => _trigApps.Count == 0));
@@ -537,11 +546,11 @@ public sealed class SettingsDialog : Form
             Full(Hint("Versions, settings and recent log lines for a support question — never passwords or tokens."))));
 
         _subLabels.AddRange(new[] { _tokenHelp, _serverHint, _serverRelay, _updateHint, _checkResult, _closeHint, _installHint,
-                                    _storageInstalled, _storageCache, _storageNote, _trigTokenState, _trigNoApps });
+                                    _storageInstalled, _storageCache, _storageNote, _trigTokenState, _trigNoApps, _trigAnswering });
         foreach (var l in new[] { _tokenState, _serverState, _serverHint, _serverRelay, _tokenHelp, _updateHint, _intervalLabel,
                                   _versionLabel, _checkResult, _closeHint, _installHint, _storageInstalledLabel, _storageInstalled,
                                   _storageCacheLabel, _storageCache, _storageNote, _restoreLocked, _lockHeld, _stagehandMissing,
-                                  _trigBindLabel, _trigPortLabel, _trigTokenState, _trigStatus, _trigAppsLabel, _trigNoApps })
+                                  _trigBindLabel, _trigPortLabel, _trigTokenState, _trigStatus, _trigAnswering, _trigAppsLabel, _trigNoApps })
         {
             l.AutoSize = false;
             l.UseMnemonic = false;
@@ -861,7 +870,7 @@ public sealed class SettingsDialog : Form
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
-        if (disposing) { foreach (var f in _fonts) f.Dispose(); _fonts.Clear(); }
+        if (disposing) { _trigPoll.Dispose(); foreach (var f in _fonts) f.Dispose(); _fonts.Clear(); }
     }
 
     // ── Behaviour ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -1007,7 +1016,12 @@ public sealed class SettingsDialog : Form
         if (problem.Length == 0) problem = WebTriggerContract.BindProblem(bind, port, hasToken);
         if (problem.Length > 0)
         {
-            if (!_trigOn.Checked && _settings.WebTriggerEnabled) { _settings.WebTriggerEnabled = false; _extras.ApplyWebTrigger(); }
+            if (!_trigOn.Checked && _settings.WebTriggerEnabled)
+            {
+                _settings.WebTriggerEnabled = false;
+                _settings.Save();   // the hidden copy reads it from disk: off now, not when Settings closes
+                _extras.ApplyWebTrigger();
+            }
             SyncTriggerBox();
             UpdateTriggerState();
             ShowTriggerStatus(problem, true);
@@ -1023,6 +1037,7 @@ public sealed class SettingsDialog : Form
         _settings.WebTriggerBind = bind;
         _settings.WebTriggerPort = int.Parse(port, NumberStyles.Integer, CultureInfo.InvariantCulture);
         _trigBindField.Box.Text = bind;
+        _settings.Save();   // the hidden copy reads on/off, address and port from disk: in force now, not when Settings closes
         _extras.ApplyWebTrigger();
         UpdateTriggerState();
     }
@@ -1037,6 +1052,7 @@ public sealed class SettingsDialog : Form
         if (_settings.WebTriggerEnabled && WebTriggerContract.BindProblem(_settings.WebTriggerBind,
                 _settings.WebTriggerPort.ToString(CultureInfo.InvariantCulture), tokenSet: false).Length > 0)
             _settings.WebTriggerEnabled = false;
+        _settings.Save();
         _extras?.ApplyWebTrigger?.Invoke();
         SyncTriggerBox();
         UpdateTriggerState();
@@ -1061,9 +1077,22 @@ public sealed class SettingsDialog : Form
         ShowTriggerStatus(text, problem);
     }
 
+    /// <summary>The timer's refresh: only when the status changed (e.g. a taken port came free), so it never re-lays-out
+    /// for nothing.</summary>
+    private void RefreshTriggerStatus()
+    {
+        var (text, problem) = _extras?.WebTriggerStatus?.Invoke() ?? ("", false);
+        var color = problem ? Theme.Danger : _settings.WebTriggerEnabled ? Theme.Ok : Theme.Sub(Theme.CurrentDark);
+        var answering = _extras?.WebTriggerAnswering?.Invoke() ?? "";
+        if (text == _trigStatus.Text && color == _trigStatus.ForeColor && answering == _trigAnswering.Text) return;
+        ShowTriggerStatus(text, problem);
+    }
+
     private void ShowTriggerStatus(string text, bool problem)
     {
         _trigStatus.Text = text;
+        _trigAnswering.Text = _extras?.WebTriggerAnswering?.Invoke() ?? "";
+        _trigAnswering.ForeColor = Theme.Sub(Theme.CurrentDark);
         _trigStatus.ForeColor = problem ? Theme.Danger : _settings.WebTriggerEnabled ? Theme.Ok : Theme.Sub(Theme.CurrentDark);
         LayoutAll();
     }

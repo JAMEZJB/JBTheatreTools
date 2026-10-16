@@ -43,6 +43,38 @@ enum WebTriggerStore {
         return token
     }
 
+    /// What the hidden `--trigger-host` copy finds in the Keychain.
+    enum HiddenRead: Equatable {
+        case none                // no token saved: presses need none
+        case token(String)
+        case unreadable          // saved but not readable without asking: every press is refused
+    }
+
+    /// The token as the hidden copy reads it on every pass: straight from the Keychain (never the in-memory cache, so a
+    /// token changed or removed in the window applies at once) and NEVER with a dialog — a hidden process must not ask
+    /// for the login password; a refused read is "unreadable" (fail closed), not "none".
+    static func readForHiddenCopy() -> HiddenRead {
+        var query = baseQuery
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { return .none }
+        guard status == errSecSuccess, let data = item as? Data,
+              let token = String(data: data, encoding: .utf8), !token.isEmpty else { return .unreadable }
+        return .token(token)
+    }
+
+    /// The word the hidden copy expects: "" (none saved), the token, or an unguessable stand-in that refuses every press.
+    static func hiddenWord(_ read: HiddenRead) -> String {
+        switch read {
+        case .none: return ""
+        case .token(let t): return t
+        case .unreadable: return UUID().uuidString + UUID().uuidString
+        }
+    }
+
     @discardableResult
     static func save(_ token: String) -> Bool {
         let data = Data(token.utf8)

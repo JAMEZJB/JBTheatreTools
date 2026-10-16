@@ -175,7 +175,8 @@ public sealed class InstallManager
     /// <summary>The switches suite apps run headless with — a Claude connector, a Stagehand remote operation, a settings
     /// back up / restore or a self-check, all started by a program rather than a person.</summary>
     private static readonly string[] HeadlessSwitches =
-        { "--mcp", "--remote", "--describe", "--settings-describe", "--settings-export", "--settings-import", "--selfcheck" };
+        { "--mcp", "--remote", "--describe", "--settings-describe", "--settings-export", "--settings-import", "--selfcheck",
+          "--trigger-host", "--trigger-hosts" };
 
     /// <summary>True when a command line runs one of the headless helper modes (<see cref="HeadlessSwitches"/>).</summary>
     public static bool IsHeadlessHelper(string commandLine) =>

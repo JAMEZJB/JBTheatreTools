@@ -286,6 +286,125 @@ final class WebTriggerTests: XCTestCase {
         XCTAssertFalse(other.running)
     }
 
+    // MARK: - Owning the port (loopback, port 0)
+
+    private func health(_ port: Int) async throws -> Int {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/health")!)
+        req.timeoutInterval = 5
+        let (_, response) = try await URLSession.shared.data(for: req)
+        return (response as? HTTPURLResponse)?.statusCode ?? 0
+    }
+
+    private func plainServer() -> WebTriggerServer {
+        WebTriggerServer(run: { _, _ in WebTriggerReply(200, ["ok": true, "summary": "synthetic"]) }, listing: { [] }, log: { _ in })
+    }
+
+    /// Polls (on the main actor) until `done` or ~5 s.
+    @MainActor
+    private func eventually(_ done: () -> Bool) async -> Bool {
+        for _ in 0..<100 {
+            if done() { return true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return done()
+    }
+
+    /// The Owner rule: a taken port isn't the end — the owner waits and takes it when it's free, both ways round.
+    @MainActor
+    func testOwnerWaitsForATakenPortAndTakesItWhenFree() async throws {
+        let first = WebTriggerOwner(server: plainServer(), retry: 0.1)
+        let r1 = await first.own(bind: "127.0.0.1", port: 0)
+        XCTAssertEqual(r1, "")
+        XCTAssertEqual(first.state, .owning)
+        let port = first.server.port
+        XCTAssertGreaterThan(port, 0)
+
+        var changes: [WebTriggerOwner.State] = []
+        let second = WebTriggerOwner(server: plainServer(), retry: 0.1)
+        second.onChange = { changes.append(second.state) }
+        let r2 = await second.own(bind: "127.0.0.1", port: port)
+        XCTAssertEqual(r2, "", "a taken port is waited for, not a failure")
+        XCTAssertEqual(second.state, .waiting)
+        XCTAssertFalse(second.server.running)
+        let shown = LauncherActions.describe(enabled: true, bind: "127.0.0.1", running: false, address: "", port: port,
+                                             error: second.server.error, waiting: second.waiting)
+        XCTAssertEqual(shown.text, WebTriggerContract.waitingText(port: port))
+        XCTAssertTrue(shown.text.hasPrefix("Waiting for port \(port):"))
+        XCTAssertTrue(shown.problem)
+
+        // The first lets go → the second takes the port on its next try.
+        first.stop()
+        XCTAssertEqual(first.state, .idle)
+        let tookIt = await eventually { second.state == .owning }
+        XCTAssertTrue(tookIt)
+        XCTAssertTrue(second.server.running)
+        XCTAssertEqual(second.server.port, port)
+        XCTAssertEqual(changes, [.waiting, .owning])
+        let status = try await health(port)
+        XCTAssertEqual(status, 200)
+
+        // And back the other way.
+        let r3 = await first.own(bind: "127.0.0.1", port: port)
+        XCTAssertEqual(r3, "")
+        XCTAssertEqual(first.state, .waiting)
+        second.stop()
+        let tookItBack = await eventually { first.state == .owning }
+        XCTAssertTrue(tookItBack)
+        XCTAssertEqual(first.server.port, port)
+        first.stop()
+        XCTAssertFalse(first.server.running)
+    }
+
+    /// Switching the trigger off while it waits stops the retries: the port coming free later changes nothing.
+    @MainActor
+    func testSwitchingOffStopsTheRetries() async throws {
+        let holder = plainServer()
+        let r4 = await holder.start(bind: "127.0.0.1", port: 0)
+        XCTAssertEqual(r4, "")
+        let port = holder.port
+        let owner = WebTriggerOwner(server: plainServer(), retry: 0.1)
+        let r5 = await owner.own(bind: "127.0.0.1", port: port)
+        XCTAssertEqual(r5, "")
+        XCTAssertEqual(owner.state, .waiting)
+        owner.stop()
+        XCTAssertEqual(owner.state, .idle)
+        holder.stop()
+        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertEqual(owner.state, .idle)
+        XCTAssertFalse(owner.server.running)
+    }
+
+    /// Owning the same address again is a no-op (the listener isn't restarted); a new port moves it.
+    @MainActor
+    func testOwningTheSameAddressAgainKeepsTheListener() async throws {
+        let owner = WebTriggerOwner(server: plainServer(), retry: 0.1)
+        let r6 = await owner.own(bind: "127.0.0.1", port: 0)
+        XCTAssertEqual(r6, "")
+        let port = owner.server.port
+        let r7 = await owner.own(bind: "127.0.0.1", port: 0)
+        XCTAssertEqual(r7, "")
+        XCTAssertEqual(owner.server.port, port)
+        XCTAssertEqual(owner.state, .owning)
+        owner.stop()
+        XCTAssertFalse(owner.server.running)
+    }
+
+    /// Only a TAKEN port is waited for: an address that isn't this computer's (RFC 5737 documentation range) is reported
+    /// once and never retried.
+    @MainActor
+    func testAnAddressThatIsntOursIsNotRetried() async throws {
+        let owner = WebTriggerOwner(server: plainServer(), retry: 0.1)
+        let err = await owner.own(bind: "192.0.2.1", port: 0)
+        XCTAssertTrue(err.hasPrefix("The web trigger couldn't listen on 192.0.2.1:0 ("), err)
+        XCTAssertEqual(owner.state, .failed)
+        XCTAssertFalse(owner.server.portTaken)
+        owner.stop()
+    }
+
+    func testRetryEveryThreeSeconds() {
+        XCTAssertEqual(WebTriggerContract.retrySeconds, 3)
+    }
+
     func testGuideNamesEveryStatusAndThePort() {
         let all = WebTriggerGuide.sections(port: 42154).map { $0.heading + "\n" + $0.body }.joined(separator: "\n")
         for code in ["200", "502", "400", "403", "404", "409", "422"] { XCTAssertTrue(all.contains(code + " —"), code) }

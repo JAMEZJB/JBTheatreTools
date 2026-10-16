@@ -154,14 +154,34 @@ enum LauncherActions {
         return "\(Int(s / 86400)) days ago"
     }
 
-    /// The Settings status line: "Off", where it listens and an example address, or why it isn't listening.
-    static func describe(enabled: Bool, bind: String, running: Bool, address: String, port: Int, error: String) -> (text: String, problem: Bool) {
+    /// The Settings status line: "Off", where it listens and an example address, waiting for a taken port, or why it isn't
+    /// listening.
+    static func describe(enabled: Bool, bind: String, running: Bool, address: String, port: Int, error: String,
+                         waiting: Bool = false, background: Bool = false) -> (text: String, problem: Bool) {
         if !enabled { return ("Off. Nothing listens until you switch it on.", false) }
+        if !running && background {
+            return ("The background copy is listening on port \(port). This window takes over if it stops.", false)
+        }
+        if !running && waiting { return (WebTriggerContract.waitingText(port: port), true) }
         if !running { return (error.isEmpty ? "Not listening." : error, true) }
         let ip = WebTriggerContract.parseIP(bind)
         let host = ip?.isUnspecified == true ? "<this computer's address>" : ip?.isV6 == true ? "[\(bind)]" : bind
         return ("Listening on \(address). Try: POST http://\(host):\(port)/actions/status?reply=text", false)
     }
+
+    /// Settings: who answers a press right now. "" while the trigger is off.
+    static func answering(enabled: Bool, windowOwns: Bool, background: Bool, stagehandInstalled: Bool) -> String {
+        guard enabled else { return "" }
+        if windowOwns { return "Answering presses: this window." }
+        if background { return "Answering presses: the background copy." }
+        return stagehandInstalled ? "Answering presses: not running — open Stagehand."
+                                  : "Answering presses: not running — " + stagehandMissing
+    }
+
+    /// Settings, when Stagehand (which keeps the background copy running) isn't installed.
+    static let stagehandMissing = "Install Stagehand so dashboard buttons keep working when JB Theatre Tools is closed."
+    /// Settings: what keeps the buttons working with the window closed.
+    static let backgroundNote = "Dashboard buttons keep working when JB Theatre Tools is closed: Stagehand keeps a hidden copy running for them."
 }
 
 /// The short guide behind "How it works…" in Settings — the same words as Windows (WebTriggerGuide in
@@ -181,7 +201,8 @@ enum WebTriggerGuide {
         let on: [String] = [
             "Tick \"Switch on the web trigger\". Listen on: 127.0.0.1 when Node-RED runs on this computer (the safest); one of this computer's own addresses when the dashboard runs on another one; 0.0.0.0 (every network) needs a token. "
                 + "Port: \(port) unless something else uses it. Token (optional): a shared word the button must send; it's kept in your Keychain and never shown again.",
-            "It listens only while JB Theatre Tools is running: set \"When I close the window\" to keep it running in the Dock on a dashboard computer. It never listens from the command line.",
+            "Dashboard buttons keep working when JB Theatre Tools is closed, and after a restart: Stagehand keeps a hidden copy of the launcher running for them (install Stagehand for this). While JB Theatre Tools is running it answers presses itself; when it quits, the hidden copy takes over within a few seconds. Switching the trigger off stops the hidden copy too.",
+            "If another program — or a copy of JB Theatre Tools that is still closing after an update — has the port, it waits and tries again every \(Int(WebTriggerContract.retrySeconds)) seconds; Settings shows \"Waiting for port \(port)\" until it gets it.",
         ]
         let button: [String] = [
             "In Show Dashboard add a Custom control of the kind \"Saved action\": this computer's address (127.0.0.1 when it's the same computer), port \(port), and the action id, e.g. open-dmxtools.",
@@ -196,6 +217,7 @@ enum WebTriggerGuide {
             "404 — no action with that id, or that app isn't ticked here.",
             "409 — busy: another press is running, or that app is being installed or updated. Try again in a moment.",
             "422 — it can't be done as things are: that app isn't installed on this computer.",
+            "503 — the web trigger has just been switched off.",
             "No answer at all — the trigger is off, JB Theatre Tools isn't running, or the address or port is wrong.",
         ]
         return [

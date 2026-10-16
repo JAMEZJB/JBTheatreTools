@@ -168,16 +168,37 @@ public sealed class LauncherTrigger
         return list ?? new List<(string, string)>();
     }
 
-    /// <summary>The Settings status line: "Off", where it listens and an example address, or why it isn't listening.</summary>
-    public static (string Text, bool Problem) Describe(bool enabled, string bind, WebTriggerServer server)
+    /// <summary>The Settings status line: "Off", where it listens and an example address, waiting for a taken port, or why
+    /// it isn't listening.</summary>
+    public static (string Text, bool Problem) Describe(bool enabled, string bind, WebTriggerServer server, bool waiting = false,
+                                                       int port = WebTriggerContract.DefaultPort, bool background = false)
     {
         if (!enabled) return ("Off. Nothing listens until you switch it on.", false);
+        if (!server.Running && background)
+            return ($"The background copy is listening on port {port}. This window takes over if it stops.", false);
+        if (!server.Running && waiting) return (WebTriggerContract.WaitingText(port), true);
         if (!server.Running) return (server.Error.Length > 0 ? server.Error : "Not listening.", true);
         var addr = WebTriggerContract.ParseIp(bind);
         bool every = addr != null && (addr.Equals(System.Net.IPAddress.Any) || addr.Equals(System.Net.IPAddress.IPv6Any));
         var host = every ? "<this computer's address>" : addr?.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 ? $"[{bind}]" : bind;
         return ($"Listening on {server.Address}. Try: POST http://{host}:{server.Port}/actions/status?reply=text", false);
     }
+
+    /// <summary>Settings: who answers a press right now. '' while the trigger is off.</summary>
+    public static string Answering(bool enabled, bool windowOwns, bool background, bool stagehandInstalled)
+    {
+        if (!enabled) return "";
+        if (windowOwns) return "Answering presses: this window.";
+        if (background) return "Answering presses: the background copy.";
+        return stagehandInstalled ? "Answering presses: not running — open Stagehand."
+                                  : "Answering presses: not running — " + StagehandMissing;
+    }
+
+    /// <summary>Settings, when Stagehand (which keeps the background copy running) isn't installed.</summary>
+    public const string StagehandMissing = "Install Stagehand so dashboard buttons keep working when JB Theatre Tools is closed.";
+    /// <summary>Settings: what keeps the buttons working with the window closed.</summary>
+    public const string BackgroundNote =
+        "Dashboard buttons keep working when JB Theatre Tools is closed: Stagehand keeps a hidden copy running for them.";
 }
 
 /// <summary>The short guide behind "How it works…" in Settings (the same words on macOS).</summary>
@@ -192,7 +213,8 @@ public static class WebTriggerGuide
         ("Switch it on",
          "Tick \"Switch on the web trigger\". Listen on: 127.0.0.1 when Node-RED runs on this computer (the safest); one of this computer's own addresses when the dashboard runs on another one; 0.0.0.0 (every network) needs a token. " +
          $"Port: {port} unless something else uses it. Token (optional): a shared word the button must send; it's kept in Credential Manager and never shown again.\n" +
-         "It listens only while JB Theatre Tools is running: set \"When I close the window\" to keep it running in the tray on a dashboard computer. It never listens from the command line."),
+         "Dashboard buttons keep working when JB Theatre Tools is closed, and after a restart: Stagehand keeps a hidden copy of the launcher running for them (install Stagehand for this). While JB Theatre Tools is running it answers presses itself; when it quits, the hidden copy takes over within a few seconds. Switching the trigger off stops the hidden copy too.\n" +
+         $"If another program — or a copy of JB Theatre Tools that is still closing after an update — has the port, it waits and tries again every {WebTriggerContract.RetrySeconds} seconds; Settings shows \"Waiting for port {port}\" until it gets it."),
         ("The Show Dashboard button",
          $"In Show Dashboard add a Custom control of the kind \"Saved action\": this computer's address (127.0.0.1 when it's the same computer), port {port}, and the action id, e.g. open-dmxtools. " +
          $"It sends POST http://127.0.0.1:{port}/actions/open-dmxtools?reply=text with the body {{}} — or {{\"token\": \"your token\"}} when one is set — and shows the one-line reply on Last command. " +
@@ -205,6 +227,7 @@ public static class WebTriggerGuide
          "404 — no action with that id, or that app isn't ticked here.\n" +
          "409 — busy: another press is running, or that app is being installed or updated. Try again in a moment.\n" +
          "422 — it can't be done as things are: that app isn't installed on this computer.\n" +
+         "503 — the web trigger has just been switched off.\n" +
          "No answer at all — the trigger is off, JB Theatre Tools isn't running, or the address or port is wrong."),
     };
 }

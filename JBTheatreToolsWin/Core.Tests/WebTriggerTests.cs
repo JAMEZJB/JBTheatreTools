@@ -427,6 +427,110 @@ public sealed class WebTriggerTests : IDisposable
         }
     }
 
+    // ── Owning the port (loopback, port 0) ─────────────────────────────────────────────────────────────
+
+    private static WebTriggerServer PlainServer() =>
+        new((_, _) => (200, new JsonObject { ["ok"] = true, ["summary"] = "synthetic" }), () => Array.Empty<(string, string)>(), () => "");
+
+    private static bool Eventually(Func<bool> done)
+    {
+        for (int i = 0; i < 100; i++)
+        {
+            if (done()) return true;
+            Thread.Sleep(50);
+        }
+        return done();
+    }
+
+    /// <summary>The Owner rule: a taken port isn't the end — the owner waits and takes it when it's free, both ways round.</summary>
+    [Fact]
+    public void OwnerWaitsForATakenPortAndTakesItWhenFree()
+    {
+        int port = Port;   // held by the fixture's listener
+        var changes = new List<WebTriggerOwner.OwnerState>();
+        var second = new WebTriggerOwner(PlainServer(), TimeSpan.FromMilliseconds(100), s => { lock (changes) changes.Add(s); });
+        try
+        {
+            Assert.Equal("", second.Own("127.0.0.1", port));
+            Assert.Equal(WebTriggerOwner.OwnerState.Waiting, second.State);
+            Assert.False(second.Server.Running);
+            var (text, problem) = LauncherTrigger.Describe(true, "127.0.0.1", second.Server, second.Waiting, port);
+            Assert.Equal(WebTriggerContract.WaitingText(port), text);
+            Assert.StartsWith($"Waiting for port {port}:", text);
+            Assert.True(problem);
+
+            // The first lets go → the second takes the port on its next try.
+            _trigger.Server.Stop();
+            Assert.True(Eventually(() => second.State == WebTriggerOwner.OwnerState.Owning));
+            Assert.True(second.Server.Running);
+            Assert.Equal(port, second.Server.Port);
+            lock (changes) Assert.Equal(new[] { WebTriggerOwner.OwnerState.Waiting, WebTriggerOwner.OwnerState.Owning }, changes);
+            Assert.Equal(200, Raw(port, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").Status);
+
+            // And back the other way.
+            var first = new WebTriggerOwner(_trigger.Server, TimeSpan.FromMilliseconds(100));
+            Assert.Equal("", first.Own("127.0.0.1", port));
+            Assert.Equal(WebTriggerOwner.OwnerState.Waiting, first.State);
+            second.Stop();
+            Assert.True(Eventually(() => first.State == WebTriggerOwner.OwnerState.Owning));
+            Assert.Equal(port, _trigger.Server.Port);
+            Assert.Equal(200, Get("/health").Status);
+        }
+        finally { second.Stop(); }
+    }
+
+    /// <summary>Switching the trigger off while it waits stops the retries: the port coming free later changes nothing.</summary>
+    [Fact]
+    public void SwitchingOffStopsTheRetries()
+    {
+        int port = Port;
+        var owner = new WebTriggerOwner(PlainServer(), TimeSpan.FromMilliseconds(100));
+        Assert.Equal("", owner.Own("127.0.0.1", port));
+        Assert.Equal(WebTriggerOwner.OwnerState.Waiting, owner.State);
+        owner.Stop();
+        Assert.Equal(WebTriggerOwner.OwnerState.Idle, owner.State);
+        _trigger.Server.Stop();
+        Thread.Sleep(600);
+        Assert.Equal(WebTriggerOwner.OwnerState.Idle, owner.State);
+        Assert.False(owner.Server.Running);
+    }
+
+    /// <summary>Owning the same address again is a no-op (the listener isn't restarted).</summary>
+    [Fact]
+    public void OwningTheSameAddressAgainKeepsTheListener()
+    {
+        var owner = new WebTriggerOwner(PlainServer(), TimeSpan.FromMilliseconds(100));
+        try
+        {
+            Assert.Equal("", owner.Own("127.0.0.1", 0));
+            int port = owner.Server.Port;
+            Assert.Equal("", owner.Own("127.0.0.1", 0));
+            Assert.Equal(port, owner.Server.Port);
+            Assert.Equal(WebTriggerOwner.OwnerState.Owning, owner.State);
+        }
+        finally { owner.Stop(); }
+        Assert.False(owner.Server.Running);
+    }
+
+    /// <summary>Only a TAKEN port is waited for: an address that isn't this computer's (RFC 5737 documentation range) is
+    /// reported once and never retried.</summary>
+    [Fact]
+    public void AnAddressThatIsntOursIsNotRetried()
+    {
+        var owner = new WebTriggerOwner(PlainServer(), TimeSpan.FromMilliseconds(100));
+        try
+        {
+            var err = owner.Own("192.0.2.1", 0);
+            Assert.StartsWith("The web trigger couldn't listen on 192.0.2.1:0 (", err);
+            Assert.Equal(WebTriggerOwner.OwnerState.Failed, owner.State);
+            Assert.False(owner.Server.PortTaken);
+        }
+        finally { owner.Stop(); }
+    }
+
+    [Fact]
+    public void RetryEveryThreeSeconds() => Assert.Equal(3, WebTriggerContract.RetrySeconds);
+
     [Fact]
     public void DescribeForSettings()
     {

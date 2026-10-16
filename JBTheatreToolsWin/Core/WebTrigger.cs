@@ -27,7 +27,9 @@ namespace JBTheatreTools;
 /// and every address (0.0.0.0) only with a token; ids only — the request never carries a value, path or text; a request
 /// with an Origin header, a non-JSON body or a Host that isn't an IP literal (or localhost) is refused; the token is
 /// compared in constant time and never echoed or logged; the port is bound EXCLUSIVELY (on Windows no other program can
-/// share it, even with SO_REUSEADDR); only the launcher's window process listens (never a command-line run).
+/// share it, even with SO_REUSEADDR); it listens in the launcher's window process, or in the hidden --trigger-host copy
+/// Stagehand keeps running (TriggerHost.cs) — never in any other command-line run. Whichever of the two has the port
+/// answers; the other tries again every 3 s (<see cref="WebTriggerOwner"/>), so the port moves on its own.
 /// </summary>
 public static class WebTriggerContract
 {
@@ -36,6 +38,8 @@ public static class WebTriggerContract
     /// <summary>The launcher's web-trigger port in the suite's registry (the apps use 42130-42153).</summary>
     public const int DefaultPort = 42154;
     public const string DefaultBind = "127.0.0.1";
+    /// <summary>How often a taken port is tried again (the suite's Owner rule).</summary>
+    public const int RetrySeconds = 3;
     private const string IdChars = "abcdefghijklmnopqrstuvwxyz0123456789-._";
 
     /// <summary>[a-z0-9][a-z0-9._-]{0,63} — the only ids the trigger (and Show Dashboard's control) accept.</summary>
@@ -108,6 +112,11 @@ public static class WebTriggerContract
         foreach (var (k, v) in details) o[k] = v;
         return o;
     }
+
+    /// <summary>Settings, while another program (or a launcher that is still closing) has the port.</summary>
+    public static string WaitingText(int port) =>
+        $"Waiting for port {port}: another program, or a copy of JB Theatre Tools that is still closing, is using it. " +
+        $"Trying again every {RetrySeconds} seconds.";
 
     public static (int Status, JsonObject Reply) Busy() =>
         (409, new JsonObject { ["ok"] = false, ["error"] = "Another action is already running.", ["summary"] = "busy: another action is running" });
@@ -486,6 +495,124 @@ public sealed class WebTriggerServer
     private static string ReasonPhrase(int status) => status switch
     {
         200 => "OK", 400 => "Bad Request", 403 => "Forbidden", 404 => "Not Found", 409 => "Conflict",
-        422 => "Unprocessable Entity", 501 => "Not Implemented", 502 => "Bad Gateway", _ => "Status",
+        422 => "Unprocessable Entity", 501 => "Not Implemented", 502 => "Bad Gateway", 503 => "Service Unavailable", _ => "Status",
     };
+}
+
+/// <summary>Keeps owning the trigger's port (the suite's "Owner" rule, the same as WebTriggerOwner on macOS): it listens on
+/// bind:port, and when the port is TAKEN — a copy of the launcher that is still closing after an update, or another
+/// program — it tries again every <c>retry</c> instead of giving up, until the port is free (then it listens) or
+/// <see cref="Stop"/> (the trigger switched off, or new settings). Any other problem (an address that isn't this
+/// computer's) is reported once and not retried. Every start and stop of the listener happens under one lock, so a retry
+/// and a new setting can never both bind. <c>onChange</c> is called (on a pool thread for a retry) on each change of
+/// state — the window marshals it.</summary>
+public sealed class WebTriggerOwner
+{
+    public enum OwnerState { Idle, Owning, Waiting, Failed }
+
+    private readonly object _gate = new();
+    private readonly TimeSpan _retry;
+    /// <summary>Called on each change of state (on a pool thread for a retry).</summary>
+    public Action<OwnerState>? OnChange { get; set; }
+    private readonly Action<string> _log;
+    private CancellationTokenSource? _loop;
+    private string _target = "";
+    private OwnerState _state = OwnerState.Idle;
+
+    public WebTriggerServer Server { get; }
+
+    public WebTriggerOwner(WebTriggerServer server, TimeSpan? retry = null, Action<OwnerState>? onChange = null,
+                           Action<string>? log = null)
+    {
+        Server = server;
+        _retry = retry ?? TimeSpan.FromSeconds(WebTriggerContract.RetrySeconds);
+        OnChange = onChange;
+        _log = log ?? (_ => { });
+    }
+
+    public OwnerState State { get { lock (_gate) return _state; } }
+    public bool Waiting => State == OwnerState.Waiting;
+
+    /// <summary>Listens on bind:port. '' = listening now, or waiting for a taken port (<see cref="State"/> says which);
+    /// else why not.</summary>
+    public string Own(string bind, int port)
+    {
+        OwnerState now;
+        string result;
+        lock (_gate)
+        {
+            var wanted = $"{bind}:{port}";
+            if (wanted == _target && ((_state == OwnerState.Owning && Server.Running) || _state == OwnerState.Waiting)) return "";
+            CancelLoop();
+            _target = wanted;
+            var err = Server.Start(bind, port);
+            if (err.Length == 0) { now = OwnerState.Owning; result = ""; }
+            else if (Server.PortTaken)
+            {
+                now = OwnerState.Waiting;
+                result = "";
+                _log($"web trigger: port {port} is taken — trying again every {(int)_retry.TotalSeconds} seconds");
+                var cts = new CancellationTokenSource();
+                _loop = cts;
+                _ = Task.Run(() => RetryAsync(bind, port, cts.Token));
+            }
+            else { now = OwnerState.Failed; result = err; }
+            if (!Set(now)) return result;
+        }
+        OnChange?.Invoke(now);
+        return result;
+    }
+
+    private async Task RetryAsync(string bind, int port, CancellationToken ct)
+    {
+        while (true)
+        {
+            try { await Task.Delay(_retry, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+            OwnerState now;
+            lock (_gate)
+            {
+                if (ct.IsCancellationRequested) return;
+                var err = Server.Start(bind, port);
+                if (err.Length == 0)
+                {
+                    _log($"web trigger: port {port} is free again — listening");
+                    now = OwnerState.Owning;
+                }
+                else if (!Server.PortTaken) now = OwnerState.Failed;
+                else continue;
+                _loop = null;
+                if (!Set(now)) return;
+            }
+            OnChange?.Invoke(now);
+            return;
+        }
+    }
+
+    /// <summary>Stops listening and stops trying (the trigger switched off, or the window is closing). The port closes at
+    /// once.</summary>
+    public void Stop()
+    {
+        lock (_gate)
+        {
+            CancelLoop();
+            _target = "";
+            Server.Stop();
+            if (!Set(OwnerState.Idle)) return;
+        }
+        OnChange?.Invoke(OwnerState.Idle);
+    }
+
+    private void CancelLoop()
+    {
+        _loop?.Cancel();
+        _loop = null;
+    }
+
+    private bool Set(OwnerState s)
+    {
+        if (s == _state) return false;
+        _state = s;
+        return true;
+    }
 }

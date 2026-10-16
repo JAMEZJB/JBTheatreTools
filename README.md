@@ -119,8 +119,13 @@ The same features on every launcher (the few that don't apply to Android are mar
   127.0.0.1 unless you choose another address of the computer, and every address (0.0.0.0) only with a token, which is
   kept in the Keychain / Credential Manager, never shown back, compared in constant time and never logged (it goes in a
   settings backup as a password). Requests from a web page (an `Origin` header, a non-JSON body, a DNS name in `Host`) are
-  refused, the port is never shared with another program, and it listens only while the launcher is running (keep it
-  running in the Dock or tray on a dashboard computer) — never from the command line. Settings has a short guide.
+  refused, the port is never shared with another program, and it listens in the launcher's window or its hidden copy — never
+  from any other command line. *(From 1.37.0)* dashboard buttons keep working when the launcher is closed, and after a
+  restart: switching the trigger on registers a hidden copy (`--trigger-host`: the web trigger only, no window, no Dock
+  or tray icon) that Stagehand keeps running — install Stagehand for this. Whichever of the window and the hidden copy
+  has the port answers; the other tries again every 3 seconds, so the window answers while it's open and the hidden copy
+  takes over when it closes. Settings says who is answering presses; switching the trigger off removes the hidden copy.
+  Settings has a short guide.
   Not on Android: the dashboard and Node-RED run on a show computer, not a phone or tablet.
 - **Set up a PC from another computer** *(Windows command line; `--download` and `--list --json` on Mac and Windows)* —
   `--installed --json` and `--list --json` list apps by catalog id (`--list --json` also gives every platform's file

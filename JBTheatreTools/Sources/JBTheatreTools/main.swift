@@ -7,9 +7,14 @@ import AppKit
 // verb rather than "any dash-arg" so OS-supplied launch flags don't suppress the GUI.
 let arguments = Array(CommandLine.arguments.dropFirst())
 
-if arguments.contains(where: { CLI.commands.contains($0) }) {
+switch LaunchMode.of(arguments) {
+case .triggerHost:
+    TriggerHostMain.run()   // only the Dashboard web trigger, headless — never the model or a window
+case .cli:
     CLI.run(args: arguments)
     exit(0)
+case .gui:
+    break
 }
 
 LoopWatch.start()

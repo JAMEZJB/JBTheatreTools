@@ -213,7 +213,7 @@ public sealed class MainForm : Form
             PrepareLauncherWhatsNew();
             ApplyLock();
             _scheduler.Start();
-            _ = StartWebTriggerAsync();   // only this window's process listens, and only when switched on in Settings
+            StartWebTrigger();   // the launcher's own process listens (with the window, or from the tray), and only when on
             ShowNotice(AuthClient.HasCredentials(_settings, _catalog.DownloadServer) ? null : NoCredsMsg);
             if (_settings.UpdateMode == "everyLaunch")
             {
@@ -1946,7 +1946,8 @@ public sealed class MainForm : Form
             return;
         }
         _scheduler.Stop();
-        _webTrigger?.Server.Stop();   // the port closes with the window (kept running in the tray, it stays open)
+        TriggerRegistration.ClearWindow(Environment.ProcessId, TriggerRegistration.StateDir());
+        _triggerOwner?.Stop();   // the port closes with the app, and nothing keeps trying (kept running in the tray, it stays open)
         _tray.Visible = false;
         _tray.Dispose();
     }
@@ -2686,8 +2687,11 @@ public sealed class MainForm : Form
             RestoreAll: owner => launcherRestored = RestoreAll(owner),
             OpenStagehand: _catalog.Apps.Any(a => a.Id == StagehandId) ? OpenStagehand : null,
             StagehandInstalled: () => InstallManager.Shared.InstalledVersion(StagehandId) != null,
-            ApplyWebTrigger: ApplyWebTrigger,
-            WebTriggerStatus: () => LauncherTrigger.Describe(_settings.WebTriggerEnabled, _settings.WebTriggerBind, Trigger.Server),
+            ApplyWebTrigger: () => { var r = ApplyWebTrigger(); SyncTriggerRegistration(); return r; },
+            WebTriggerStatus: () => LauncherTrigger.Describe(_settings.WebTriggerEnabled, _settings.WebTriggerBind, Trigger.Server,
+                TriggerOwner.Waiting, _settings.WebTriggerPort, BackgroundAnswering()),
+            WebTriggerAnswering: () => LauncherTrigger.Answering(_settings.WebTriggerEnabled, Trigger.Server.Running,
+                BackgroundAnswering(), InstallManager.Shared.InstalledVersion(StagehandId) != null),
             WebTriggerApps: TriggerAppChoices,
             WebTriggerHasToken: () => _triggerToken.Length > 0,
             WebTriggerTokenChanged: ReloadTriggerToken));
@@ -3002,6 +3006,9 @@ public sealed class MainForm : Form
     private string _triggerToken = "";
 
     private LauncherTrigger Trigger => _webTrigger ??= new LauncherTrigger(new TriggerHost(this), OnWindow, () => _triggerToken, Log.Write);
+    private WebTriggerOwner? _triggerOwner;
+    /// <summary>Keeps the listener on its port: a taken port is retried every 3 s until it's free or the trigger is off.</summary>
+    private WebTriggerOwner TriggerOwner => _triggerOwner ??= new WebTriggerOwner(Trigger.Server, log: Log.Write);
 
     private void ReloadTriggerToken()
     {
@@ -3014,35 +3021,65 @@ public sealed class MainForm : Form
         }
     }
 
-    /// <summary>At start: switched on → listen. A launcher that has just updated itself may still hold the port for a few
-    /// seconds while the old copy closes, so a taken port is tried again for a little while.</summary>
-    private async Task StartWebTriggerAsync()
+    /// <summary>At start: switched on → listen. A taken port (a launcher that has just updated itself may still hold it for a
+    /// few seconds while the old copy closes, or another program has it) is tried again every 3 s until it's free.</summary>
+    private void StartWebTrigger()
     {
         ReloadTriggerToken();
-        for (int attempt = 0; attempt < 8; attempt++)
-        {
-            if (ApplyWebTrigger().Length == 0 || !_settings.WebTriggerEnabled || !Trigger.Server.PortTaken) return;
-            await Task.Delay(2000);
-            if (IsDisposed || _reallyQuit) return;
-        }
+        if (!_settings.WebTriggerEnabled) return;
+        ApplyWebTrigger();
+        SyncTriggerRegistration();   // refreshes the program path after an update
     }
 
-    /// <summary>Starts, restarts or stops the listener to match Settings. Returns '' or why it isn't listening.</summary>
+    /// <summary>The hidden copy Stagehand keeps running is answering presses right now (only asked while this window
+    /// isn't listening).</summary>
+    private bool BackgroundAnswering() =>
+        _settings.WebTriggerEnabled && !Trigger.Server.Running && TriggerRegistration.BackgroundAnswering(TriggerRegistration.StateDir());
+
+    /// <summary>Stagehand keeps a hidden <c>--trigger-host</c> copy running while the trigger is on, so buttons keep working
+    /// when this window is closed and after a restart: on → (re)write the registration and ask Stagehand to make sure its
+    /// supervisor runs (no window, never waited on); off → remove the registration.</summary>
+    private void SyncTriggerRegistration()
+    {
+        var dir = TriggerRegistration.StateDir();
+        if (!_settings.WebTriggerEnabled)
+        {
+            TriggerRegistration.ClearWindow(Environment.ProcessId, dir);
+            if (TriggerRegistration.Unregister(dir)) Log.Write("web trigger: background copy unregistered");
+            return;
+        }
+        TriggerRegistration.MarkWindow(Environment.ProcessId, dir);   // the hidden copy leaves this launcher the port
+        var exe = Environment.ProcessPath;
+        if (exe == null || !TriggerRegistration.Register(exe, dir))
+        {
+            Log.Write("web trigger: couldn't register the background copy with Stagehand");
+            return;
+        }
+        if (InstallManager.Shared.InstalledPath(StagehandId) is not { } stagehand)
+        {
+            Log.Write("web trigger: Stagehand isn't installed — dashboard buttons work only while this launcher runs");
+            return;
+        }
+        _ = Task.Run(() => StagehandLink.Ensure(stagehand, log: Log.Write));
+    }
+
+    /// <summary>Starts, restarts or stops the listener to match Settings. Returns '' (listening, or waiting for a taken
+    /// port) or why it isn't listening.</summary>
     private string ApplyWebTrigger()
     {
         var server = Trigger.Server;
-        if (!_settings.WebTriggerEnabled) { server.Stop(); server.Error = ""; return ""; }
+        var owner = TriggerOwner;
+        if (!_settings.WebTriggerEnabled) { owner.Stop(); server.Error = ""; return ""; }
         var bind = (_settings.WebTriggerBind ?? "").Trim();
         var problem = WebTriggerContract.BindProblem(bind, _settings.WebTriggerPort.ToString(CultureInfo.InvariantCulture), _triggerToken.Length > 0);
         if (problem.Length > 0)
         {
-            server.Stop();
+            owner.Stop();
             server.Error = problem;
             Log.Write($"web trigger: not listening — {problem}");
             return problem;
         }
-        if (server.Running && server.Address == $"{bind}:{_settings.WebTriggerPort}") return "";
-        var err = server.Start(bind, _settings.WebTriggerPort);
+        var err = owner.Own(bind, _settings.WebTriggerPort);
         if (err.Length > 0) Log.Write(err);
         return err;
     }

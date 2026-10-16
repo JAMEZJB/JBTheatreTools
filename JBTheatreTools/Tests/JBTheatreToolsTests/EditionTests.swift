@@ -57,6 +57,8 @@ final class EditionTests: XCTestCase {
 
     func testHeadlessHelpersAreNotOpen() {
         XCTAssertTrue(InstallGuard.isHeadlessHelper(["--mcp"]))
+        XCTAssertTrue(InstallGuard.isHeadlessHelper(["--trigger-host"]), "an app's hidden dashboard copy isn't 'open'")
+        XCTAssertTrue(InstallGuard.isHeadlessHelper(["--trigger-hosts", "--ensure"]))
         XCTAssertTrue(InstallGuard.isHeadlessHelper(["--settings-export", "/tmp/x.json"]))
         XCTAssertTrue(InstallGuard.isHeadlessHelper(["--SelfCheck"]))
         XCTAssertFalse(InstallGuard.isHeadlessHelper([]))

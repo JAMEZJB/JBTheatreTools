@@ -18,14 +18,18 @@ import CryptoKit
 /// Deliberately narrow: OFF until switched on in Settings; 127.0.0.1 unless another address of this Mac is chosen, and
 /// every address (0.0.0.0) only with a token; ids only — the request never carries a value, path or text; a request with
 /// an Origin header, a non-JSON body or a Host that isn't an IP literal (or localhost) is refused; the token is compared in
-/// constant time and never echoed or logged; the port is never shared (no address reuse); only the window's process
-/// listens (never a command-line run).
+/// constant time and never echoed or logged; the port is never shared (no address reuse); it listens in the launcher's
+/// window process, or in the hidden `--trigger-host` copy Stagehand keeps running (TriggerHost.swift) — never in any
+/// other command-line run. Whichever of the two has the port answers; the other tries again every 3 s
+/// (WebTriggerOwner), so the port moves on its own when one goes away.
 enum WebTriggerContract {
     static let version = "1.0.0"
     static let maxBody = 4096
     /// The launcher's web-trigger port in the suite's registry (the apps use 42130-42153).
     static let defaultPort = 42154
     static let defaultBind = "127.0.0.1"
+    /// How often a taken port is tried again (the suite's Owner rule).
+    static let retrySeconds: TimeInterval = 3
     private static let idChars = Set("abcdefghijklmnopqrstuvwxyz0123456789-._")
 
     /// [a-z0-9][a-z0-9._-]{0,63} — the only ids the trigger (and Show Dashboard's control) accept.
@@ -103,6 +107,12 @@ enum WebTriggerContract {
                                   "seconds": (seconds * 10).rounded() / 10]
         for (k, v) in details { out[k] = v }
         return out
+    }
+
+    /// Settings, while another program (or a launcher that is still closing) has the port.
+    static func waitingText(port: Int) -> String {
+        "Waiting for port \(port): another program, or a copy of JB Theatre Tools that is still closing, is using it. "
+            + "Trying again every \(Int(retrySeconds)) seconds."
     }
 
     static func busy() -> (Int, [String: Any]) {
@@ -299,6 +309,7 @@ enum WebTriggerHTTP {
         case 422: return "Unprocessable Entity"
         case 501: return "Not Implemented"
         case 502: return "Bad Gateway"
+        case 503: return "Service Unavailable"
         default: return "Status"
         }
     }
@@ -481,6 +492,114 @@ final class WebTriggerServer: @unchecked Sendable {
                                                          listing: { await self.listing() },
                                                          log: log)
         return WebTriggerHTTP.response(reply, text: text, product: product)
+    }
+}
+
+/// Keeps owning the trigger's port (the suite's "Owner" rule, the same as Core/WebTrigger.cs on Windows): it listens on
+/// bind:port, and when the port is TAKEN — a copy of the launcher that is still closing after an update, or another
+/// program — it tries again every `retry` seconds instead of giving up, until the port is free (then it listens) or
+/// `stop()` (the trigger switched off, or new settings). Any other problem (an address that isn't this computer's) is
+/// reported once and not retried. Every start and stop of the listener runs one after another, so a retry in flight and
+/// a new setting can never both bind. `onChange` is called on each change of state (Settings shows "waiting").
+@MainActor
+final class WebTriggerOwner {
+    enum State: Equatable { case idle, owning, waiting, failed }
+
+    let server: WebTriggerServer
+    let retry: TimeInterval
+    var onChange: (() -> Void)?
+    private let log: (String) -> Void
+    private(set) var state: State = .idle
+    private var target = ""
+    private var generation = 0
+    private var tail: Task<Void, Never>?
+    private var loop: Task<Void, Never>?
+
+    init(server: WebTriggerServer, retry: TimeInterval = 3, log: @escaping (String) -> Void = { _ in }) {
+        self.server = server
+        self.retry = retry
+        self.log = log
+    }
+
+    var waiting: Bool { state == .waiting }
+
+    /// Runs `body` after every earlier start/stop has finished.
+    private func serial<T>(_ body: @escaping @MainActor () async -> T) async -> T {
+        let previous = tail
+        let work = Task { @MainActor () -> T in
+            await previous?.value
+            return await body()
+        }
+        tail = Task { _ = await work.value }
+        return await work.value
+    }
+
+    private func set(_ new: State) {
+        guard new != state else { return }
+        state = new
+        onChange?()
+    }
+
+    /// Listens on bind:port. "" = listening now, or waiting for a taken port (`state` says which); else why not.
+    @discardableResult
+    func own(bind: String, port: Int) async -> String {
+        let wanted = "\(bind):\(port)"
+        if wanted == target && ((state == .owning && server.running) || state == .waiting) { return "" }
+        generation += 1
+        let gen = generation
+        loop?.cancel()
+        loop = nil
+        target = wanted
+        return await serial { [self] in
+            guard gen == generation else { return "" }
+            let err = await server.start(bind: bind, port: port)
+            guard gen == generation else {   // switched off or changed while it started: let go again
+                if err.isEmpty { server.stop() }
+                return ""
+            }
+            if err.isEmpty { set(.owning); return "" }
+            guard server.portTaken else { set(.failed); return err }
+            log("web trigger: port \(port) is taken — trying again every \(Int(retry)) seconds")
+            set(.waiting)
+            startRetrying(bind: bind, port: port, gen: gen)
+            return ""
+        }
+    }
+
+    private func startRetrying(bind: String, port: Int, gen: Int) {
+        let nanos = UInt64(max(retry, 0.05) * 1_000_000_000)
+        loop = Task { @MainActor [weak self] in
+            while true {
+                try? await Task.sleep(nanoseconds: nanos)
+                guard let owner = self, !Task.isCancelled, gen == owner.generation else { return }
+                let done: Bool = await owner.serial {
+                    guard gen == owner.generation else { return true }
+                    let err = await owner.server.start(bind: bind, port: port)
+                    guard gen == owner.generation else {
+                        if err.isEmpty { owner.server.stop() }
+                        return true
+                    }
+                    if err.isEmpty {
+                        owner.log("web trigger: port \(port) is free again — listening")
+                        owner.set(.owning)
+                        return true
+                    }
+                    if !owner.server.portTaken { owner.set(.failed); return true }
+                    return false
+                }
+                if done { return }
+            }
+        }
+    }
+
+    /// Stops listening and stops trying (the trigger switched off, or the app is quitting). The port closes at once.
+    func stop() {
+        generation += 1
+        loop?.cancel()
+        loop = nil
+        target = ""
+        server.stop()
+        set(.idle)
     }
 }
 

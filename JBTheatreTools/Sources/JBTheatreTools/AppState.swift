@@ -279,9 +279,13 @@ final class AppState: ObservableObject {
     private var scheduler: Task<Void, Never>?
     /// The Dashboard web trigger's listener (see the extension at the end of this file); nil until first used.
     var webTriggerServer: WebTriggerServer?
+    /// Keeps the listener on its port: a taken port is retried every 3 s until it's free or the trigger is switched off.
+    var webTriggerOwner: WebTriggerOwner?
     /// Settings → Dashboard web trigger: where it listens (or why not), and whether that's a problem.
     @Published var webTriggerStatusText = ""
     @Published var webTriggerProblem = false
+    /// Settings → Dashboard web trigger: who answers presses right now ("this window", "the background copy", …).
+    @Published var webTriggerAnsweringText = ""
     nonisolated static let showLockKey = "theatre.showLock"
     nonisolated static let heldKey = "theatre.heldApps"
     nonisolated static let autoCheckKey = "theatre.autoCheckInterval"
@@ -389,7 +393,8 @@ final class AppState: ObservableObject {
         }
         AppLog.shared.log("launched v\(currentVersion)")
         syncChrome()   // the menus' first state (show lock, Update All, launchable apps)
-        // The Dashboard web trigger listens only in this window's process (never a command-line run), and only when on.
+        // The Dashboard web trigger listens in the launcher's own process (never a command-line run), and only when on.
+        // It lives with the process, not the window: with "keep running" the window can close and buttons still work.
         Task { [weak self] in await self?.startWebTriggerIfEnabled() }
     }
 
@@ -2243,7 +2248,7 @@ final class AppState: ObservableObject {
 
     // MARK: - Stagehand (the suite app that sets what Claude may do in each app)
 
-    static let stagehandId = "stagehand"
+    nonisolated static let stagehandId = "stagehand"
     var stagehandInCatalog: Bool { rows.contains { $0.id == Self.stagehandId } }
     var stagehandInstalled: Bool { InstallManager.shared.installedVersion(Self.stagehandId) != nil }
 
@@ -3213,23 +3218,55 @@ extension AppState {
         return server
     }
 
-    /// At launch: switched on → listen. A launcher that has just updated itself may still hold the port for a few seconds
-    /// while the old copy quits, so a taken port is tried again for a little while. Never reads the Keychain when off.
-    func startWebTriggerIfEnabled() async {
-        guard webTriggerOn else { return }
-        for _ in 0..<8 {
-            if await applyWebTrigger().isEmpty || !webTriggerOn || !triggerServer().portTaken { return }
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-        }
+    private func triggerOwner() -> WebTriggerOwner {
+        if let existing = webTriggerOwner { return existing }
+        let owner = WebTriggerOwner(server: triggerServer(), retry: WebTriggerContract.retrySeconds,
+                                    log: { AppLog.shared.log($0) })
+        owner.onChange = { [weak self] in self?.refreshWebTriggerStatus() }
+        webTriggerOwner = owner
+        return owner
     }
 
-    /// Starts, restarts or stops the listener to match the settings. Returns "" or why it isn't listening.
+    /// At launch: switched on → listen. A taken port (a launcher that has just updated itself may still hold it for a few
+    /// seconds while the old copy quits, or another program has it) is tried again every 3 s until it's free. Never reads
+    /// the Keychain when off.
+    func startWebTriggerIfEnabled() async {
+        guard webTriggerOn else { return }
+        await applyWebTrigger()
+        syncTriggerRegistration()   // refreshes the program path after an update
+    }
+
+    /// Stagehand keeps a hidden `--trigger-host` copy running while the trigger is on, so buttons keep working when this
+    /// window is closed and after a restart: on → (re)write the registration and ask Stagehand to make sure its
+    /// supervisor runs (detached, never waited on); off → remove the registration.
+    func syncTriggerRegistration() {
+        let dir = TriggerRegistration.stateDir()
+        guard webTriggerOn else {
+            TriggerRegistration.clearWindow(pid: getpid(), stateDir: dir)
+            if TriggerRegistration.unregister(stateDir: dir) { AppLog.shared.log("web trigger: background copy unregistered") }
+            return
+        }
+        TriggerRegistration.markWindow(pid: getpid(), stateDir: dir)   // the hidden copy leaves this launcher the port
+        guard TriggerRegistration.register(exe: TriggerRegistration.launcherExecutable, stateDir: dir) else {
+            AppLog.shared.log("web trigger: couldn't register the background copy with Stagehand")
+            return
+        }
+        guard let exe = StagehandLink.installedExecutable() else {
+            AppLog.shared.log("web trigger: Stagehand isn't installed — dashboard buttons work only while this launcher runs")
+            return
+        }
+        Task.detached(priority: .utility) { StagehandLink.ensure(exe, log: { AppLog.shared.log($0) }) }
+    }
+
+    /// Starts, restarts or stops the listener to match the settings. Returns "" (listening, or waiting for a taken port)
+    /// or why it isn't listening.
     @discardableResult
     func applyWebTrigger() async -> String {
         let server = triggerServer()
+        let owner = triggerOwner()
         defer { refreshWebTriggerStatus() }
         guard webTriggerOn else {
-            server.stop()
+            owner.stop()
             server.error = ""
             return ""
         }
@@ -3239,13 +3276,12 @@ extension AppState {
         let bind = webTriggerBind.trimmingCharacters(in: .whitespaces)
         let problem = WebTriggerContract.bindProblem(bind: bind, port: String(webTriggerPort), tokenSet: !token.isEmpty)
         if !problem.isEmpty {
-            server.stop()
+            owner.stop()
             server.error = problem
             AppLog.shared.log("web trigger: not listening — \(problem)")
             return problem
         }
-        if server.running && server.address == "\(bind):\(webTriggerPort)" { return "" }
-        let err = await server.start(bind: bind, port: webTriggerPort)
+        let err = await owner.own(bind: bind, port: webTriggerPort)
         if !err.isEmpty { AppLog.shared.log(err) }
         return err
     }
@@ -3265,6 +3301,7 @@ extension AppState {
             if !enabled && webTriggerOn {
                 UserDefaults.standard.set(false, forKey: Self.webTriggerEnabledKey)
                 await applyWebTrigger()
+                syncTriggerRegistration()
             }
             webTriggerStatusText = problem
             webTriggerProblem = true
@@ -3279,7 +3316,9 @@ extension AppState {
         UserDefaults.standard.set(bind, forKey: Self.webTriggerBindKey)
         UserDefaults.standard.set(Int(port.trimmingCharacters(in: .whitespaces)) ?? WebTriggerContract.defaultPort,
                                   forKey: Self.webTriggerPortKey)
-        return await applyWebTrigger()
+        let result = await applyWebTrigger()
+        syncTriggerRegistration()
+        return result
     }
 
     /// Settings → Remove Token. Listening on every network needs a token, so that switches off too.
@@ -3290,16 +3329,27 @@ extension AppState {
             UserDefaults.standard.set(false, forKey: Self.webTriggerEnabledKey)
         }
         await applyWebTrigger()
+        syncTriggerRegistration()
     }
 
     func refreshWebTriggerStatus() {
         let s = triggerServer()
+        let waiting = webTriggerOwner?.waiting == true
+        let background = webTriggerOn && !s.running && TriggerRegistration.backgroundAnswering(stateDir: TriggerRegistration.stateDir())
         let d = LauncherActions.describe(enabled: webTriggerOn, bind: webTriggerBind, running: s.running, address: s.address,
-                                         port: s.port, error: s.error)
-        webTriggerStatusText = d.text
-        webTriggerProblem = d.problem
+                                         port: waiting ? webTriggerPort : s.port, error: s.error, waiting: waiting,
+                                         background: background)
+        let answering = LauncherActions.answering(enabled: webTriggerOn, windowOwns: s.running, background: background,
+                                                  stagehandInstalled: stagehandInstalled)
+        if webTriggerStatusText != d.text { webTriggerStatusText = d.text }
+        if webTriggerProblem != d.problem { webTriggerProblem = d.problem }
+        if webTriggerAnsweringText != answering { webTriggerAnsweringText = answering }
     }
 
-    /// On quit: the port closes with the app.
-    func stopWebTrigger() { webTriggerServer?.stop() }
+    /// On quit: the port closes with the app, and nothing keeps trying for it.
+    func stopWebTrigger() {
+        TriggerRegistration.clearWindow(pid: getpid(), stateDir: TriggerRegistration.stateDir())
+        webTriggerOwner?.stop()
+        webTriggerServer?.stop()
+    }
 }

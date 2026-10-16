@@ -327,7 +327,8 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Group {
                     Toggle("Switch on the web trigger", isOn: Binding(get: { triggerOn }, set: { triggerOn = $0; saveTrigger() }))
-                    Text("Lets a Show Dashboard button open an app you tick below, turn show lock on, or read this launcher's status. It listens only while JB Theatre Tools is running.")
+                    Text("Lets a Show Dashboard button open an app you tick below, turn show lock on, or read this launcher's status. " + LauncherActions.backgroundNote
+                         + (state.stagehandInstalled ? "" : " " + LauncherActions.stagehandMissing))
                         .font(JBFont.small).foregroundStyle(Color.jbText2)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack {
@@ -367,6 +368,11 @@ struct SettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                     }
+                    if !state.webTriggerAnsweringText.isEmpty {
+                        Text(state.webTriggerAnsweringText)
+                            .font(JBFont.small).foregroundStyle(Color.jbText2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 Divider()
                 Group {
@@ -392,6 +398,10 @@ struct SettingsView: View {
                 triggerPort = String(state.webTriggerPort)
                 triggerHasToken = WebTriggerStore.exists()
                 state.refreshWebTriggerStatus()
+            }
+            // Who answers can change without this window doing anything (the background copy starts or stops).
+            .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
+                if state.webTriggerOn { state.refreshWebTriggerStatus() }
             }
             .confirmationDialog("Remove the web trigger's token?", isPresented: $confirmingTriggerTokenRemove, titleVisibility: .visible) {
                 Button("Remove", role: .destructive) {
