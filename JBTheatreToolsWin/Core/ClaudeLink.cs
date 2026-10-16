@@ -136,6 +136,9 @@ public static class Connectors
             var o = new JsonObject
             {
                 ["name"] = e.Name, ["command"] = stableCommand(e), ["path"] = e.Executable, ["args"] = new JsonArray("--mcp"),
+                // CONTRACT: Stagehand keys an app's cached tool list and its running connector on this. On Windows the
+                // command is the stable bin\<id> link, whose file stamp doesn't change on an update, so this must be
+                // the installed version of the edition the entry uses, rewritten on every install, update and edition change.
                 ["version"] = e.Version,
             };
             if (e.Edition != null) o["edition"] = e.Edition;

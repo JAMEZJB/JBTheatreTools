@@ -539,6 +539,7 @@ enum CLI {
                 defer { SelfUpdate.discard(staged) }
                 let old = try SelfUpdate.swap(newBundle: staged.bundle, into: bundle)
                 AppLog.shared.log("cli: self-update \(current) -> \(target.tagName) at \(bundle.path)")
+                // CONTRACT: Stagehand parses this line and "… is up to date." (same wording as Windows); change both together.
                 print("Updated JB Theatre Tools v\(current) -> \(target.tagName) in place: \(bundle.path)")
                 print("The next start runs it. The previous version is kept beside it as \(old.lastPathComponent) (delete it any time).")
             } catch { fputs("error: \(error.localizedDescription)\n", stderr); exit(1) }

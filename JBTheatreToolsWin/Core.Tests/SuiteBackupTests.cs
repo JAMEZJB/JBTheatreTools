@@ -262,6 +262,13 @@ public sealed class SuiteBackupTests : IDisposable
         // The program itself, for an elevated caller that won't follow the stable command's folder link.
         Assert.Equal("C:\\apps\\pdftools@full\\app.exe", doc["apps"]!["pdftools"]!["path"]!.GetValue<string>());
         Assert.Equal("--mcp", doc["apps"]!["pdftools"]!["args"]![0]!.GetValue<string>());
+        // Stagehand's contract: "version" is the installed version of the edition used (Full here), and follows an update.
+        Assert.Equal("v0.10.1-dev.2", doc["apps"]!["pdftools"]!["version"]!.GetValue<string>());
+        versions["pdftools@full"] = "v0.10.2";
+        var updated = Connectors.Document(Connectors.Entries(apps, k => versions.GetValueOrDefault(k), k => $"C:\\apps\\{k}\\app.exe"),
+                                          x => $"C:\\stable\\{x.Id}\\app.exe");
+        Assert.Equal("v0.10.2", updated["apps"]!["pdftools"]!["version"]!.GetValue<string>());
+        Assert.Equal("C:\\stable\\pdftools\\app.exe", updated["apps"]!["pdftools"]!["command"]!.GetValue<string>());   // the command stays
         var path = Path.Combine(_dir, "connectors.json");
         Connectors.Write(path, doc);
         var stamp = File.GetLastWriteTimeUtc(path);

@@ -354,6 +354,8 @@ public static partial class Cli
             // Credentials given on the command line (a relay-only network, or GitHub's anonymous rate limit) are used.
             var staged = await LauncherUpdate.DownloadAsync(s, HasAuth(token) ? MakeClient(token) : new GitHubClient((string?)null), current);
             LauncherUpdate.Install(staged);
+            // CONTRACT: Stagehand updates a PC's launcher with --self-update and parses this line and the "is up to date."
+            // one below (and exit 7 = show lock). Change their wording only together with Stagehand.
             Console.WriteLine($"Updated JB Theatre Tools v{current} -> {staged.Tag} in place: {Environment.ProcessPath}");
             Console.WriteLine("The next start runs it. The previous version is kept beside it as a .old file (delete it any time).");
             return 0;
