@@ -107,6 +107,21 @@ The same features on every launcher (the few that don't apply to Android are mar
   menu once Stagehand is installed. Every launcher run (the window, or any command) checks those links and remakes
   one that's missing or out of date, and launcher processes running at once take turns, so none undoes another's
   install.
+- **Dashboard web trigger** *(desktop, from 1.36.0)* — a Show Dashboard (Node-RED) "Saved action" button can drive the
+  launcher on a show computer: `open-<app id>` opens an installed app you ticked under Settings → Dashboard web trigger →
+  "Apps a button may open" (none are ticked to start with; one that's already open isn't opened twice), `show-lock-on`
+  turns show lock on exactly as ⌘L / Ctrl+L does (there's deliberately no "off": a person at the computer turns it off), and
+  `status` answers in one line — show lock, apps installed, updates waiting from the last check (it never goes online) and
+  the launcher's version. Same contract as every suite app: `POST http://<computer>:42154/actions/<id>[?reply=text]` with
+  a JSON body (`{}` or `{"token": "…"}`; `X-Token` / `Authorization: Bearer` work too), `GET /actions` lists the ids;
+  replies 200 done · 502 it failed · 400 not a JSON request · 403 token or a web-page request · 404 no such action ·
+  409 busy (one press at a time, or that app is being installed) · 422 not installed. Off until you switch it on;
+  127.0.0.1 unless you choose another address of the computer, and every address (0.0.0.0) only with a token, which is
+  kept in the Keychain / Credential Manager, never shown back, compared in constant time and never logged (it goes in a
+  settings backup as a password). Requests from a web page (an `Origin` header, a non-JSON body, a DNS name in `Host`) are
+  refused, the port is never shared with another program, and it listens only while the launcher is running (keep it
+  running in the Dock or tray on a dashboard computer) — never from the command line. Settings has a short guide.
+  Not on Android: the dashboard and Node-RED run on a show computer, not a phone or tablet.
 - **Set up a PC from another computer** *(Windows command line; `--download` and `--list --json` on Mac and Windows)* —
   `--installed --json` and `--list --json` list apps by catalog id (`--list --json` also gives every platform's file
   name for each edition); `--install-file <id> <file> --tag vX.Y.Z` installs a build copied onto a

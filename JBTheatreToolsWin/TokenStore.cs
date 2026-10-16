@@ -12,6 +12,7 @@ public static class TokenStore
 {
     private const string Target = "JBTheatreTools/github-pat";
     private const string ServerTarget = "JBTheatreTools/server-pass";
+    private const string TriggerTarget = "JBTheatreTools/web-trigger";
 
     public static string? Load() => LoadFrom(Target);
     public static bool Save(string token) => SaveTo(Target, "github-pat", token);
@@ -21,6 +22,11 @@ public static class TokenStore
     public static string? LoadServerPass() => LoadFrom(ServerTarget);
     public static bool SaveServerPass(string pass) => SaveTo(ServerTarget, "server-pass", pass);
     public static void ClearServerPass() => CredDeleteW(ServerTarget, CRED_TYPE.GENERIC, 0);
+
+    /// <summary>The Dashboard web trigger's shared word (a button must send it when one is set). Never shown back.</summary>
+    public static string? LoadTriggerToken() => LoadFrom(TriggerTarget);
+    public static bool SaveTriggerToken(string word) => SaveTo(TriggerTarget, "web-trigger", word);
+    public static void ClearTriggerToken() => CredDeleteW(TriggerTarget, CRED_TYPE.GENERIC, 0);
 
     private static string? LoadFrom(string target)
     {

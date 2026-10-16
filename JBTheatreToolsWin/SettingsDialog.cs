@@ -1,6 +1,8 @@
+using System.Globalization;
+
 namespace JBTheatreTools;
 
-/// <summary>What Settings needs from the main window for the Storage and Support panels.</summary>
+/// <summary>What Settings needs from the main window for the Storage and Support panels (and the web trigger).</summary>
 public sealed record SettingsExtras(
     Func<Task<(long Installed, long Cache)>> Storage,
     Func<bool> CanClearCache,
@@ -9,7 +11,12 @@ public sealed record SettingsExtras(
     Action<IWin32Window>? BackUpAll = null,
     Func<IWin32Window, bool>? RestoreAll = null,   // true: the launcher's own settings were restored (Settings then closes)
     Action<IWin32Window>? OpenStagehand = null,
-    Func<bool>? StagehandInstalled = null);
+    Func<bool>? StagehandInstalled = null,
+    Func<string>? ApplyWebTrigger = null,                                    // applies what Settings set: '' or why it isn't listening
+    Func<(string Text, bool Problem)>? WebTriggerStatus = null,
+    Func<IReadOnlyList<(string Id, string Name)>>? WebTriggerApps = null,    // installed apps (and any already ticked)
+    Func<bool>? WebTriggerHasToken = null,
+    Action? WebTriggerTokenChanged = null);
 
 /// <summary>Settings, laid out like the macOS Settings sheet (SettingsView.swift): two equal columns of rounded panels,
 /// each under a caps micro-label, with the same grouping — Download access, Updates, Appearance, When I close the window
@@ -84,6 +91,24 @@ public sealed class SettingsDialog : Form
     private readonly Label _lockHeld = new();
     private readonly Label _stagehandMissing = new();
     private readonly SettingsExtras? _extras;
+
+    // Dashboard web trigger (left column, last): on/off, address, port, token (never shown back), status, the apps a
+    // button may open, and the guide.
+    private readonly HouseCheckBox _trigOn = new();
+    private readonly Label _trigBindLabel = new() { Text = "Listen on" };
+    private readonly HouseTextField _trigBindField = new();
+    private readonly Label _trigPortLabel = new() { Text = "Port" };
+    private readonly HouseTextField _trigPortField = new();
+    private readonly Label _trigTokenState = new();
+    private readonly HouseTextField _trigTokenField = new();
+    private readonly HouseButton _trigSave = new() { Text = "Save", AutoSize = true };
+    private readonly HouseButton _trigRemoveToken = new() { Text = "Remove Token", AutoSize = true };
+    private readonly Label _trigStatus = new();
+    private readonly Label _trigAppsLabel = new() { Text = "Apps a button may open" };
+    private readonly List<HouseCheckBox> _trigApps = new();
+    private readonly Label _trigNoApps = new();
+    private readonly HouseButton _trigGuide = new() { Text = "How it works…", AutoSize = true };
+    private bool _trigSyncing;
 
     // Bottom bar.
     private readonly HouseButton _openLog = new() { Text = "Open Log", AutoSize = true };
@@ -361,6 +386,38 @@ public sealed class SettingsDialog : Form
         UpdateRestoreButton();
         _showLock.CheckedChanged += (_, _) => { UpdateRestoreButton(); LayoutAll(); };
 
+        // --- Dashboard web trigger ---
+        _trigOn.Text = "Switch on the web trigger";
+        _trigOn.Checked = _settings.WebTriggerEnabled;
+        _trigOn.Enabled = _extras?.ApplyWebTrigger != null;
+        _trigOn.CheckedChanged += (_, _) => { if (!_trigSyncing) SaveTrigger(); };
+        _trigBindField.Box.Text = _settings.WebTriggerBind;
+        _trigBindField.Box.AccessibleName = "Listen on";
+        _trigBindField.Placeholder = WebTriggerContract.DefaultBind;
+        _trigPortField.Box.Text = _settings.WebTriggerPort.ToString(CultureInfo.InvariantCulture);
+        _trigPortField.Box.AccessibleName = "Port";
+        _trigTokenField.Box.UseSystemPasswordChar = true;
+        _trigTokenField.Box.AccessibleName = "Web trigger token";
+        _trigTokenField.Placeholder = "New token (8 to 200 characters)…";
+        _trigSave.Click += (_, _) => SaveTrigger();
+        _trigRemoveToken.Click += (_, _) => RemoveTriggerToken();
+        _trigGuide.Click += (_, _) =>
+        {
+            using var guide = new WebTriggerGuideDialog(_settings.WebTriggerPort, Theme.CurrentDark);
+            guide.ShowDialog(this);
+        };
+        foreach (var (id, name) in _extras?.WebTriggerApps?.Invoke() ?? Array.Empty<(string, string)>())
+        {
+            var box = new HouseCheckBox { Text = $"{name}  ·  open-{id}", Checked = _settings.WebTriggerApps.Contains(id) };
+            box.CheckedChanged += (_, _) =>
+            {
+                _settings.WebTriggerApps.Remove(id);
+                if (box.Checked) _settings.WebTriggerApps.Add(id);
+            };
+            _trigApps.Add(box);
+        }
+        _trigNoApps.Text = "Nothing installed yet: only installed apps can be ticked.";
+
         // --- Bottom bar ---
         _openLog.Click += (_, _) => Log.Open();
         // Clears the saved order; MainForm re-applies (→ catalog order) when the dialog closes.
@@ -374,6 +431,7 @@ public sealed class SettingsDialog : Form
         // else Enter is Done. Done used to take it from the field too, closing Settings with the passphrase unsaved.
         BindSubmit(_token, _save);
         BindSubmit(_serverPass, _serverSave);
+        BindSubmit(_trigTokenField.Box, _trigSave);
 
         BuildSections();
         SetShown(_viewRelease, false);
@@ -399,6 +457,7 @@ public sealed class SettingsDialog : Form
         UpdateServerState();
         UpdateAuthPanels();
         UpdateIntervalEnabled();
+        UpdateTriggerState();
 
         _built = true;
         ApplyDpi();
@@ -444,6 +503,19 @@ public sealed class SettingsDialog : Form
         _left.Add(NewSection("When I close the window", Fixed(_closeBehavior), Full(_closeHint)));
         _left.Add(NewSection("Quick launch", Full(_tray),
             Full(Hint("Right-click the icon to launch any installed app, or check for updates."))));
+        var trigger = new List<Func<int, int, int, int>>
+        {
+            Full(_trigOn),
+            Full(Hint("Lets a Show Dashboard button open an app you tick below, turn show lock on, or read this launcher's " +
+                      "status. It listens only while JB Theatre Tools is running.")),
+            Split(_trigBindLabel, _trigBindField), Split(_trigPortLabel, _trigPortField),
+            Full(_trigTokenState), Full(_trigTokenField), Row(null, _trigSave, _trigRemoveToken),
+            Full(_trigStatus), Rule(), Full(_trigAppsLabel),
+        };
+        trigger.AddRange(_trigApps.Select(b => Full(b)));
+        trigger.Add(Full(_trigNoApps, () => _trigApps.Count == 0));
+        trigger.Add(Row(null, _trigGuide));
+        _left.Add(NewSection("Dashboard web trigger", trigger.ToArray()));
 
         _right.Add(NewSection("Claude", Full(_showLock),
             Full(Hint(ShowLockWords.Sentence)),
@@ -465,10 +537,11 @@ public sealed class SettingsDialog : Form
             Full(Hint("Versions, settings and recent log lines for a support question — never passwords or tokens."))));
 
         _subLabels.AddRange(new[] { _tokenHelp, _serverHint, _serverRelay, _updateHint, _checkResult, _closeHint, _installHint,
-                                    _storageInstalled, _storageCache, _storageNote });
+                                    _storageInstalled, _storageCache, _storageNote, _trigTokenState, _trigNoApps });
         foreach (var l in new[] { _tokenState, _serverState, _serverHint, _serverRelay, _tokenHelp, _updateHint, _intervalLabel,
                                   _versionLabel, _checkResult, _closeHint, _installHint, _storageInstalledLabel, _storageInstalled,
-                                  _storageCacheLabel, _storageCache, _storageNote, _restoreLocked, _lockHeld, _stagehandMissing })
+                                  _storageCacheLabel, _storageCache, _storageNote, _restoreLocked, _lockHeld, _stagehandMissing,
+                                  _trigBindLabel, _trigPortLabel, _trigTokenState, _trigStatus, _trigAppsLabel, _trigNoApps })
         {
             l.AutoSize = false;
             l.UseMnemonic = false;
@@ -569,6 +642,7 @@ public sealed class SettingsDialog : Form
         return (x, y, w) =>
         {
             if (right is HouseComboBox) right.Width = DropdownWidth(w);
+            if (right is HouseTextField) right.Size = new Size(DropdownWidth(w), S(28));
             if (right is HouseButton { AutoSize: true } b) b.Size = b.GetPreferredSize(Size.Empty);
             if (right is Label { AutoSize: false } value) value.Width = Math.Max(S(40), w / 2);
             int labelW = Math.Max(S(40), w - right.Width - S(12));
@@ -917,6 +991,83 @@ public sealed class SettingsDialog : Form
         catch { /* non-fatal */ }
     }
 
+    // ── Dashboard web trigger ───────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Save (and the on/off box): checks the address, port and any new token, stores them, and starts, restarts
+    /// or stops the listener at once. Switching OFF always works; a problem leaves what was in force as it was.</summary>
+    private void SaveTrigger()
+    {
+        if (_extras?.ApplyWebTrigger == null) return;
+        var bind = _trigBindField.Box.Text.Trim();
+        if (bind.Length == 0) bind = WebTriggerContract.DefaultBind;
+        var port = _trigPortField.Box.Text.Trim();
+        var word = _trigTokenField.Box.Text.Trim();
+        bool hasToken = word.Length > 0 || _extras.WebTriggerHasToken?.Invoke() == true;
+        var problem = word.Length > 0 ? WebTriggerContract.TokenProblem(word) : "";
+        if (problem.Length == 0) problem = WebTriggerContract.BindProblem(bind, port, hasToken);
+        if (problem.Length > 0)
+        {
+            if (!_trigOn.Checked && _settings.WebTriggerEnabled) { _settings.WebTriggerEnabled = false; _extras.ApplyWebTrigger(); }
+            SyncTriggerBox();
+            UpdateTriggerState();
+            ShowTriggerStatus(problem, true);
+            return;
+        }
+        if (word.Length > 0)
+        {
+            if (!TokenStore.SaveTriggerToken(word)) { ShowTriggerStatus("Couldn't save the token in Credential Manager.", true); return; }
+            _trigTokenField.Box.Clear();
+            _extras.WebTriggerTokenChanged?.Invoke();
+        }
+        _settings.WebTriggerEnabled = _trigOn.Checked;
+        _settings.WebTriggerBind = bind;
+        _settings.WebTriggerPort = int.Parse(port, NumberStyles.Integer, CultureInfo.InvariantCulture);
+        _trigBindField.Box.Text = bind;
+        _extras.ApplyWebTrigger();
+        UpdateTriggerState();
+    }
+
+    private void RemoveTriggerToken()
+    {
+        if (HouseMessage.Show(this,
+                "Remove the web trigger's token? Buttons then work without one, and listening on every network (0.0.0.0) switches off.",
+                "Remove token", MessageBoxButtons.YesNo, MessageBoxIcon.Question, destructive: true) != DialogResult.Yes) return;
+        TokenStore.ClearTriggerToken();
+        _extras?.WebTriggerTokenChanged?.Invoke();
+        if (_settings.WebTriggerEnabled && WebTriggerContract.BindProblem(_settings.WebTriggerBind,
+                _settings.WebTriggerPort.ToString(CultureInfo.InvariantCulture), tokenSet: false).Length > 0)
+            _settings.WebTriggerEnabled = false;
+        _extras?.ApplyWebTrigger?.Invoke();
+        SyncTriggerBox();
+        UpdateTriggerState();
+    }
+
+    /// <summary>The on/off box shows what is in force (without saving again).</summary>
+    private void SyncTriggerBox()
+    {
+        _trigSyncing = true;
+        try { _trigOn.Checked = _settings.WebTriggerEnabled; }
+        finally { _trigSyncing = false; }
+    }
+
+    private void UpdateTriggerState()
+    {
+        bool has = _extras?.WebTriggerHasToken?.Invoke() == true;
+        _trigTokenState.Text = has
+            ? "A token is set. It's never shown again; type a new one to change it."
+            : "No token: any program that can reach the port can press. Set one for any address but 127.0.0.1.";
+        SetShown(_trigRemoveToken, has);
+        var (text, problem) = _extras?.WebTriggerStatus?.Invoke() ?? ("", false);
+        ShowTriggerStatus(text, problem);
+    }
+
+    private void ShowTriggerStatus(string text, bool problem)
+    {
+        _trigStatus.Text = text;
+        _trigStatus.ForeColor = problem ? Theme.Danger : _settings.WebTriggerEnabled ? Theme.Ok : Theme.Sub(Theme.CurrentDark);
+        LayoutAll();
+    }
+
     private void UpdateTokenState()
     {
         bool has = TokenStore.Load() != null;
@@ -947,6 +1098,7 @@ public sealed class SettingsDialog : Form
         foreach (var combo in new[] { _authMode, _updateMode, _interval, _closeBehavior }) combo.ApplyTheme(dark);
         _tokenField.ApplyTheme(dark);
         _serverPassField.ApplyTheme(dark);
+        foreach (var field in new[] { _trigBindField, _trigPortField, _trigTokenField }) field.ApplyTheme(dark);
         foreach (var l in _subLabels) l.ForeColor = Theme.Sub(dark);
         _restoreLocked.ForeColor = Theme.Info;
         _lockHeld.ForeColor = Theme.Info;
@@ -956,6 +1108,7 @@ public sealed class SettingsDialog : Form
         UpdateIntervalEnabled();
         UpdateTokenState();
         UpdateServerState();
+        UpdateTriggerState();
         if (IsHandleCreated) Theme.ApplyTitleBar(this, dark);
         Invalidate(true);
     }

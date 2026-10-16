@@ -31,6 +31,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return menu
     }
 
+    /// Quitting closes the Dashboard web trigger's port with the app.
+    @MainActor func applicationWillTerminate(_ notification: Notification) {
+        state?.stopWebTrigger()
+    }
+
     @MainActor @objc private func openSlot(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String else { return }
         state?.launchSlot(key)

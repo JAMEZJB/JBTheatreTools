@@ -340,10 +340,13 @@ public static class LauncherSettings
         ("categoryOrder", Kind.Strings, null),
         ("collapsedCategories", Kind.Strings, null),
         ("appVariants", Kind.Map, null),
+        // The Dashboard web trigger's "Apps a button may open" ticks. Whether it listens, and on which address and port,
+        // stays with this computer: a restore never opens a port.
+        ("webTriggerApps", Kind.Strings, null),
     };
 
     public static readonly (string Name, string Label)[] SecretLabels =
-        { ("downloadPassphrase", "Download passphrase"), ("githubToken", "GitHub token") };
+        { ("downloadPassphrase", "Download passphrase"), ("githubToken", "GitHub token"), ("webTriggerToken", "Web trigger token") };
 
     private const string StorePrefix = "store:launcher:";
 

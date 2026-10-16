@@ -277,6 +277,11 @@ final class AppState: ObservableObject {
     /// When the last check ran (the "While open, check every…" scheduler's clock).
     private var lastCheck: Date?
     private var scheduler: Task<Void, Never>?
+    /// The Dashboard web trigger's listener (see the extension at the end of this file); nil until first used.
+    var webTriggerServer: WebTriggerServer?
+    /// Settings → Dashboard web trigger: where it listens (or why not), and whether that's a problem.
+    @Published var webTriggerStatusText = ""
+    @Published var webTriggerProblem = false
     nonisolated static let showLockKey = "theatre.showLock"
     nonisolated static let heldKey = "theatre.heldApps"
     nonisolated static let autoCheckKey = "theatre.autoCheckInterval"
@@ -384,6 +389,8 @@ final class AppState: ObservableObject {
         }
         AppLog.shared.log("launched v\(currentVersion)")
         syncChrome()   // the menus' first state (show lock, Update All, launchable apps)
+        // The Dashboard web trigger listens only in this window's process (never a command-line run), and only when on.
+        Task { [weak self] in await self?.startWebTriggerIfEnabled() }
     }
 
     // MARK: - Auth mode
@@ -2192,13 +2199,14 @@ final class AppState: ObservableObject {
         else { objectWillChange.send() }   // a Settings checkbox switched off by the click shows "on" again
     }
 
-    func setShowLock(_ on: Bool, fromClaudeFile: Bool = false) {
+    func setShowLock(_ on: Bool, fromClaudeFile: Bool = false, by: String? = nil) {
         guard showLock != on else { return }
         showLock = on
         syncChrome()
         UserDefaults.standard.set(on, forKey: Self.showLockKey)
         if !fromClaudeFile { ClaudeSettingsFile.setSuiteShowLock(on) }
-        AppLog.shared.log("show lock \(on ? "on" : "off")\(fromClaudeFile ? " (set in Stagehand or an app)" : "")")
+        let byWhom = by.map { " (" + $0 + ")" } ?? ""
+        AppLog.shared.log("show lock \(on ? "on" : "off")\(fromClaudeFile ? " (set in Stagehand or an app)" : "")\(byWhom)")
         guard on else { return }
         // Nothing more installs once the lock is on: stop a batch, and cancel every download in flight (a slot that
         // has already downloaded is dropped before it installs — see `installPhase`).
@@ -3102,4 +3110,196 @@ final class ChromeState: ObservableObject {
     @Published var showLock = false
     @Published var canUpdateAll = false
     @Published var launchSlots: [LaunchSlot] = []
+}
+
+// MARK: - Dashboard web trigger
+
+/// A Show Dashboard button opens a ticked app, turns show lock on, or reads the status (WebTrigger.swift has the contract,
+/// LauncherActions.swift the actions). In this file so it reaches the model's private state; Windows: MainForm.
+extension AppState {
+    nonisolated static let webTriggerEnabledKey = "theatre.webTriggerEnabled"
+    nonisolated static let webTriggerBindKey = "theatre.webTriggerBind"
+    nonisolated static let webTriggerPortKey = "theatre.webTriggerPort"
+    nonisolated static let webTriggerAppsKey = "theatre.webTriggerApps"
+
+    var webTriggerOn: Bool { UserDefaults.standard.bool(forKey: Self.webTriggerEnabledKey) }
+    var webTriggerBind: String { UserDefaults.standard.string(forKey: Self.webTriggerBindKey) ?? WebTriggerContract.defaultBind }
+    var webTriggerPort: Int {
+        let p = UserDefaults.standard.integer(forKey: Self.webTriggerPortKey)
+        return p == 0 ? WebTriggerContract.defaultPort : p
+    }
+    /// The app ids a button may open (Settings → Dashboard web trigger); none until ticked.
+    var webTriggerApps: Set<String> { Set(UserDefaults.standard.stringArray(forKey: Self.webTriggerAppsKey) ?? []) }
+
+    func setWebTriggerApp(_ id: String, _ on: Bool) {
+        var ids = UserDefaults.standard.stringArray(forKey: Self.webTriggerAppsKey) ?? []
+        ids.removeAll { $0 == id }
+        if on { ids.append(id) }
+        UserDefaults.standard.set(ids, forKey: Self.webTriggerAppsKey)
+        objectWillChange.send()
+    }
+
+    /// The apps Settings offers to tick: installed ones, and any already ticked (so they can be unticked), catalog order.
+    var webTriggerChoices: [WebTriggerAction] {
+        let ticked = webTriggerApps
+        return triggerApps().filter { app in
+            ticked.contains(app.id) || app.slots.contains { InstallManager.shared.installedVersion($0.key) != nil }
+        }.map { WebTriggerAction(id: $0.id, name: $0.name) }
+    }
+
+    /// The catalog's apps in catalog order, each with its install slots — the Full edition first.
+    private func triggerApps() -> [LauncherActions.App] {
+        catalogOrder.compactMap { id in rows.first { $0.id == id }?.app }.map { app in
+            let editions: [String?] = app.hasVariants ? (app.variants ?? []).map(\.id).reversed() : [nil]
+            return LauncherActions.App(id: app.id, name: app.name, slots: editions.map { vid in
+                LauncherActions.Slot(key: app.installKey(variantId: vid), suffix: app.variantSuffix(vid))
+            })
+        }
+    }
+
+    /// What the trigger's actions see of the launcher — used on the main actor only.
+    private func triggerHost() -> LauncherActionHost {
+        LauncherActionHost(
+            showLock: { self.showLock },
+            turnShowLockOn: { source in
+                let downloads = self.downloadTasks.count
+                self.setShowLock(true, by: source)   // exactly ⌘L: the launcher's lock, claude.json, downloads stopped
+                return downloads
+            },
+            apps: { self.triggerApps() },
+            tickedApps: { self.webTriggerApps },
+            installedVersion: { InstallManager.shared.installedVersion($0) },
+            slotBusy: { key in
+                let appId = String(key.split(separator: "@").first ?? Substring(key))
+                return self.slotsInFlight.contains(key) || self.rows.contains { $0.app.id == appId && $0.installing }
+            },
+            isOpen: { InstallManager.shared.runningInstance($0) != nil },
+            launch: { try InstallManager.shared.launch(installKey: $0) },
+            facts: {
+                LauncherActions.Facts(showLock: self.showLock, installed: self.rows.filter { $0.installed != nil }.count,
+                                      updates: self.updatesAvailable, lastCheck: self.lastCheck, version: self.currentVersion)
+            },
+            log: { AppLog.shared.log($0) })
+    }
+
+    func runTriggerAction(_ id: String, _ source: String) -> WebTriggerReply {
+        let (status, reply) = LauncherActions.run(triggerHost(), id: id, source: source, now: Date())
+        return WebTriggerReply(status, reply)
+    }
+
+    func triggerListing() -> [WebTriggerAction] { LauncherActions.listing(triggerHost()) }
+
+    private func triggerServer() -> WebTriggerServer {
+        if let existing = webTriggerServer { return existing }
+        let gate = OneAtATime()
+        let server = WebTriggerServer(
+            run: { [weak self] id, source in
+                guard gate.tryEnter() else {
+                    let (status, reply) = WebTriggerContract.busy()
+                    return WebTriggerReply(status, reply)
+                }
+                defer { gate.exit() }
+                guard let self else {
+                    return WebTriggerReply(502, ["ok": false, "error": "JB Theatre Tools is closing.", "summary": "the launcher is closing"])
+                }
+                return await self.runTriggerAction(id, source)
+            },
+            listing: { [weak self] in
+                guard let self else { return [] }
+                return await self.triggerListing()
+            },
+            log: { line in AppLog.shared.log(line) })
+        webTriggerServer = server
+        return server
+    }
+
+    /// At launch: switched on → listen. A launcher that has just updated itself may still hold the port for a few seconds
+    /// while the old copy quits, so a taken port is tried again for a little while. Never reads the Keychain when off.
+    func startWebTriggerIfEnabled() async {
+        guard webTriggerOn else { return }
+        for _ in 0..<8 {
+            if await applyWebTrigger().isEmpty || !webTriggerOn || !triggerServer().portTaken { return }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+    }
+
+    /// Starts, restarts or stops the listener to match the settings. Returns "" or why it isn't listening.
+    @discardableResult
+    func applyWebTrigger() async -> String {
+        let server = triggerServer()
+        defer { refreshWebTriggerStatus() }
+        guard webTriggerOn else {
+            server.stop()
+            server.error = ""
+            return ""
+        }
+        // A saved token that can't be read (access refused): refuse every press rather than run without it.
+        let token = WebTriggerStore.exists() ? (WebTriggerStore.load() ?? UUID().uuidString + UUID().uuidString) : ""
+        server.setToken(token)
+        let bind = webTriggerBind.trimmingCharacters(in: .whitespaces)
+        let problem = WebTriggerContract.bindProblem(bind: bind, port: String(webTriggerPort), tokenSet: !token.isEmpty)
+        if !problem.isEmpty {
+            server.stop()
+            server.error = problem
+            AppLog.shared.log("web trigger: not listening — \(problem)")
+            return problem
+        }
+        if server.running && server.address == "\(bind):\(webTriggerPort)" { return "" }
+        let err = await server.start(bind: bind, port: webTriggerPort)
+        if !err.isEmpty { AppLog.shared.log(err) }
+        return err
+    }
+
+    /// Settings → Save (and the on/off switch): checks the address, port and any new token, stores them, and starts,
+    /// restarts or stops the listener at once. Switching OFF always works; a problem leaves what was in force as it was.
+    @discardableResult
+    func saveWebTrigger(enabled: Bool, bind rawBind: String, port: String, newToken: String) async -> String {
+        var bind = rawBind.trimmingCharacters(in: .whitespaces)
+        if bind.isEmpty { bind = WebTriggerContract.defaultBind }
+        let word = newToken.trimmingCharacters(in: .whitespaces)
+        var problem = word.isEmpty ? "" : WebTriggerContract.tokenProblem(word)
+        if problem.isEmpty {
+            problem = WebTriggerContract.bindProblem(bind: bind, port: port, tokenSet: !word.isEmpty || WebTriggerStore.exists())
+        }
+        if !problem.isEmpty {
+            if !enabled && webTriggerOn {
+                UserDefaults.standard.set(false, forKey: Self.webTriggerEnabledKey)
+                await applyWebTrigger()
+            }
+            webTriggerStatusText = problem
+            webTriggerProblem = true
+            return problem
+        }
+        if !word.isEmpty && !WebTriggerStore.save(word) {
+            webTriggerStatusText = "Couldn't save the token in the Keychain."
+            webTriggerProblem = true
+            return webTriggerStatusText
+        }
+        UserDefaults.standard.set(enabled, forKey: Self.webTriggerEnabledKey)
+        UserDefaults.standard.set(bind, forKey: Self.webTriggerBindKey)
+        UserDefaults.standard.set(Int(port.trimmingCharacters(in: .whitespaces)) ?? WebTriggerContract.defaultPort,
+                                  forKey: Self.webTriggerPortKey)
+        return await applyWebTrigger()
+    }
+
+    /// Settings → Remove Token. Listening on every network needs a token, so that switches off too.
+    func removeWebTriggerToken() async {
+        WebTriggerStore.clear()
+        if webTriggerOn,
+           !WebTriggerContract.bindProblem(bind: webTriggerBind, port: String(webTriggerPort), tokenSet: false).isEmpty {
+            UserDefaults.standard.set(false, forKey: Self.webTriggerEnabledKey)
+        }
+        await applyWebTrigger()
+    }
+
+    func refreshWebTriggerStatus() {
+        let s = triggerServer()
+        let d = LauncherActions.describe(enabled: webTriggerOn, bind: webTriggerBind, running: s.running, address: s.address,
+                                         port: s.port, error: s.error)
+        webTriggerStatusText = d.text
+        webTriggerProblem = d.problem
+    }
+
+    /// On quit: the port closes with the app.
+    func stopWebTrigger() { webTriggerServer?.stop() }
 }

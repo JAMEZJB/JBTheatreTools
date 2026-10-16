@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
+using System.Text.Json.Nodes;
 
 namespace JBTheatreTools;
 
@@ -211,6 +213,7 @@ public sealed class MainForm : Form
             PrepareLauncherWhatsNew();
             ApplyLock();
             _scheduler.Start();
+            _ = StartWebTriggerAsync();   // only this window's process listens, and only when switched on in Settings
             ShowNotice(AuthClient.HasCredentials(_settings, _catalog.DownloadServer) ? null : NoCredsMsg);
             if (_settings.UpdateMode == "everyLaunch")
             {
@@ -1175,14 +1178,14 @@ public sealed class MainForm : Form
         SetShowLock(on);
     }
 
-    private void SetShowLock(bool on, bool fromClaudeFile = false)
+    private void SetShowLock(bool on, bool fromClaudeFile = false, string? by = null)
     {
         if (_settings.ShowLock == on) return;
         _settings.ShowLock = on;
         _settings.Save();
         if (!fromClaudeFile) ClaudeSettingsFile.SetSuiteShowLock(on);
         ApplyLock();
-        Log.Write($"show lock {(on ? "on" : "off")}{(fromClaudeFile ? " (set in Stagehand or an app)" : "")}");
+        Log.Write($"show lock {(on ? "on" : "off")}{(fromClaudeFile ? " (set in Stagehand or an app)" : "")}{(by != null ? $" ({by})" : "")}");
         if (on) StopEverything();
     }
 
@@ -1943,6 +1946,7 @@ public sealed class MainForm : Form
             return;
         }
         _scheduler.Stop();
+        _webTrigger?.Server.Stop();   // the port closes with the window (kept running in the tray, it stays open)
         _tray.Visible = false;
         _tray.Dispose();
     }
@@ -2681,7 +2685,12 @@ public sealed class MainForm : Form
             BackUpAll: BackUpAll,
             RestoreAll: owner => launcherRestored = RestoreAll(owner),
             OpenStagehand: _catalog.Apps.Any(a => a.Id == StagehandId) ? OpenStagehand : null,
-            StagehandInstalled: () => InstallManager.Shared.InstalledVersion(StagehandId) != null));
+            StagehandInstalled: () => InstallManager.Shared.InstalledVersion(StagehandId) != null,
+            ApplyWebTrigger: ApplyWebTrigger,
+            WebTriggerStatus: () => LauncherTrigger.Describe(_settings.WebTriggerEnabled, _settings.WebTriggerBind, Trigger.Server),
+            WebTriggerApps: TriggerAppChoices,
+            WebTriggerHasToken: () => _triggerToken.Length > 0,
+            WebTriggerTokenChanged: ReloadTriggerToken));
         dlg.ApplyTheme(Theme.IsDark(_settings.Appearance));
         // Settings has no Cancel: every control edits the live settings object as it changes (as the mac sheet does), so
         // closing it with its X is the same as Done. (Only Done used to apply and save them: after the X the window
@@ -2983,6 +2992,129 @@ public sealed class MainForm : Form
         }
         ApplyViewMode();
         ShowNotice(AuthClient.HasCredentials(_settings, _catalog.DownloadServer) ? null : NoCredsMsg);
+        ReloadTriggerToken();   // a restore may have brought the web trigger's token
+    }
+
+    // ── Dashboard web trigger: a Show Dashboard button opens a ticked app, turns show lock on, or reads the status ──
+
+    private LauncherTrigger? _webTrigger;
+    /// <summary>The trigger's token from Credential Manager ('' = none), read at start and after every change.</summary>
+    private string _triggerToken = "";
+
+    private LauncherTrigger Trigger => _webTrigger ??= new LauncherTrigger(new TriggerHost(this), OnWindow, () => _triggerToken, Log.Write);
+
+    private void ReloadTriggerToken()
+    {
+        try { _triggerToken = TokenStore.LoadTriggerToken() ?? ""; }
+        catch (Exception ex)
+        {
+            // Unreadable: refuse every press (an unguessable stand-in) rather than run without the token that was set.
+            _triggerToken = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            Log.Write($"web trigger: couldn't read its token ({ex.GetType().Name}) — every press is refused until it's set again");
+        }
+    }
+
+    /// <summary>At start: switched on → listen. A launcher that has just updated itself may still hold the port for a few
+    /// seconds while the old copy closes, so a taken port is tried again for a little while.</summary>
+    private async Task StartWebTriggerAsync()
+    {
+        ReloadTriggerToken();
+        for (int attempt = 0; attempt < 8; attempt++)
+        {
+            if (ApplyWebTrigger().Length == 0 || !_settings.WebTriggerEnabled || !Trigger.Server.PortTaken) return;
+            await Task.Delay(2000);
+            if (IsDisposed || _reallyQuit) return;
+        }
+    }
+
+    /// <summary>Starts, restarts or stops the listener to match Settings. Returns '' or why it isn't listening.</summary>
+    private string ApplyWebTrigger()
+    {
+        var server = Trigger.Server;
+        if (!_settings.WebTriggerEnabled) { server.Stop(); server.Error = ""; return ""; }
+        var bind = (_settings.WebTriggerBind ?? "").Trim();
+        var problem = WebTriggerContract.BindProblem(bind, _settings.WebTriggerPort.ToString(CultureInfo.InvariantCulture), _triggerToken.Length > 0);
+        if (problem.Length > 0)
+        {
+            server.Stop();
+            server.Error = problem;
+            Log.Write($"web trigger: not listening — {problem}");
+            return problem;
+        }
+        if (server.Running && server.Address == $"{bind}:{_settings.WebTriggerPort}") return "";
+        var err = server.Start(bind, _settings.WebTriggerPort);
+        if (err.Length > 0) Log.Write(err);
+        return err;
+    }
+
+    /// <summary>The apps Settings offers to tick: installed ones, and any already ticked (so they can be unticked).</summary>
+    private IReadOnlyList<(string Id, string Name)> TriggerAppChoices() =>
+        _catalog.Apps.Where(a => _settings.WebTriggerApps.Contains(a.Id) ||
+                                 a.SlotsFullFirst().Any(s => InstallManager.Shared.InstalledVersion(s.Key) != null))
+            .Select(a => (a.Id, a.Name)).ToList();
+
+    /// <summary>Runs an action on this window's thread (where every button's work runs) and waits for its answer — at
+    /// most 10 s, so a window stuck behind something can't hold the dashboard's request for ever.</summary>
+    private (int, JsonObject) OnWindow(Func<(int, JsonObject)> work)
+    {
+        static (int, JsonObject) NoAnswer() => (502, new JsonObject
+        {
+            ["ok"] = false, ["error"] = "JB Theatre Tools didn't answer in time.", ["summary"] = "the launcher didn't answer in time",
+        });
+        if (IsDisposed || Disposing || !IsHandleCreated) return NoAnswer();
+        if (!InvokeRequired) return work();
+        Exception? failure = null;
+        (int, JsonObject) result;
+        try
+        {
+            var pending = BeginInvoke(new Func<(int, JsonObject)>(() =>
+            {
+                try { return work(); }
+                catch (Exception ex) { failure = ex; return default; }
+            }));
+            if (!pending.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(10))) return NoAnswer();
+            result = ((int, JsonObject))EndInvoke(pending)!;
+        }
+        catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException) { return NoAnswer(); }
+        if (failure != null) ExceptionDispatchInfo.Throw(failure);   // the listener answers 502 and logs it
+        return result;
+    }
+
+    /// <summary>What the trigger's actions see of this window — always called on the window's thread (OnWindow).</summary>
+    private sealed class TriggerHost(MainForm f) : ILauncherActionHost
+    {
+        public bool ShowLock => f._settings.ShowLock;
+
+        /// <summary>Exactly Ctrl+L: the launcher's lock, the suite lock in claude.json, and every download stopped.</summary>
+        public int TurnShowLockOn(string source)
+        {
+            int downloads = f._rowCts.Count;
+            f.SetShowLock(true, by: source);
+            return downloads;
+        }
+
+        public IReadOnlyList<LauncherActions.App> Apps() => f._catalog.Apps
+            .Select(a => new LauncherActions.App(a.Id, a.Name,
+                a.SlotsFullFirst().Select(s => new LauncherActions.Slot(s.Key, a.VariantSuffix(s.Edition))).ToList()))
+            .ToList();
+
+        public IReadOnlyCollection<string> TickedApps() => f._settings.WebTriggerApps.ToList();
+        public string? InstalledVersion(string slotKey) => InstallManager.Shared.InstalledVersion(slotKey);
+        public bool SlotBusy(string slotKey) => f._slotsInFlight.Contains(slotKey) || f._slotsInstalling.Contains(slotKey);
+
+        public bool IsOpen(string slotKey)
+        {
+            var open = InstallManager.Shared.RunningInstances(slotKey);
+            foreach (var p in open) p.Dispose();
+            return open.Length > 0;
+        }
+
+        public void Launch(string slotKey) => InstallManager.Shared.Launch(slotKey);
+
+        public LauncherActions.Facts Status() =>
+            new(f._settings.ShowLock, f._rows.Count(r => r.Installed != null), f.UpdatesAvailable(), f._lastCheck, CurrentVersion());
+
+        public void Log(string line) => JBTheatreTools.Log.Write(line);
     }
 
     /// <summary>Opens Stagehand (Settings and the More menu offer it only once it's installed — it's in the list like any

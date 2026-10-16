@@ -28,6 +28,12 @@ public sealed class AppSettings
     public string LastSeenLauncherVersion { get; set; } = ""; // drives the one-time "Updated to vX" banner
     public List<string> LauncherHomes { get; set; } = new(); // launcher exe paths installed to or kept ("Keep Here"): never offer to install from them
     public bool AlwaysShowTray { get; set; }              // keep the notification-area icon (quick launch) while the window is open
+    // Dashboard web trigger (Settings → Dashboard web trigger): OFF by default; 127.0.0.1 unless another address of this
+    // computer is chosen; the apps a Show Dashboard button may open (none until ticked). The token is in Credential Manager.
+    public bool WebTriggerEnabled { get; set; }
+    public string WebTriggerBind { get; set; } = WebTriggerContract.DefaultBind;
+    public int WebTriggerPort { get; set; } = WebTriggerContract.DefaultPort;
+    public List<string> WebTriggerApps { get; set; } = new();
     public string ServerUrl { get; set; } = "";           // user-INVISIBLE relay-URL override (settings.json only, no UI); normally
                                                           // empty — the URL comes from the catalog's downloadServer
 

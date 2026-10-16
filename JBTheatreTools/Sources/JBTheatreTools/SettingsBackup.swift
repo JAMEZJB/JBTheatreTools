@@ -116,7 +116,7 @@ final class FilePrefs: LauncherPrefs {
     }
 }
 
-/// The launcher's saved passwords: the download passphrase and the GitHub token. Names only until the user ticks
+/// The launcher's saved passwords: the download passphrase, the GitHub token and the web trigger's token. Names only until the user ticks
 /// "Include saved passwords" — only then is a value read.
 protocol LauncherSecrets {
     /// Every password saved on this computer, by name, with its plain label. Never reads a value.
@@ -130,12 +130,14 @@ struct KeychainLauncherSecrets: LauncherSecrets {
         var out: [(String, String)] = []
         if ServerAuthStore.exists() { out.append(("downloadPassphrase", "Download passphrase")) }
         if TokenStore.exists() { out.append(("githubToken", "GitHub token")) }
+        if WebTriggerStore.exists() { out.append(("webTriggerToken", "Web trigger token")) }
         return out
     }
     func read() -> [String: String] {
         var out: [String: String] = [:]
         if ServerAuthStore.exists(), let v = ServerAuthStore.load() { out["downloadPassphrase"] = v }
         if TokenStore.exists(), let v = TokenStore.load() { out["githubToken"] = v }
+        if WebTriggerStore.exists(), let v = WebTriggerStore.load() { out["webTriggerToken"] = v }
         return out
     }
     func write(_ values: [String: String]) throws {
@@ -144,6 +146,9 @@ struct KeychainLauncherSecrets: LauncherSecrets {
         }
         if let v = values["githubToken"], !v.isEmpty, !TokenStore.save(v) {
             throw SuiteBackup.Failure.other("Couldn't save the GitHub token in the Keychain.")
+        }
+        if let v = values["webTriggerToken"], !v.isEmpty, !WebTriggerStore.save(v) {
+            throw SuiteBackup.Failure.other("Couldn't save the web trigger token in the Keychain.")
         }
     }
 }
@@ -192,10 +197,14 @@ enum LauncherSettings {
         ("categoryOrder", "theatre.categoryOrder", .strings),
         ("collapsedCategories", "theatre.collapsedCategories", .strings),
         ("appVariants", "theatre.appVariants", .map),
+        // The Dashboard web trigger's "Apps a button may open" ticks. Whether it listens, and on which address and port,
+        // stays with this computer: a restore never opens a port.
+        ("webTriggerApps", AppState.webTriggerAppsKey, .strings),
     ]
 
     static let secretLabels: [(name: String, label: String)] = [
         ("downloadPassphrase", "Download passphrase"), ("githubToken", "GitHub token"),
+        ("webTriggerToken", "Web trigger token"),
     ]
 
     /// The Mac keeps the Pinned section under a control-character key; the file uses the plain word (as Windows does).

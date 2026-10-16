@@ -466,6 +466,48 @@ internal sealed class ReleaseNotesDialog : Form
     }
 }
 
+/// <summary>Settings → Dashboard web trigger → How it works…: what each action does, the Show Dashboard button, and what
+/// each reply means (the same words as on macOS — Core's WebTriggerGuide).</summary>
+internal sealed class WebTriggerGuideDialog : Form
+{
+    private readonly List<Font> _fonts = new();
+
+    public WebTriggerGuideDialog(int port, bool dark)
+    {
+        Text = "Dashboard web trigger";
+        DialogKit.Style(this, dark, new Size(600, 540), sizable: true);
+        var reader = DialogKit.Reader(dark);
+        var buttons = DialogKit.ButtonRow();
+        var close = DialogKit.Button("Close", DialogResult.Cancel);
+        buttons.Controls.Add(close);
+        CancelButton = close;
+        Load += (_, _) => ActiveControl = close;
+        Controls.Add(DialogKit.Padded(reader, dark));
+        Controls.Add(buttons);
+        ResumeLayout(false);
+        Load += (_, _) =>
+        {
+            Font F(float pt, bool semi = false) { var f = Theme.Ui(pt, semi, DeviceDpi); _fonts.Add(f); return f; }
+            Font head = F(Theme.PtTitle, true), body = F(Theme.PtBody);
+            DialogKit.SetRedraw(reader, false);
+            try
+            {
+                var sections = WebTriggerGuide.Sections(port);
+                for (int i = 0; i < sections.Count; i++)
+                {
+                    if (i > 0) DialogKit.Append(reader, "\n\n", body, Theme.Fg(dark));
+                    DialogKit.Append(reader, sections[i].Heading, head, Theme.Fg(dark));
+                    DialogKit.Append(reader, "\n" + sections[i].Body, body, Theme.Fg(dark));
+                }
+                reader.SelectionStart = 0;
+                reader.ScrollToCaret();
+            }
+            finally { DialogKit.SetRedraw(reader, true); }
+        };
+        FormClosed += (_, _) => { foreach (var f in _fonts) f.Dispose(); };
+    }
+}
+
 /// <summary>The activity history, newest first: "Today 14:02   Updated DMX Tools v1.1.0 → v1.2.0".</summary>
 internal sealed class HistoryDialog : Form
 {

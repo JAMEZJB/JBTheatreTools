@@ -33,6 +33,7 @@ internal sealed class WinLauncherPrefs : ILauncherPrefs
         "categoryOrder" => Arr(_s.CategoryOrder),
         "collapsedCategories" => Arr(_s.CollapsedCategories),
         "appVariants" => new JsonObject(_s.AppVariants.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value))),
+        "webTriggerApps" => Arr(_s.WebTriggerApps),
         _ => null,
     };
 
@@ -58,12 +59,13 @@ internal sealed class WinLauncherPrefs : ILauncherPrefs
             case "categoryOrder": _s.CategoryOrder = List(v); break;
             case "collapsedCategories": _s.CollapsedCategories = List(v); break;
             case "appVariants": _s.AppVariants = v.AsObject().ToDictionary(kv => kv.Key, kv => kv.Value!.GetValue<string>()); break;
+            case "webTriggerApps": _s.WebTriggerApps = List(v); break;
         }
     }
 }
 
-/// <summary>The download passphrase and the GitHub token in Credential Manager. Only read when the user includes
-/// passwords in a backup.</summary>
+/// <summary>The download passphrase, the GitHub token and the web trigger's token in Credential Manager. Only read when
+/// the user includes passwords in a backup.</summary>
 internal sealed class CredentialLauncherSecrets : ILauncherSecrets
 {
     public IReadOnlyList<(string Name, string Label)> Present()
@@ -71,6 +73,7 @@ internal sealed class CredentialLauncherSecrets : ILauncherSecrets
         var list = new List<(string, string)>();
         try { if (!string.IsNullOrEmpty(TokenStore.LoadServerPass())) list.Add(("downloadPassphrase", "Download passphrase")); } catch (Exception) { }
         try { if (!string.IsNullOrEmpty(TokenStore.Load())) list.Add(("githubToken", "GitHub token")); } catch (Exception) { }
+        try { if (!string.IsNullOrEmpty(TokenStore.LoadTriggerToken())) list.Add(("webTriggerToken", "Web trigger token")); } catch (Exception) { }
         return list;
     }
 
@@ -79,6 +82,7 @@ internal sealed class CredentialLauncherSecrets : ILauncherSecrets
         var d = new Dictionary<string, string>();
         if (TokenStore.LoadServerPass() is { Length: > 0 } p) d["downloadPassphrase"] = p;
         if (TokenStore.Load() is { Length: > 0 } t) d["githubToken"] = t;
+        if (TokenStore.LoadTriggerToken() is { Length: > 0 } w) d["webTriggerToken"] = w;
         return d;
     }
 
@@ -88,6 +92,8 @@ internal sealed class CredentialLauncherSecrets : ILauncherSecrets
             throw new IOException("Couldn't save the download passphrase in Credential Manager.");
         if (values.TryGetValue("githubToken", out var t) && t.Length > 0 && !TokenStore.Save(t))
             throw new IOException("Couldn't save the GitHub token in Credential Manager.");
+        if (values.TryGetValue("webTriggerToken", out var w) && w.Length > 0 && !TokenStore.SaveTriggerToken(w))
+            throw new IOException("Couldn't save the web trigger token in Credential Manager.");
     }
 }
 

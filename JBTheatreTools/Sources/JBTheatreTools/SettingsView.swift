@@ -30,6 +30,14 @@ struct SettingsView: View {
     @State private var backupSheet: BackupSheet?
     @State private var restoreError: String?
     @State private var openingBackup = false
+    // Dashboard web trigger: the fields as typed (applied by Save or the switch); the token is never shown back.
+    @State private var triggerOn = false
+    @State private var triggerBind = ""
+    @State private var triggerPort = ""
+    @State private var triggerToken = ""
+    @State private var triggerHasToken = false
+    @State private var confirmingTriggerTokenRemove = false
+    @State private var showingTriggerGuide = false
 
     enum BackupSheet: Identifiable {
         case backup(BackupAllModel)
@@ -314,6 +322,94 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
 
+        GroupBox(label: panelLabel("Dashboard web trigger", "dot.radiowaves.left.and.right")) {
+            // Grouped: a view builder takes at most ten children.
+            VStack(alignment: .leading, spacing: 8) {
+                Group {
+                    Toggle("Switch on the web trigger", isOn: Binding(get: { triggerOn }, set: { triggerOn = $0; saveTrigger() }))
+                    Text("Lets a Show Dashboard button open an app you tick below, turn show lock on, or read this launcher's status. It listens only while JB Theatre Tools is running.")
+                        .font(JBFont.small).foregroundStyle(Color.jbText2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Text("Listen on").font(JBFont.body)
+                        Spacer()
+                        TextField(WebTriggerContract.defaultBind, text: $triggerBind)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 180)
+                    }
+                    HStack {
+                        Text("Port").font(JBFont.body)
+                        Spacer()
+                        TextField(String(WebTriggerContract.defaultPort), text: $triggerPort)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 180)
+                    }
+                }
+                Group {
+                    Text(triggerHasToken
+                         ? "A token is set. It's never shown again; type a new one to change it."
+                         : "No token: any program that can reach the port can press. Set one for any address but 127.0.0.1.")
+                        .font(JBFont.small).foregroundStyle(Color.jbText2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    SecureField("New token (8 to 200 characters)\u{2026}", text: $triggerToken)
+                        .textFieldStyle(.roundedBorder)
+                    HStack {
+                        Button("Save") { saveTrigger() }
+                        if triggerHasToken {
+                            Button("Remove Token", role: .destructive) { confirmingTriggerTokenRemove = true }
+                        }
+                        Spacer()
+                    }
+                    if !state.webTriggerStatusText.isEmpty {
+                        Text(state.webTriggerStatusText)
+                            .font(JBFont.small)
+                            .foregroundStyle(state.webTriggerProblem ? Color.jbDanger : (state.webTriggerOn ? Color.jbOk : Color.jbText2))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                }
+                Divider()
+                Group {
+                    Text("Apps a button may open").font(JBFont.body)
+                    if state.webTriggerChoices.isEmpty {
+                        Text("Nothing installed yet: only installed apps can be ticked.")
+                            .font(JBFont.small).foregroundStyle(Color.jbText2)
+                    }
+                    ForEach(state.webTriggerChoices, id: \.id) { app in
+                        Toggle("\(app.name)  \u{00B7}  open-\(app.id)", isOn: Binding(
+                            get: { state.webTriggerApps.contains(app.id) },
+                            set: { state.setWebTriggerApp(app.id, $0) }))
+                    }
+                    Button("How it works\u{2026}") { showingTriggerGuide = true }
+                        .tint(.selectorBlue)
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onAppear {
+                triggerOn = state.webTriggerOn
+                triggerBind = state.webTriggerBind
+                triggerPort = String(state.webTriggerPort)
+                triggerHasToken = WebTriggerStore.exists()
+                state.refreshWebTriggerStatus()
+            }
+            .confirmationDialog("Remove the web trigger's token?", isPresented: $confirmingTriggerTokenRemove, titleVisibility: .visible) {
+                Button("Remove", role: .destructive) {
+                    Task {
+                        await state.removeWebTriggerToken()
+                        triggerOn = state.webTriggerOn
+                        triggerHasToken = WebTriggerStore.exists()
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Buttons then work without one, and listening on every network (0.0.0.0) switches off.")
+            }
+            .sheet(isPresented: $showingTriggerGuide) {
+                WebTriggerGuideView(port: state.webTriggerPort)
+            }
+        }
+
         if state.hasHiddenApps {
             GroupBox(label: panelLabel("Hidden apps", "eye.slash")) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -537,6 +633,22 @@ struct SettingsView: View {
         storage = await state.storageSizes()
     }
 
+    /// Save (and the switch): the address, port and any new token are checked and applied at once; a problem shows in
+    /// the status line and leaves what was in force as it was.
+    private func saveTrigger() {
+        let word = triggerToken
+        Task {
+            let problem = await state.saveWebTrigger(enabled: triggerOn, bind: triggerBind, port: triggerPort, newToken: word)
+            if problem.isEmpty { triggerToken = "" }
+            triggerOn = state.webTriggerOn
+            if problem.isEmpty {
+                triggerBind = state.webTriggerBind
+                triggerPort = String(state.webTriggerPort)
+            }
+            triggerHasToken = WebTriggerStore.exists()
+        }
+    }
+
     private var updateModeHint: String {
         switch updateMode {
         case .everyLaunch:
@@ -574,5 +686,38 @@ struct SettingsView: View {
         case .unavailable(let message):
             Text(message).font(JBFont.small).foregroundStyle(Color.jbText2)
         }
+    }
+}
+
+/// Settings → Dashboard web trigger → How it works…: what each action does, the Show Dashboard button, and what each
+/// reply means (the same words as Windows — WebTriggerGuide).
+struct WebTriggerGuideView: View {
+    let port: Int
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Dashboard web trigger").font(JBFont.title).foregroundStyle(Color.jbText)
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(WebTriggerGuide.sections(port: port), id: \.heading) { section in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(section.heading).font(JBFont.bodyStrong).foregroundStyle(Color.jbText)
+                            Text(section.body).font(JBFont.body).foregroundStyle(Color.jbText2)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack {
+                Spacer()
+                Button("Close") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(22)
+        .frame(width: 560, height: 520)
+        .background(Color.jbGround)
     }
 }
