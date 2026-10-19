@@ -930,9 +930,11 @@ public sealed class MainForm : Form
             row.SetState(now, row.Latest, row.LatestAssetId, row.Status);
             RecomputeRow(row);
             row.SetResolvedName(now == null ? null : InstallManager.Shared.InstalledDisplayName(key));
+            if (now != null) _eligible.Add(row.App.Id);
             changed++;
         }
         if (changed == 0) return;
+        ReindexList();
         RefreshDownloadAllButton();
         Log.Write($"install list changed outside this window: {changed} row(s) updated");
     }
