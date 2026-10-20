@@ -876,6 +876,7 @@ public sealed class MainForm : Form
         var key = InstallKey(row.App);
         row.SetState(InstallManager.Shared.InstalledVersion(key), row.Latest, row.LatestAssetId, row.Status);
         RecomputeRow(row);
+        ReindexList();
         RefreshDownloadAllButton();   // the edition the row shows is the one Download All installs
         Log.Write($"variant for {row.App.Id} → {variantId}");
     }
