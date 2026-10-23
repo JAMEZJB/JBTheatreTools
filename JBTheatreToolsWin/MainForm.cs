@@ -64,7 +64,7 @@ public sealed class MainForm : Form
     private bool _showCheckingStatus;
     private bool _batchRunning;
     private CancellationTokenSource? _batchCts;
-    private readonly Dictionary<AppRowControl, CancellationTokenSource> _rowCts = new();
+    private readonly Dictionary<AppRowControl, Dictionary<string, CancellationTokenSource>> _rowCts = new();
     private bool _hiddenToTray;
     private bool _balloonShowing;
     private bool _historyOpening;
@@ -786,6 +786,7 @@ public sealed class MainForm : Form
             row.VariantChangeRequested += (r, vid) => SetVariant(r, vid);
             row.SelectedVariantQuery = r => SelectedVariant(r.App);
             row.CancelRequested += CancelRow;
+            row.CancellationAvailableQuery = r => _rowCts.TryGetValue(r, out var downloads) && downloads.Values.Any(cts => !cts.IsCancellationRequested);
             row.HoldToggleRequested += ToggleHold;
             row.IsHeldQuery = r => IsHeld(r.App.Id);
             row.DetailsRequested += ShowDetails;
@@ -1221,7 +1222,11 @@ public sealed class MainForm : Form
     private void StopEverything()
     {
         StopBatch();
-        foreach (var cts in _rowCts.Values.ToList()) cts.Cancel();
+        foreach (var entry in _rowCts.ToArray())
+        {
+            try { foreach (var cts in entry.Value.Values.ToArray()) cts.Cancel(); }
+            finally { entry.Key.RefreshCancellation(); }
+        }
     }
 
     /// <summary>Reflects the show-lock setting everywhere: the banner, every row, the Download All button.</summary>
@@ -1991,11 +1996,20 @@ public sealed class MainForm : Form
         return await InstallDownloadedAsync(d, interactive);
     }
 
-    /// <summary>Cancels the row's in-flight download (Cancel button / menu). Not an error: the row goes back to how
-    /// it was, and the partial file is removed.</summary>
+    /// <summary>Cancels every active download for this row (Cancel button / menu), including an overlapping
+    /// edition or retry. Cancellation is not a failure; each transfer removes its own partial file.</summary>
     private void CancelRow(AppRowControl row)
     {
-        if (_rowCts.TryGetValue(row, out var cts)) { Log.Write($"install {row.App.Id}: cancel requested"); cts.Cancel(); }
+        try
+        {
+            if (_rowCts.TryGetValue(row, out var downloads))
+            {
+                var active = downloads.Values.Where(cts => !cts.IsCancellationRequested).ToArray();
+                if (active.Length > 0) Log.Write($"install {row.App.Id}: cancel requested");
+                foreach (var cts in active) cts.Cancel();
+            }
+        }
+        finally { row.RefreshCancellation(); }
     }
 
     /// <summary>A latest-version slot of an app that's held and already installed (a hold set after the batch started).</summary>
@@ -2008,6 +2022,7 @@ public sealed class MainForm : Form
         if (_batchCts == null) return;
         Log.Write("batch: stop requested");
         _batchCts.Cancel();
+        foreach (var row in _rowCts.Keys.ToArray()) row.RefreshCancellation();
         RefreshDownloadAllButton();   // "Stopping…" until the app that's installing finishes
     }
 
@@ -2069,9 +2084,12 @@ public sealed class MainForm : Form
         row.SetBusy(true);
         row.SetPhase("Downloading…", cancellable: true);
         var cts = CancellationTokenSource.CreateLinkedTokenSource(batchToken);
-        _rowCts[row] = cts;
+        var downloadKey = row.App.InstallKey(variantId);
+        if (!_rowCts.TryGetValue(row, out var downloads)) _rowCts[row] = downloads = new();
+        downloads[downloadKey] = cts;
         try
         {
+            row.RefreshCancellation();
             var releases = row.Releases.Count > 0
                 ? row.Releases
                 : await client.ReleasesAsync(row.App.Owner, row.App.Repo);
@@ -2119,8 +2137,13 @@ public sealed class MainForm : Form
         }
         finally
         {
-            if (_rowCts.TryGetValue(row, out var mine) && mine == cts) _rowCts.Remove(row);
+            if (_rowCts.TryGetValue(row, out var active) && active.TryGetValue(downloadKey, out var mine) && mine == cts)
+            {
+                active.Remove(downloadKey);
+                if (active.Count == 0) _rowCts.Remove(row);
+            }
             cts.Dispose();
+            row.RefreshCancellation();
         }
     }
 
@@ -2356,7 +2379,11 @@ public sealed class MainForm : Form
                 {
                     if (next != null)
                     {
-                        if (_rowCts.TryGetValue(row, out var lookAhead)) lookAhead.Cancel();   // its look-ahead: no point finishing it
+                        if (_rowCts.TryGetValue(row, out var downloads) && downloads.TryGetValue(key, out var lookAhead))
+                        {
+                            try { lookAhead.Cancel(); }   // this skipped slot only; another edition may still be downloading
+                            finally { row.RefreshCancellation(); }
+                        }
                         var skipped = await next;
                         if (skipped != null) DiscardDownloaded(skipped);
                     }
@@ -3128,7 +3155,7 @@ public sealed class MainForm : Form
         /// <summary>Exactly Ctrl+L: the launcher's lock, the suite lock in claude.json, and every download stopped.</summary>
         public int TurnShowLockOn(string source)
         {
-            int downloads = f._rowCts.Count;
+            int downloads = f._rowCts.Values.Sum(active => active.Count);
             f.SetShowLock(true, by: source);
             return downloads;
         }

@@ -204,6 +204,8 @@ public sealed class AppRowControl : UserControl
     public Func<AppRowControl, string?>? SelectedVariantQuery;
     /// <summary>Cancel the in-flight download (row button or menu).</summary>
     public event Action<AppRowControl>? CancelRequested;
+    /// <summary>When supplied, cancellation follows the active download rather than a shared row phase.</summary>
+    public Func<AppRowControl, bool>? CancellationAvailableQuery;
     /// <summary>Hold / release the app at its installed version, and whether it's held now.</summary>
     public event Action<AppRowControl>? HoldToggleRequested;
     public Func<AppRowControl, bool>? IsHeldQuery;
@@ -577,7 +579,7 @@ public sealed class AppRowControl : UserControl
                 open.Click += (_, _) => LaunchRequested?.Invoke(this);
                 menu.Items.Add(open);
             }
-            if (_cancellable)
+            if (CanCancel)
             {
                 var stop = new ToolStripMenuItem("Cancel download") { ToolTipText = "Stop this download" };
                 stop.Click += (_, _) => CancelRequested?.Invoke(this);
@@ -767,7 +769,7 @@ public sealed class AppRowControl : UserControl
             return c.Left - spacing;
         }
         rx = Place(_more, S(6));
-        _cancel.Visible = _cancellable;
+        _cancel.Visible = CanCancel;
         if (_cancel.Visible) rx = Place(_cancel, S(8));
         if (_launch.Visible) rx = Place(_launch, S(8));
         if (_install.Visible) rx = Place(_install, S(8));
@@ -1133,6 +1135,11 @@ public sealed class AppRowControl : UserControl
 
     /// <summary>Re-evaluates the Launch button (MainForm calls it when a slot enters or leaves verify / install).</summary>
     public void RefreshLaunch() => _launch.Enabled = CanLaunch;
+
+    private bool CanCancel => CancellationAvailableQuery?.Invoke(this) ?? _cancellable;
+
+    /// <summary>Refreshes the Cancel control when its active download starts or ends.</summary>
+    public void RefreshCancellation() => LayoutControls();
 
     /// <summary>The control's own background — which its child labels inherit. A list row is a surface
     /// that lifts on hover; a GRID TILE is the panel fill (raised on hover, sunken while pressed), with OnPaint
