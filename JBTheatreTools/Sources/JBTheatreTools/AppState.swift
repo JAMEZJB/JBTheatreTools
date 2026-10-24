@@ -334,6 +334,7 @@ final class AppState: ObservableObject {
             // connectors.json follows every install from here; brought in step now off the main thread (it may wait
             // for another launcher process that is installing — that one brings it in step itself after).
             let apps = catalog.apps
+            InstallManager.shared.useCatalog(apps)
             Task.detached(priority: .utility) { InstallManager.shared.followConnectors(apps, wait: 10) }
             watchManifest()   // installs another launcher process makes (Stagehand runs the command line) show here too
             let known = Set(catalog.apps.map(\.id))

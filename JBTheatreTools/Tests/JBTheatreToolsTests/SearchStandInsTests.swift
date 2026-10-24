@@ -35,9 +35,46 @@ final class SearchStandInsTests: XCTestCase {
 
     private func standIn(_ name: String) -> URL { standIns.root.appendingPathComponent("\(name).app") }
 
+    /// The catalog's names for each install slot.
+    private let names = ["pdftools": "PDF Tools", "pdftools@full": "PDF Tools (Full)", "convert": "Convert Tools",
+                         "showdashboard": "Show Dashboard"]
+
+    func testStandInsUseTheCatalogNameNotTheBundles() throws {
+        // Real bundles are called all sorts ("convert-to-it", "ShowDashboard", "Image Tools Full (Full)").
+        let convert = try realApp("convert-to-it"), dash = try realApp("ShowDashboard")
+        standIns.sync(["convert": rec(convert, "build-1"), "showdashboard": rec(dash, "v1.27.3")], names: names)
+        XCTAssertEqual(SearchStandIns.standInTarget(standIn("Convert Tools")), convert.path)
+        XCTAssertEqual(SearchStandIns.standInTarget(standIn("Show Dashboard")), dash.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: standIn("convert-to-it").path))
+        // A slot the catalog doesn't name gets none (rather than a wrong one).
+        let odd = try realApp("Mystery")
+        standIns.sync(["mystery": rec(odd, "v1")], names: names)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: standIn("Mystery").path))
+    }
+
+    func testOlderStandInsAreRebuiltAndWronglyNamedOnesRemoved() throws {
+        // 1.38.0 made them from the bundle name, with LSUIElement and no format number.
+        let convert = try realApp("convert-to-it")
+        let old = standIns.root.appendingPathComponent("convert-to-it.app")
+        try FileManager.default.createDirectory(at: old.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        let plist: [String: Any] = [SearchStandIns.markerKey: convert.path, SearchStandIns.versionKey: "build-1", "LSUIElement": true]
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: old.appendingPathComponent("Contents/Info.plist"))
+        let pdf = try realApp("PDF Tools")
+        let sameName = standIn("PDF Tools")
+        try FileManager.default.createDirectory(at: sameName.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: [SearchStandIns.markerKey: pdf.path, SearchStandIns.versionKey: "v1", "LSUIElement": true] as [String: Any],
+                                           format: .xml, options: 0).write(to: sameName.appendingPathComponent("Contents/Info.plist"))
+        standIns.sync(["convert": rec(convert, "build-1"), "pdftools": rec(pdf, "v1")], names: names)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path), "the wrongly named one goes")
+        XCTAssertNotNil(SearchStandIns.standInTarget(standIn("Convert Tools")))
+        let info = try XCTUnwrap(SearchStandIns.info(sameName))
+        XCTAssertEqual(info[SearchStandIns.formatKey] as? Int, SearchStandIns.format, "same version, but rebuilt in the new shape")
+        XCTAssertNil(info["LSUIElement"])
+    }
+
     func testEachLauncherFolderAppGetsAStandInThatOpensIt() throws {
         let pdf = try realApp("PDF Tools"), full = try realApp("PDF Tools (Full)")
-        standIns.sync(["pdftools": rec(pdf, "v0.10.0"), "pdftools@full": rec(full, "v0.10.1-dev.2")])
+        standIns.sync(["pdftools": rec(pdf, "v0.10.0"), "pdftools@full": rec(full, "v0.10.1-dev.2")], names: names)
         for (name, app) in [("PDF Tools", pdf), ("PDF Tools (Full)", full)] {
             let s = standIn(name)
             XCTAssertEqual(SearchStandIns.standInTarget(s), app.path)
@@ -48,19 +85,19 @@ final class SearchStandInsTests: XCTestCase {
             XCTAssertTrue(FileManager.default.fileExists(atPath: s.appendingPathComponent("Contents/Resources/AppIcon.icns").path))
             let info = try XCTUnwrap(NSDictionary(contentsOf: s.appendingPathComponent("Contents/Info.plist")))
             XCTAssertEqual(info["CFBundleName"] as? String, name)
-            XCTAssertEqual(info["LSUIElement"] as? Bool, true)
+            XCTAssertNil(info["LSUIElement"], "Spotlight leaves UI-element apps out of its results")
         }
     }
 
     func testAnUpdateRefreshesItAndAMoveToApplicationsOrRemovalTakesItAway() throws {
         let pdf = try realApp("PDF Tools")
-        standIns.sync(["pdftools": rec(pdf, "v1.0.0")])
-        standIns.sync(["pdftools": rec(pdf, "v1.1.0")])
+        standIns.sync(["pdftools": rec(pdf, "v1.0.0")], names: names)
+        standIns.sync(["pdftools": rec(pdf, "v1.1.0")], names: names)
         XCTAssertEqual(SearchStandIns.standInVersion(standIn("PDF Tools")), "v1.1.0")
         // Installed to /Applications instead: it's findable already, so the stand-in goes.
         let elsewhere = root.appendingPathComponent("Applications", isDirectory: true)
         let moved = try realApp("PDF Tools", in: elsewhere)
-        standIns.sync(["pdftools": rec(moved, "v1.1.0")])
+        standIns.sync(["pdftools": rec(moved, "v1.1.0")], names: names)
         XCTAssertFalse(FileManager.default.fileExists(atPath: standIn("PDF Tools").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: standIns.root.path), "an empty stand-in folder is tidied away")
     }
@@ -69,9 +106,9 @@ final class SearchStandInsTests: XCTestCase {
         try FileManager.default.createDirectory(at: standIns.root, withIntermediateDirectories: true)
         let foreign = try realApp("PDF Tools", in: standIns.root)   // not ours: no marker
         let pdf = try realApp("PDF Tools")
-        standIns.sync(["pdftools": rec(pdf, "v1")])
+        standIns.sync(["pdftools": rec(pdf, "v1")], names: names)
         XCTAssertNil(SearchStandIns.standInTarget(foreign), "left as it was, not replaced")
-        standIns.sync([:])
+        standIns.sync([:], names: names)
         XCTAssertTrue(FileManager.default.fileExists(atPath: foreign.path), "and never removed")
     }
 

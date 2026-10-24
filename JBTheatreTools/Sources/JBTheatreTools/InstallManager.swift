@@ -243,7 +243,7 @@ final class InstallManager: @unchecked Sendable {
             try lock.hold(wait: wait) {
                 let m = reloadManifest()
                 if !apps.isEmpty { Connectors.sync(apps: apps, manifest: m, at: connectorsURL) }
-                standIns.sync(m)
+                syncStandIns(m, apps: apps)
             }
         }
         catch { AppLog.shared.log("connectors.json: \(error.localizedDescription)") }
@@ -257,7 +257,24 @@ final class InstallManager: @unchecked Sendable {
         adopt(m)
         let apps = connectorApps
         if !apps.isEmpty { Connectors.sync(apps: apps, manifest: m, at: connectorsURL) }
-        standIns.sync(m)   // Spotlight / Alfred stand-ins follow every install, update, move and removal
+        syncStandIns(m, apps: apps)   // Spotlight / Alfred stand-ins follow every install, update, move and removal
+    }
+
+    /// Only with the catalog known (its names are the ones people search for); without it nothing is made or removed.
+    private func syncStandIns(_ m: [String: InstalledRecord], apps: [CatalogApp]) {
+        guard !apps.isEmpty else { return }
+        var names: [String: String] = [:]
+        for app in apps {
+            let editions: [String?] = app.hasVariants ? (app.variants ?? []).map(\.id) : [nil]
+            for vid in editions { names[app.installKey(variantId: vid)] = app.name + app.variantSuffix(vid) }
+        }
+        standIns.sync(m, names: names)
+    }
+
+    /// The catalog, set as soon as it's loaded (before the connector sync runs in the background), so the first
+    /// install-list write already names the stand-ins.
+    func useCatalog(_ apps: [CatalogApp]) {
+        manifestLock.lock(); connectorAppsValue = apps; manifestLock.unlock()
     }
 
     /// installed.json as it is on disk now, adopted as this process's copy: for the window when another launcher process

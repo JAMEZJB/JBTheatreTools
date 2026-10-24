@@ -14,6 +14,9 @@ struct SearchStandIns {
 
     static let markerKey = "JBTTStandInFor"
     static let versionKey = "JBTTStandInVersion"
+    /// Bumped when a stand-in's own shape changes, so older ones are rebuilt (2: shown in Spotlight; no LSUIElement).
+    static let formatKey = "JBTTStandInFormat"
+    static let format = 2
     private static let executableName = "open-app"
     private var fm: FileManager { .default }
 
@@ -29,14 +32,17 @@ struct SearchStandIns {
             .appendingPathComponent("Applications/JB Theatre Tools", isDirectory: true)
     }
 
-    /// Brings the stand-ins in step with `manifest`. Best effort: a failure is logged and never fails an install.
-    func sync(_ manifest: [String: InstalledRecord]) {
+    /// Brings the stand-ins in step with `manifest`. `names` gives each install slot the name people know it by (the
+    /// catalog's, e.g. "Image Tools (Full)"; an app's own bundle can be called anything); a slot without one gets no
+    /// stand-in. Best effort: a failure is logged and never fails an install.
+    func sync(_ manifest: [String: InstalledRecord], names: [String: String]) {
         let inLauncherFolder = appsDir.standardizedFileURL.path + "/"
         var wanted: [String: (app: URL, version: String)] = [:]   // stand-in file name → real app
-        for rec in manifest.values {
+        for (slot, rec) in manifest {
             let app = URL(fileURLWithPath: rec.path).standardizedFileURL
-            guard app.path.hasPrefix(inLauncherFolder), app.pathExtension == "app", fm.fileExists(atPath: app.path) else { continue }
-            wanted[app.lastPathComponent] = (app, rec.version)
+            guard app.path.hasPrefix(inLauncherFolder), app.pathExtension == "app", fm.fileExists(atPath: app.path),
+                  let name = names[slot].map(Self.fileSafe), !name.isEmpty else { continue }
+            wanted[name + ".app"] = (app, rec.version)
         }
         // Ours that no longer match an app in the launcher folder go (and nothing else in the folder is touched).
         let existing = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
@@ -47,7 +53,8 @@ struct SearchStandIns {
         }
         for (name, w) in wanted {
             let standIn = root.appendingPathComponent(name, isDirectory: true)
-            if Self.standInTarget(standIn) == w.app.path, Self.standInVersion(standIn) == w.version { continue }
+            if Self.standInTarget(standIn) == w.app.path, Self.standInVersion(standIn) == w.version,
+               Self.info(standIn)?[Self.formatKey] as? Int == Self.format { continue }
             if fm.fileExists(atPath: standIn.path), Self.standInTarget(standIn) == nil { continue }   // someone else's: leave it
             make(standIn, for: w.app, version: w.version)
         }
@@ -65,7 +72,7 @@ struct SearchStandIns {
         info(url)?[versionKey] as? String
     }
 
-    private static func info(_ url: URL) -> [String: Any]? {
+    static func info(_ url: URL) -> [String: Any]? {
         guard let data = try? Data(contentsOf: url.appendingPathComponent("Contents/Info.plist")) else { return nil }
         return try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
     }
@@ -82,8 +89,9 @@ struct SearchStandIns {
                 "CFBundleIdentifier": "com.jamesbreedon.jbtt.standin." + Self.identifierPart(name),
                 "CFBundleExecutable": Self.executableName, "CFBundlePackageType": "APPL",
                 "CFBundleInfoDictionaryVersion": "6.0", "CFBundleShortVersionString": Self.plainVersion(version),
-                "LSUIElement": true,   // only the real app shows in the Dock
-                Self.markerKey: app.path, Self.versionKey: version,
+                // No LSUIElement: Spotlight leaves "UI element" apps out of its results (the Steam stand-ins have none
+                // either). The stand-in's Dock icon only flickers while it hands over to the real app.
+                Self.markerKey: app.path, Self.versionKey: version, Self.formatKey: Self.format,
             ]
             if let icon = Self.iconFile(of: app) {
                 try fm.copyItem(at: icon, to: staging.appendingPathComponent("Contents/Resources/AppIcon.icns"))
@@ -126,6 +134,12 @@ struct SearchStandIns {
         let file = name.hasSuffix(".icns") ? name : name + ".icns"
         let url = resources.appendingPathComponent(file)
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// A name usable as a file name (no "/" or ":"; nothing starting with ".").
+    static func fileSafe(_ name: String) -> String {
+        name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+            .trimmingCharacters(in: CharacterSet(charactersIn: ". ").union(.whitespaces))
     }
 
     static func identifierPart(_ name: String) -> String {
