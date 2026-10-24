@@ -134,6 +134,7 @@ public sealed class InstallManagerIntegrationTests : IDisposable
     public void ShortcutTogglesDoNotRecordFailedCreations()
     {
         manager.Install(app, "v1", Exe(), "Demo.exe", false);
+        manager.SetStartMenuShortcut("demo", "Demo", false);   // taken out, so turning it back on has work to do
         Shortcuts.Succeed = false;
         manager.SyncShortcuts("demo", "Demo", true);
         manager.SetDesktopShortcut("demo", "Demo", true);
@@ -141,6 +142,45 @@ public sealed class InstallManagerIntegrationTests : IDisposable
         Assert.False(manager.HasDesktopShortcut("demo"));
         Assert.False(manager.HasStartMenuShortcut("demo"));
         Assert.True(manager.NeedsShortcutSync("demo", true));
+    }
+
+    [Fact]
+    public void EveryInstallGetsAStartMenuEntryTheSettingOnlyDecidesTheDesktop()
+    {
+        string exe = manager.Install(app, "v1", Exe(), "Demo.exe", false);
+        Assert.Equal(exe, Shortcuts.Start["Demo"]);   // Windows Search finds it
+        Assert.False(Shortcuts.Desktop.ContainsKey("Demo"));
+        Assert.False(manager.NeedsShortcutSync("demo", false));
+        Assert.True(manager.NeedsShortcutSync("demo", true));   // turning the setting on adds only the Desktop one
+        manager.SyncShortcuts("demo", "Demo", true);
+        Assert.True(Shortcuts.Desktop.ContainsKey("Demo"));
+        manager.SyncShortcuts("demo", "Demo", false);           // and off removes only that
+        Assert.False(Shortcuts.Desktop.ContainsKey("Demo"));
+        Assert.True(Shortcuts.Start.ContainsKey("Demo"));
+    }
+
+    [Fact]
+    public void ARemovedStartMenuEntryStaysRemovedThroughUpdatesAndTheStartUpCheck()
+    {
+        manager.Install(app, "v1", Exe(), "Demo.exe", false);
+        manager.SetStartMenuShortcut("demo", "Demo", false);
+        Assert.False(Shortcuts.Start.ContainsKey("Demo"));
+        manager.Install(app, "v2", Exe(), "Demo.exe", false);
+        Assert.Equal(0, manager.EnsureStartMenuEntries(_ => "Demo"));
+        Assert.False(Shortcuts.Start.ContainsKey("Demo"));
+        manager.SetStartMenuShortcut("demo", "Demo", true);     // put back by the person: kept from then on
+        manager.Install(app, "v3", Exe(), "Demo.exe", false);
+        Assert.True(Shortcuts.Start.ContainsKey("Demo"));
+    }
+
+    [Fact]
+    public void TheStartUpCheckAddsAMissingEntry()
+    {
+        string exe = manager.Install(app, "v1", Exe(), "Demo.exe", false);
+        Shortcuts.Start.Clear();                                 // e.g. installed before entries were automatic, or deleted outside
+        Assert.Equal(1, manager.EnsureStartMenuEntries(k => k == "demo" ? "Demo" : null));
+        Assert.Equal(exe, Shortcuts.Start["Demo"]);
+        Assert.Equal(0, manager.EnsureStartMenuEntries(k => k == "demo" ? "Demo" : null));   // nothing more to do
     }
 
     [Fact]

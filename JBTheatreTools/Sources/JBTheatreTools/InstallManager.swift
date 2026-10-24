@@ -145,6 +145,8 @@ final class InstallManager: @unchecked Sendable {
     let cacheDir: URL
     let manifestURL: URL
     let lock: SupportLock
+    /// Stand-ins in ~/Applications/JB Theatre Tools that make launcher-folder apps findable in Spotlight and Alfred.
+    let standIns: SearchStandIns
     private var connectorsURL: URL { supportDir.appendingPathComponent("connectors.json") }
 
     convenience init() {
@@ -164,6 +166,8 @@ final class InstallManager: @unchecked Sendable {
         cacheDir = testSupport != nil ? support.appendingPathComponent("cache", isDirectory: true)
             : fm.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("JBTheatreTools", isDirectory: true)
         lock = SupportLock(directory: support)
+        standIns = SearchStandIns(root: SearchStandIns.defaultRoot(supportDir: support, isTestSupport: testSupport != nil),
+                                  appsDir: support.appendingPathComponent("apps", isDirectory: true))
         try? fm.createDirectory(at: appsDir, withIntermediateDirectories: true)
         try? fm.createDirectory(at: cacheDir, withIntermediateDirectories: true)
     }
@@ -231,11 +235,17 @@ final class InstallManager: @unchecked Sendable {
         syncConnectors(wait: wait)
     }
 
-    /// Rewrites connectors.json from the manifest on disk, holding the lock (another process may be installing).
+    /// Rewrites connectors.json and the search stand-ins from the manifest on disk, holding the lock (another process
+    /// may be installing). Also repairs what another process, or an older launcher, left behind.
     func syncConnectors(wait: TimeInterval = SupportLock.defaultWait) {
         let apps = connectorApps
-        guard !apps.isEmpty else { return }
-        do { try lock.hold(wait: wait) { Connectors.sync(apps: apps, manifest: reloadManifest(), at: connectorsURL) } }
+        do {
+            try lock.hold(wait: wait) {
+                let m = reloadManifest()
+                if !apps.isEmpty { Connectors.sync(apps: apps, manifest: m, at: connectorsURL) }
+                standIns.sync(m)
+            }
+        }
         catch { AppLog.shared.log("connectors.json: \(error.localizedDescription)") }
     }
 
@@ -247,6 +257,7 @@ final class InstallManager: @unchecked Sendable {
         adopt(m)
         let apps = connectorApps
         if !apps.isEmpty { Connectors.sync(apps: apps, manifest: m, at: connectorsURL) }
+        standIns.sync(m)   // Spotlight / Alfred stand-ins follow every install, update, move and removal
     }
 
     /// installed.json as it is on disk now, adopted as this process's copy: for the window when another launcher process

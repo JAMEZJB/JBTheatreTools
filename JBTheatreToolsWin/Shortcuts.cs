@@ -34,6 +34,7 @@ internal static class Shortcuts
     public static bool CreateStartMenu(string name, string targetExe) => CreateAt(Path.Combine(StartMenuDir, name + ".lnk"), targetExe);
     public static bool CreateDesktop(string name, string targetExe) => CreateAt(Path.Combine(DesktopDir, name + ".lnk"), targetExe);
     public static void RemoveStartMenu(string name) => TryDelete(Path.Combine(StartMenuDir, name + ".lnk"));
+    public static bool StartMenuExists(string name) => File.Exists(Path.Combine(StartMenuDir, name + ".lnk"));
     public static void RemoveDesktop(string name) => TryDelete(Path.Combine(DesktopDir, name + ".lnk"));
 
     /// <summary>Sanitises an app's display name into a valid .lnk file name.</summary>

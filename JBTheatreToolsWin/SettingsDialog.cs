@@ -342,10 +342,10 @@ public sealed class SettingsDialog : Form
         _autoInstall.CheckedChanged += (_, _) => _settings.AutoInstallUpdates = _autoInstall.Checked;
 
         // --- Install location ---
-        _installToApps.Text = "Install apps to the Start menu & Desktop";
+        _installToApps.Text = "Add Desktop shortcuts for apps";
         _installToApps.Checked = _settings.InstallToApplications;
         _installToApps.CheckedChanged += (_, _) => _settings.InstallToApplications = _installToApps.Checked;
-        _installHint.Text = "Adds shortcuts for each app you install, so you can launch it without this launcher.";
+        _installHint.Text = "Every app you install is in the Start menu, so Windows Search finds it. This also puts a shortcut on the Desktop.";
 
         // --- Storage ---
         _storageInstalled.Text = _storageCache.Text = _extras == null ? "—" : "Calculating…";

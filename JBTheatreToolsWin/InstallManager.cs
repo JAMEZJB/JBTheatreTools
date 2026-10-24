@@ -30,6 +30,9 @@ public sealed class InstalledRecord
     public string? ShortcutName { get; set; }
     /// <summary>.lnk base name in the Start Menu (null = no Start Menu shortcut).</summary>
     public string? StartMenuShortcut { get; set; }
+    /// <summary>The person removed this app's Start menu entry from its ⋯ menu: don't put it back. Every other installed app
+    /// gets one, so Windows Search finds it, whatever "Install apps … Desktop" says.</summary>
+    public bool StartMenuOff { get; set; }
     /// <summary>.lnk base name on the Desktop (null = no Desktop shortcut).</summary>
     public string? DesktopShortcut { get; set; }
     /// <summary>Which variant (e.g. "standard"/"full") is installed, for apps that ship variants
@@ -292,6 +295,7 @@ public sealed class InstallManager
                         Version = version, Path = staged.Executable,
                         InstalledAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                         StartMenuShortcut = previous?.StartMenuShortcut,
+                        StartMenuOff = previous?.StartMenuOff ?? false,
                         DesktopShortcut = previous?.DesktopShortcut,
                         Variant = variant, InstallDir = staged.Directory,
                         // Remember what this install replaced (a reinstall of the same version keeps the older one).
@@ -312,7 +316,9 @@ public sealed class InstallManager
                 if (m.TryGetValue(key, out var current) && current.Path == payload.Executable)
                 {
                     var name = Shortcuts.SafeName(app.Name + app.VariantSuffix(variant));
-                    if (toApplications || previous?.StartMenuShortcut != null)
+                    // Always in the Start menu (so Windows Search finds it) unless the person took it out; the setting only
+                    // decides the Desktop shortcut.
+                    if (!current.StartMenuOff)
                     {
                         if (Shortcuts.CreateStartMenu(name, payload.Executable))
                         {
@@ -520,9 +526,8 @@ public sealed class InstallManager
     {
         var m = Manifest();
         if (!m.TryGetValue(appId, out var r) || !File.Exists(r.Path)) return false;
-        bool hasBoth = r.StartMenuShortcut != null && r.DesktopShortcut != null;
-        bool hasAny = r.StartMenuShortcut != null || r.DesktopShortcut != null;
-        return toApplications ? !hasBoth : hasAny;
+        // The setting is the Desktop shortcut (the Start menu entry is always there): only that can be out of step.
+        return toApplications ? r.DesktopShortcut == null : r.DesktopShortcut != null;
     }
 
     /// <summary>Adds or removes an installed app's Start Menu/Desktop shortcuts to match the setting
@@ -535,17 +540,14 @@ public sealed class InstallManager
         {
             var m = Manifest();
             if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
+            var name = Shortcuts.SafeName(shortcutName);
             if (toApplications)
             {
-                var name = Shortcuts.SafeName(shortcutName);
-                if (r.StartMenuShortcut == null && Shortcuts.CreateStartMenu(name, r.Path)) r.StartMenuShortcut = name;
                 if (r.DesktopShortcut == null && Shortcuts.CreateDesktop(name, r.Path)) r.DesktopShortcut = name;
             }
-            else
-            {
-                if (r.StartMenuShortcut != null) { Shortcuts.RemoveStartMenu(r.StartMenuShortcut); r.StartMenuShortcut = null; }
-                if (r.DesktopShortcut != null) { Shortcuts.RemoveDesktop(r.DesktopShortcut); r.DesktopShortcut = null; }
-            }
+            else if (r.DesktopShortcut != null) { Shortcuts.RemoveDesktop(r.DesktopShortcut); r.DesktopShortcut = null; }
+            // The Start menu entry isn't the setting's: it stays (and comes back) unless the person removed it.
+            if (!r.StartMenuOff && r.StartMenuShortcut == null && Shortcuts.CreateStartMenu(name, r.Path)) r.StartMenuShortcut = name;
             WriteManifest(m);
         }
     }
@@ -581,6 +583,7 @@ public sealed class InstallManager
         {
             var m = Manifest();
             if (!m.TryGetValue(installKey, out var r) || !File.Exists(r.Path)) return;
+            r.StartMenuOff = !on;   // remembered, so an update or the start-up check doesn't put a removed entry back
             if (on && r.StartMenuShortcut == null)
             {
                 var name = Shortcuts.SafeName(shortcutName);
@@ -592,6 +595,27 @@ public sealed class InstallManager
                 r.StartMenuShortcut = null;
             }
             WriteManifest(m);
+        }
+    }
+
+    /// <summary>Gives every installed app a Start menu entry (so Windows Search finds it) unless the person removed it — for
+    /// installs made before entries were always added, or an entry deleted outside the launcher. Returns how many it
+    /// added. <paramref name="shortcutName"/> maps an install slot to its entry's name.</summary>
+    public int EnsureStartMenuEntries(Func<string, string?> shortcutName)
+    {
+        using (Lock.Hold())
+        {
+            var m = Manifest(strict: true);
+            int added = 0;
+            foreach (var (key, r) in m)
+            {
+                if (r.StartMenuOff || !File.Exists(r.Path) || shortcutName(key) is not { } display) continue;
+                if (r.StartMenuShortcut != null && Shortcuts.StartMenuExists(r.StartMenuShortcut)) continue;
+                var name = Shortcuts.SafeName(display);
+                if (Shortcuts.CreateStartMenu(name, r.Path)) { r.StartMenuShortcut = name; added++; }
+            }
+            if (added > 0) WriteManifest(m, strict: true);
+            return added;
         }
     }
 

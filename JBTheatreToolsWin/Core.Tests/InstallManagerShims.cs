@@ -19,6 +19,7 @@ internal static class Shortcuts
         Desktop[name] = target; return true;
     }
     public static void RemoveStartMenu(string name) => Start.Remove(name);
+    public static bool StartMenuExists(string name) => Start.ContainsKey(name);
     public static void RemoveDesktop(string name) => Desktop.Remove(name);
 }
 public sealed class ReleaseAsset

@@ -762,6 +762,21 @@ public sealed class MainForm : Form
         var apps = _catalog.Apps;
         _ = Task.Run(() => ConnectorShims.Start(apps));
         WatchManifest();   // installs another launcher process makes (Stagehand runs the command line) show here too
+        // Every installed app in the Start menu (so Windows Search finds it), including ones installed before that was
+        // automatic, unless the person took its entry out. Off the window's thread (it may wait for another install).
+        var entryNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var app in apps)
+            foreach (var vid in app.HasVariants && app.Variants != null ? app.Variants.Select(v => (string?)v.Id) : new string?[] { null })
+                entryNames[app.InstallKey(vid)] = app.Name + app.VariantSuffix(vid);
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var added = InstallManager.Shared.EnsureStartMenuEntries(k => entryNames.GetValueOrDefault(k));
+                if (added > 0) Log.Write($"start menu: added {added} app entr{(added == 1 ? "y" : "ies")} (Windows Search finds them)");
+            }
+            catch (Exception ex) { Log.Write($"start menu entries: {ex.Message}"); }
+        });
         _list.Controls.Clear();
         _rows.Clear();
         foreach (var app in _catalog.Apps)
@@ -2765,8 +2780,8 @@ public sealed class MainForm : Form
         if (affected.Count == 0) return;
 
         var verb = toApplications
-            ? "add Start menu & Desktop shortcuts for"
-            : "remove the Start menu & Desktop shortcuts for";
+            ? "add Desktop shortcuts for"
+            : "remove the Desktop shortcuts for";
         if (HouseMessage.Show(this,
                 $"Do you want to {verb} your {affected.Count} installed app(s)?",
                 "Install location changed", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
@@ -3484,7 +3499,7 @@ public sealed class MainForm : Form
         return Diagnostics.Build(new Diagnostics.Info(
             CurrentVersion(), RuntimeInformation.OSDescription, RuntimeInformation.ProcessArchitecture.ToString(),
             _settings.AuthMode == "server" ? "Download server" : "GitHub token", host, _settings.DevChannel, Locked,
-            _settings.InstallToApplications ? "Launcher, plus Start menu & Desktop shortcuts" : "Launcher only",
+            _settings.InstallToApplications ? "Launcher, plus Start menu & Desktop shortcuts" : "Launcher, plus Start menu",
             apps, Log.Tail(Diagnostics.LogLines), DateTimeOffset.UtcNow));
     }
 

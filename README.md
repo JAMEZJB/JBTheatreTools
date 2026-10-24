@@ -183,6 +183,12 @@ signature when one is published; releases that predate signing are allowed with 
 (This logic is unit-tested against a real signed release: `swift test` in `JBTheatreTools/`, and
 `dotnet test JBTheatreToolsWin/Core.Tests`.)
 
+**Find apps from Spotlight, Alfred and Windows Search:** apps installed to the launcher's own folder are still
+findable. On macOS the launcher keeps a small stand-in for each in `~/Applications/JB Theatre Tools/` (named and
+iconed like the app; it opens the real one), as Steam and Chrome do for their apps; an app installed to Applications
+needs none. On Windows every installed app has a Start menu entry; remove one from the app's ⋯ menu and it stays
+removed. The "Add Desktop shortcuts" setting adds Desktop shortcuts as well.
+
 **Windows updates:** EXE and ZIP downloads are prepared in a separate folder before the installed
 version is changed. Failed extraction or metadata publication leaves the previous installation
 available. Shortcuts are replaced only after the new install is recorded; a shortcut or old-file
