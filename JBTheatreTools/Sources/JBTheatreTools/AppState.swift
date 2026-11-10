@@ -1817,7 +1817,12 @@ final class AppState: ObservableObject {
         }
         guard let client = activeClient() else { return }
         do {
-            let verification = try await Self.verifyDownload(zipDest, asset: asset, release: rel, app: app, client: client)
+            // The hash the SIGNED manifest lists for the zip: checked again right before it's unpacked (the "quit it
+            // first?" question below can sit open for as long as the person likes).
+            var signedHash: String?
+            let verification = try await Self.verifyDownload(zipDest, asset: asset, release: rel, app: app, client: client,
+                                                             onVerifiedHash: { signedHash = $0 })
+            let expectedHash = signedHash
             // Strict unless the user hand-picked an older version from the ⋯ list (`lenient`, which may predate
             // the signed manifest): latest, Roll Back, Back to release and setup-file installs MUST verify against
             // the signed SHA256SUMS — a missing / unsigned / incomplete manifest aborts. A hash MISMATCH always
@@ -1881,7 +1886,8 @@ final class AppState: ObservableObject {
             let installedName: String? = try await Task.detached(priority: .userInitiated) {
                 defer { try? FileManager.default.removeItem(at: zipDest) }
                 let dest = try InstallManager.shared.install(app: app, version: tagName, downloadedZip: zipDest,
-                                                             toApplications: toApps, variant: variantId)
+                                                             toApplications: toApps, variant: variantId,
+                                                             expectedSHA256: expectedHash)
                 AppIconImage.refreshInstalledIcon(dest.path)
                 return InstallManager.shared.installedDisplayName(slotKey)
             }.value

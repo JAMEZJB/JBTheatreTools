@@ -42,6 +42,30 @@ public sealed class InstallManagerIntegrationTests : IDisposable
     }
 
     [Fact]
+    public void ADownloadThatChangedAfterItWasVerifiedIsNotInstalled()
+    {
+        string good = Exe("one");
+        string signedHash = InstallManager.Sha256Hex(good);
+        string installed = manager.Install(app, "v1", good, "Demo.exe", false,
+                                           expectedSha256: signedHash.ToUpperInvariant());   // case doesn't matter
+        Assert.Equal("one", File.ReadAllText(installed));
+
+        // The next download is verified, then swapped for another build while the launcher waits.
+        string next = Exe("two");
+        string nextHash = InstallManager.Sha256Hex(next);
+        File.WriteAllText(next, "swapped");
+        var error = Assert.Throws<InstallVerificationException>(() =>
+            manager.Install(app, "v2", next, "Demo.exe", false, expectedSha256: nextHash));
+        Assert.Equal("The download changed after it was verified — nothing was installed. Try again.", error.Message);
+        Assert.False(File.Exists(next));   // the changed file doesn't stay in the cache
+        Assert.Equal("one", File.ReadAllText(installed));
+        Assert.Equal("v1", manager.InstalledVersion("demo"));
+        Assert.Equal(installed, manager.InstalledPath("demo"));
+        // Nothing was staged or published beside the install.
+        Assert.Single(Directory.GetFileSystemEntries(Path.GetDirectoryName(Path.GetDirectoryName(installed)!)!));
+    }
+
+    [Fact]
     public void ZipExeTransitionsUpdateMetadataAndPreserveSibling()
     {
         string standard = manager.Install(app, "v1", Exe(), "Demo.exe", false);

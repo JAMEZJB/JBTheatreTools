@@ -274,10 +274,20 @@ public sealed class InstallManager
         }
     }
 
+    /// <param name="expectedSha256">The hash the SIGNED manifest lists for the download (null for a hand-picked older
+    /// version that has none). The file is hashed again right before it's unpacked, so the file that's installed is the
+    /// file that was verified, however long a "close it first?" question sat in between.</param>
     public string Install(CatalogApp app, string version, string downloadedExe, string assetName,
-        bool toApplications, string? variant = null, CancellationToken cancellationToken = default)
+        bool toApplications, string? variant = null, CancellationToken cancellationToken = default,
+        string? expectedSha256 = null)
     {
         InstallTransaction.ValidateComponent(app.Id);
+        if (expectedSha256 != null &&
+            !string.Equals(Sha256Hex(downloadedExe), expectedSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            TryDelete(downloadedExe);   // like a failed first check: the file doesn't stay in the cache
+            throw new InstallVerificationException("The download changed after it was verified — nothing was installed. Try again.");
+        }
         var dir = Path.Combine(AppsDir, app.Id);
         var key = app.InstallKey(variant);
         InstalledRecord? previous = null;

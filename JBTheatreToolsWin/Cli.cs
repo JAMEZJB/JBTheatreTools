@@ -277,7 +277,9 @@ public static partial class Cli
             downloading = true;
             await client.DownloadAssetAsync(app.Owner, app.Repo, asset.Id, cache, progress);
             downloading = false;
-            var verification = await InstallManager.VerifyDownloadAsync(cache, asset, rel, app.Owner, app.Repo, client);
+            string? signedHash = null;
+            var verification = await InstallManager.VerifyDownloadAsync(cache, asset, rel, app.Owner, app.Repo, client,
+                                                                        onVerifiedHash: h => signedHash = h);
             // Strict for current releases (no --tag): must checksum-verify. An explicit --tag install
             // (older build) stays verify-if-present. A hash mismatch always aborts (throws above).
             if (tag == null && verification != VerifyResult.Verified)
@@ -300,7 +302,8 @@ public static partial class Cli
                 return openNow;
             }
             var before = InstallManager.Shared.InstalledVersion(slot);
-            var dest = InstallManager.Shared.Install(app, rel.TagName, cache, asset.Name, toApplications, variant);
+            var dest = InstallManager.Shared.Install(app, rel.TagName, cache, asset.Name, toApplications, variant,
+                                                     expectedSha256: signedHash);
             InstallManager.TryDelete(cache);
             History.Add(app.Id, appName, ActivityHistory.ActionFor(before, rel.TagName), before, rel.TagName);
             Log.Write($"cli: installed {slot} {rel.TagName}{(toApplications ? " (+shortcuts)" : "")}{(verification == VerifyResult.Verified ? " (sha256 ok)" : " (unverified)")}");

@@ -2195,7 +2195,11 @@ public sealed class MainForm : Form
             _slotsInstalling.Add(slotKey);
             row.RefreshLaunch();
             row.SetPhase("Verifying…", indeterminate: true);
-            var verification = await InstallManager.VerifyDownloadAsync(cache, asset, rel, row.App.Owner, row.App.Repo, client);
+            // The hash the SIGNED manifest lists for the download: checked again right before it's unpacked (the
+            // "close it first?" question below can sit open for as long as the person likes).
+            string? signedHash = null;
+            var verification = await InstallManager.VerifyDownloadAsync(cache, asset, rel, row.App.Owner, row.App.Repo, client,
+                                                                        onVerifiedHash: h => signedHash = h);
             // Strict unless the user hand-picked an older version from the ⋯ list (which may predate the signed
             // manifest): latest, roll back, back to release and setup-file installs MUST verify against the signed
             // SHA256SUMS. A hash MISMATCH always aborts (it throws from VerifyDownloadAsync).
@@ -2274,7 +2278,8 @@ public sealed class MainForm : Form
             var appRef = row.App; var tagRef = rel.TagName; var toApps = _settings.InstallToApplications;
             await Task.Run(() =>
             {
-                var exe = InstallManager.Shared.Install(appRef, tagRef, cache, assetName, toApps, variantId);
+                var exe = InstallManager.Shared.Install(appRef, tagRef, cache, assetName, toApps, variantId,
+                                                        expectedSha256: signedHash);
                 InstallManager.TryDelete(cache);   // verified copy is now installed; mirror the macOS zip cleanup
                 AppRowControl.PrewarmInstalledIcon(exe);
                 // Install() invalidated the manifest snapshot + path/name caches; re-read installed.json and the

@@ -178,7 +178,9 @@ The launcher itself ships on **its own** Releases page: macOS `.app` (zipped) an
 The download's size and SHA-256 must match the release's `SHA256SUMS`, and that manifest must carry a valid
 **minisign** signature — made offline with the suite's release key, whose public half is embedded in the
 launcher — naming that exact release. A tampered download, a swapped file, or a release that wasn't signed
-with that key is refused. Installing an older version from the version picker still requires a valid
+with that key is refused. On macOS and Windows the download is checked against the signed hash once more right
+before it is unpacked, so a file changed while the launcher waited (for an open app to be closed, say) is never
+installed. Installing an older version from the version picker still requires a valid
 signature when one is published; releases that predate signing are allowed with an "unsigned" warning.
 (This logic is unit-tested against a real signed release: `swift test` in `JBTheatreTools/`, and
 `dotnet test JBTheatreToolsWin/Core.Tests`.)

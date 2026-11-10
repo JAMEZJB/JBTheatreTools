@@ -47,12 +47,15 @@ enum InstallError: LocalizedError {
     case destinationOccupied(String)
     /// The app is set to run as Intel (or only has an Intel build) and Rosetta isn't installed on this Mac.
     case rosettaMissing
+    /// The downloaded file no longer matches the signed hash it was verified against.
+    case changedAfterVerify
 
     var errorDescription: String? {
         switch self {
         case .noAppInZip: return "Downloaded archive did not contain a .app bundle."
         case .notInstalled: return "App is not installed."
         case .rosettaMissing: return "This app runs as Intel, which needs Rosetta — and Rosetta isn't installed on this Mac."
+        case .changedAfterVerify: return "The download changed after it was verified — nothing was installed. Try again."
         case .unzipFailed(let code): return "Could not extract the archive (ditto exit \(code))."
         case .sizeMismatch(let expected, let got):
             return "Download is \(got) bytes but the release lists \(expected). Aborting install."
@@ -348,9 +351,6 @@ final class InstallManager: @unchecked Sendable {
 
     // MARK: - Install / launch
 
-    /// Extracts `downloadedZip` (a macOS app archive) and installs the contained `.app`.
-    /// When `toApplications` is true the bundle is placed in the Applications folder (so it shows in
-    /// Launchpad/Spotlight and launches without this launcher); otherwise in the managed apps dir.
     /// One-time migration from v1.15.0, where a non-default variant (e.g. NDI "Full") was recorded under
     /// the plain app id. Re-keys such a record to its own variant slot and renames the bundle with the
     /// variant suffix, so a later default-variant install can't clobber it. No-op when nothing matches.
@@ -388,13 +388,29 @@ final class InstallManager: @unchecked Sendable {
         if changed { writeManifest(m) }
     }
 
+    /// Moves a freshly unpacked bundle into place. A stand-in in tests (a move that fails, as on a full disk).
+    var moveNewBundle: (URL, URL) throws -> Void = { try FileManager.default.moveItem(at: $0, to: $1) }
+
+    /// Extracts `downloadedZip` (a macOS app archive) and installs the contained `.app`.
+    /// When `toApplications` is true the bundle is placed in the Applications folder (so it shows in
+    /// Launchpad/Spotlight and launches without this launcher); otherwise in the managed apps dir.
+    /// `expectedSHA256` is the hash the SIGNED manifest lists for the zip (nil for a hand-picked older version that has
+    /// none): the zip is hashed again right before it's unpacked, so the file that's installed is the file that was
+    /// verified, however long a "quit it first?" question sat in between.
     @discardableResult
-    func install(app: CatalogApp, version: String, downloadedZip: URL, toApplications: Bool, variant: String? = nil) throws -> URL {
+    func install(app: CatalogApp, version: String, downloadedZip: URL, toApplications: Bool, variant: String? = nil,
+                 expectedSHA256: String? = nil) throws -> URL {
         // Its own folder: another launcher process may be extracting the same app into this cache at the same time.
         let extractDir = cacheDir.appendingPathComponent("extract-\(app.id)-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: extractDir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: extractDir) }
 
+        if let expectedSHA256 {
+            guard try Self.sha256Hex(of: downloadedZip).caseInsensitiveCompare(expectedSHA256) == .orderedSame else {
+                try? fm.removeItem(at: downloadedZip)   // like a failed first check: the file doesn't stay in the cache
+                throw InstallError.changedAfterVerify
+            }
+        }
         try ditto(extract: downloadedZip, to: extractDir)
 
         guard let bundle = appBundle(in: extractDir, preferring: app.name) else { throw InstallError.noAppInZip }
@@ -427,10 +443,11 @@ final class InstallManager: @unchecked Sendable {
             if InstallGuard.isStranger(destExists: fm.fileExists(atPath: dest.path), destPath: dest.path, ourPath: ourPath) {
                 throw InstallError.destinationOccupied(dest.path)
             }
-            // Remove our old install (may be elsewhere if the location setting changed) and our own dest copy.
-            if let ourPath, ourPath != dest.path { try? fm.removeItem(at: URL(fileURLWithPath: ourPath)) }
-            if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }   // reached only for our own copy
-            try fm.moveItem(at: bundle, to: dest)
+            // Our old install in another folder (the location setting changed since): noted now, while nothing is at
+            // dest (the stranger check above), and removed only once the new copy is in and recorded.
+            let elsewhere = ourPath.flatMap { $0 != dest.path && fm.fileExists(atPath: $0) ? URL(fileURLWithPath: $0) : nil }
+            // Our own copy at dest is replaced without a gap: a new bundle that can't be moved in leaves the old one.
+            try Self.swapIn(bundle, at: dest, fm: fm, moveNew: moveNewBundle)
 
             // Preserve any desktop-alias path already recorded for this slot; update version/path/variant, and remember
             // what this install replaced (a reinstall of the same version keeps the older one).
@@ -441,8 +458,38 @@ final class InstallManager: @unchecked Sendable {
             m[key] = InstalledRecord(version: version, path: dest.path, installedAt: Self.isoNow(),
                                      desktopAlias: prior?.desktopAlias, variant: variant, previousVersion: previous)
             writeManifest(m)
+            if let elsewhere { try? fm.removeItem(at: elsewhere) }
             return dest
         }
+    }
+
+    /// Puts `new` at `dest`, replacing the bundle there, so that a failure never leaves `dest` empty. The bundle at
+    /// `dest` is first renamed aside in its own folder (a hidden name that isn't an app's, so nothing lists it), the
+    /// new one is moved in, and only then is the old one deleted. If the new one can't be moved in (a full disk, a
+    /// copy to another volume that fails part-way) the old one goes back where it was and the error is thrown.
+    /// The caller holds the install lock.
+    static func swapIn(_ new: URL, at dest: URL, fm: FileManager = .default,
+                       moveNew: (URL, URL) throws -> Void = { try FileManager.default.moveItem(at: $0, to: $1) }) throws {
+        let folder = dest.deletingLastPathComponent()
+        let marker = ".\(dest.lastPathComponent).replaced-"
+        // What an earlier replace left when it was cut short (a crash, power loss) or couldn't delete the old copy.
+        for name in (try? fm.contentsOfDirectory(atPath: folder.path)) ?? [] where name.hasPrefix(marker) {
+            try? fm.removeItem(at: folder.appendingPathComponent(name))
+        }
+        var aside: URL?
+        if fm.fileExists(atPath: dest.path) {
+            let kept = folder.appendingPathComponent(marker + UUID().uuidString)
+            try fm.moveItem(at: dest, to: kept)
+            aside = kept
+        }
+        do {
+            try moveNew(new, dest)
+        } catch {
+            try? fm.removeItem(at: dest)                             // whatever a failed copy left behind
+            if let aside { try? fm.moveItem(at: aside, to: dest) }   // the old copy goes back
+            throw error
+        }
+        if let aside { try? fm.removeItem(at: aside) }
     }
 
 

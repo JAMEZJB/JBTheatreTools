@@ -50,6 +50,40 @@ enum GitHubError: LocalizedError {
     }
 }
 
+/// How far the releases list is read. GitHub lists releases newest first, a page at a time. One page is nearly always
+/// enough; but an app with a long run of development builds since its last full release would have that release fall
+/// off the first page, and a launcher that isn't on development builds would then see no release at all. So further
+/// pages are read only while every page so far was full AND none of them held a full release, up to `maxPages`.
+enum ReleasePaging {
+    static let pageSize = 50
+    static let maxPages = 10
+
+    /// A release for everyday use: published, not a pre-release and not a development build.
+    static func isFull(_ r: ReleaseInfo) -> Bool { !r.draft && !r.prerelease && !AppState.isDevTag(r.tagName) }
+
+    /// The non-draft releases from `fetch(page)` (pages count from 1; drafts included in what it returns), newest
+    /// first, each tag once. An error on the first page is thrown; an error on a later page ends the reading with
+    /// what the earlier pages gave, which is never less than the single page read before.
+    static func collect(pageSize: Int = pageSize, maxPages: Int = maxPages,
+                        fetch: (Int) async throws -> [ReleaseInfo]) async throws -> [ReleaseInfo] {
+        var batch = try await fetch(1)
+        var all = batch
+        var page = 1
+        while batch.count >= pageSize, page < maxPages, !all.contains(where: isFull) {
+            page += 1
+            guard let next = try? await fetch(page) else {
+                try Task.checkCancellation()   // a cancelled read is not a short list
+                break
+            }
+            batch = next
+            all += next
+        }
+        // A release published between two page reads moves the rest down one, so a tag can come back twice.
+        var seen = Set<String>()
+        return all.filter { !$0.draft && seen.insert($0.tagName).inserted }
+    }
+}
+
 /// Talks to the GitHub REST API with a personal access token.
 ///
 /// Private release assets cannot be fetched from `browser_download_url`; you must hit the API
@@ -129,19 +163,27 @@ final class GitHubClient: NSObject, @unchecked Sendable {
         return try JSONDecoder().decode(ReleaseInfo.self, from: data)
     }
 
-    /// Fetches all (non-draft) releases, newest first — used for the version picker and to gate
+    /// Fetches the (non-draft) releases, newest first — used for the version picker and to gate
     /// which apps are shown. The list endpoint returns `200 []` for an accessible repo with no
     /// releases and `404` only when the token can't see the repo, so a 404 here means **no access**
     /// (not "no release") and a 401 means the token itself is bad.
+    /// Reads on past the first page only while no full release has turned up yet (see `ReleasePaging`).
     func releases(owner: String, repo: String) async throws -> [ReleaseInfo] {
-        guard let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases?per_page=50") else { throw GitHubError.badURL }
+        try await ReleasePaging.collect { page in try await self.releasesPage(owner: owner, repo: repo, page: page) }
+    }
+
+    /// One page of `ReleasePaging.pageSize` releases, drafts INCLUDED (so the caller can tell a full page from the
+    /// last one). Same errors as `releases`.
+    func releasesPage(owner: String, repo: String, page: Int) async throws -> [ReleaseInfo] {
+        let query = "per_page=\(ReleasePaging.pageSize)" + (page > 1 ? "&page=\(page)" : "")
+        guard let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases?\(query)") else { throw GitHubError.badURL }
         let req = apiRequest(url, accept: "application/vnd.github+json")
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw GitHubError.badResponse }
         if http.statusCode == 401 { throw GitHubError.unauthorized }
         if http.statusCode == 404 { throw GitHubError.notAccessible }
         guard http.statusCode == 200 else { throw GitHubError.http(http.statusCode) }
-        return try JSONDecoder().decode([ReleaseInfo].self, from: data).filter { !$0.draft }
+        return try JSONDecoder().decode([ReleaseInfo].self, from: data)
     }
 
     /// The relay's editable "New in" lines (see `WhatsNewNotes`). Server mode only — returns nil in direct

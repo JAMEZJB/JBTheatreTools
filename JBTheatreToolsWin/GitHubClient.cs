@@ -180,14 +180,21 @@ public sealed class GitHubClient : IDisposable
     }
 
     /// <summary>
-    /// Fetches all (non-draft) releases, newest first — used for the version picker and to gate
+    /// Fetches the (non-draft) releases, newest first — used for the version picker and to gate
     /// which apps are shown. The list endpoint returns <c>200 []</c> for an accessible repo with no
     /// releases and <c>404</c> only when the token can't see the repo, so a 404 here means
     /// <b>no access</b> (not "no release") and a 401 means the token itself is bad.
+    /// Reads on past the first page only while no full release has turned up yet (see <see cref="ReleasePaging"/>).
     /// </summary>
-    public async Task<List<ReleaseInfo>> ReleasesAsync(string owner, string repo)
+    public Task<List<ReleaseInfo>> ReleasesAsync(string owner, string repo) =>
+        ReleasePaging.CollectAsync(page => ReleasesPageAsync(owner, repo, page),
+                                   r => r.TagName, r => r.Draft, r => r.Prerelease);
+
+    /// <summary>One page of <see cref="ReleasePaging.PageSize"/> releases, drafts INCLUDED (so the caller can tell a
+    /// full page from the last one). Same errors as <see cref="ReleasesAsync"/>.</summary>
+    public async Task<List<ReleaseInfo>> ReleasesPageAsync(string owner, string repo, int page)
     {
-        var url = $"{_apiBase}/repos/{owner}/{repo}/releases?per_page=50";
+        var url = $"{_apiBase}/repos/{owner}/{repo}/releases?per_page={ReleasePaging.PageSize}" + (page > 1 ? $"&page={page}" : "");
         using var req = NewRequest(url, "application/vnd.github+json");
         using var resp = await _http.SendAsync(req).ConfigureAwait(false);
         if (resp.StatusCode == HttpStatusCode.Unauthorized)
@@ -197,8 +204,7 @@ public sealed class GitHubClient : IDisposable
         if (!resp.IsSuccessStatusCode)
             throw new GitHubException(GitHubErrorKind.Http, $"GitHub returned HTTP {(int)resp.StatusCode}.");
         var json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-        var all = JsonSerializer.Deserialize<List<ReleaseInfo>>(json) ?? new();
-        return all.Where(r => !r.Draft).ToList();
+        return JsonSerializer.Deserialize<List<ReleaseInfo>>(json) ?? new();
     }
 
     /// <summary>Sends a GET and follows GitHub's redirect(s) to S3 — bounded, resolving a relative

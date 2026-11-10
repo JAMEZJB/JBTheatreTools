@@ -300,7 +300,9 @@ enum CLI {
                     let pct = Int(p * 100)
                     if pct != pctBox.last, pct % 10 == 0 { pctBox.last = pct; print("  \(pct)%") }
                 }
-                let verification = try await AppState.verifyDownload(zip, asset: asset, release: rel, app: app, client: client)
+                var signedHash: String?
+                let verification = try await AppState.verifyDownload(zip, asset: asset, release: rel, app: app, client: client,
+                                                                     onVerifiedHash: { signedHash = $0 })
                 // Strict for current releases (no --tag): must checksum-verify. An explicit --tag install
                 // (older build) stays verify-if-present. A hash mismatch always aborts (throws above).
                 if tag == nil, verification != .verified {
@@ -318,7 +320,7 @@ enum CLI {
                 }
                 let before = im.installedVersion(slot)
                 let dest = try im.install(app: app, version: rel.tagName, downloadedZip: zip, toApplications: toApplications,
-                                          variant: variant)
+                                          variant: variant, expectedSHA256: signedHash)
                 try? FileManager.default.removeItem(at: zip)
                 HistoryStore.add(app: app.id, name: appName, action: ActivityHistory.action(from: before, to: rel.tagName),
                                  from: before, to: rel.tagName)
