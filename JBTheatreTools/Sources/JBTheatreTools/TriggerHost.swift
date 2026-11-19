@@ -154,6 +154,58 @@ enum TriggerRegistration {
     }
 }
 
+/// What to say when Stagehand is installed but no copy answers presses — usually its window is open but its supervisor
+/// isn't (started from an SSH or elevated session and refused). Read from Stagehand's own record: its last try to start
+/// the supervisor (triggers/_ensure.json: at, via, result) and the supervisor's status (triggers/_supervisor.json). The
+/// wording follows the suite's; the Windows launcher says the same.
+enum StagehandStatus {
+    static let openStagehand = "Not running — open Stagehand"
+
+    static func notRunning(stateDir: URL, now: Date = Date(), alive: (Int32) -> Bool = TriggerRegistration.pidAlive) -> String {
+        let last = json(TriggerRegistration.triggersDir(stateDir).appendingPathComponent("_ensure.json"))
+        return words(result: last?["result"] as? String ?? "", at: last?["at"] as? String ?? "",
+                     hostState: hostState(stateDir: stateDir, alive: alive), now: now)
+    }
+
+    /// The rules, apart from reading the files.
+    static func words(result: String, at: String, hostState: String, now: Date) -> String {
+        if result.hasPrefix("failed") {
+            let reason = result.hasPrefix("failed: ") ? String(result.dropFirst("failed: ".count)).trimmingCharacters(in: .whitespaces) : ""
+            return "Not running — Stagehand couldn't start it (\(reason.isEmpty ? "no reason given" : reason))"
+        }
+        if !result.isEmpty, hostState == "restarting" || hostState == "failed" {
+            return "Not running — the background copy is \(hostState); see Stagehand"
+        }
+        if !result.isEmpty, recent(at, now: now) { return "Starting the background copy…" }
+        return openStagehand
+    }
+
+    /// Asked within the last minute. Stagehand writes "%Y-%m-%dT%H:%M:%S%z" (+0000); unreadable = not recent.
+    static func recent(_ at: String, now: Date) -> Bool {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
+        guard let when = f.date(from: at.trimmingCharacters(in: .whitespaces)) else { return false }
+        let age = now.timeIntervalSince(when)
+        return age >= 0 && age <= 60
+    }
+
+    /// The launcher's background copy as Stagehand's supervisor last reported it: "not registered", "stopped" (also when
+    /// the supervisor isn't running), or its state ("running", "restarting", "failed", …).
+    static func hostState(stateDir: URL, alive: (Int32) -> Bool) -> String {
+        guard FileManager.default.fileExists(atPath: TriggerRegistration.registrationURL(stateDir).path) else { return "not registered" }
+        guard let status = json(TriggerRegistration.triggersDir(stateDir).appendingPathComponent("_supervisor.json")),
+              let pid = status["pid"] as? Int, alive(Int32(pid)) else { return "stopped" }
+        let host = (status["hosts"] as? [String: Any])?[TriggerRegistration.appId] as? [String: Any]
+        return (host?["state"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "stopped"
+    }
+
+    private static func json(_ url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+}
+
 /// Stagehand, the suite app that keeps the hidden copies running.
 enum StagehandLink {
     static let ensureArgs = ["--trigger-hosts", "--ensure"]

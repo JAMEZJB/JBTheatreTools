@@ -297,7 +297,8 @@ public sealed class AppRowControl : UserControl
         _more.Text = "⋯";
         _more.AccessibleName = $"More actions for {app.Name}";
         _tip.SetToolTip(_more, "Edition, reorder, other versions & uninstall");
-        _more.Click += (_, _) => ShowMoreMenu(fromButton: true);
+        // Only while the button is on: accessibility tools (UI Automation Invoke) can still "click" a disabled button.
+        _more.Click += (_, _) => { if (_more.Enabled) ShowMoreMenu(fromButton: true); };
 
         _cancel.Text = "Cancel";
         _cancel.AutoSize = true;
@@ -567,6 +568,12 @@ public sealed class AppRowControl : UserControl
     {
         var menu = new ContextMenuStrip();
         DialogKit.DisposeWhenClosed(menu, this);
+        // Remembered so a change of busy state closes it: a busy menu ("Cancel download") must not outlive the download,
+        // nor the full menu open on a row that has just started one.
+        _openMenu?.Close();
+        _openMenu = menu;
+        _openMenuBusy = IsBusy;
+        menu.Closed += (_, _) => { if (_openMenu == menu) _openMenu = null; };
         // The pointer left for the menu while the menu held it, so the row never heard it go: re-check the hover wash.
         menu.Closed += (_, _) => RecomputeHover();
         // While busy (reached by right-click; the ⋯ button is off) the only actions are opening the app while it's
@@ -1050,12 +1057,15 @@ public sealed class AppRowControl : UserControl
     /// <summary>Slots of this row in flight: a pipelined batch can be downloading the Full edition while the Light
     /// edition is still installing, so busy is a count (parity with the macOS row's busyCount).</summary>
     private int _busyCount;
+    private ContextMenuStrip? _openMenu;
+    private bool _openMenuBusy;
 
     public void SetBusy(bool on)
     {
         _busyCount = on ? _busyCount + 1 : Math.Max(0, _busyCount - 1);
         bool busy = _busyCount > 0;
         IsBusy = busy;
+        if (_openMenu != null && _openMenuBusy != busy) _openMenu.Close();   // its items were for the other state
         if (!busy) _cancellable = false;
         _install.Enabled = !busy;
         RefreshLaunch();

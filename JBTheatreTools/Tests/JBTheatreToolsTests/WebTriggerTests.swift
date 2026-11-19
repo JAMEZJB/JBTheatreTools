@@ -72,8 +72,11 @@ final class WebTriggerTests: XCTestCase {
     func testBindProblems() {
         let address = "The trigger address must be an IP address of this computer, e.g. 127.0.0.1."
         let every = "Listening on every network (0.0.0.0) needs a token: set one first."
+        // The suite's rule since 2026-11-11: any address that isn't loopback needs a token, not only 0.0.0.0.
+        let network = "Listening on a network address (192.0.2.5) needs a token: set one first."
         let cases: [(String, String, Bool, String)] = [
-            ("127.0.0.1", "42154", false, ""), ("192.0.2.5", "42154", false, ""), ("::1", "42154", false, ""),
+            ("127.0.0.1", "42154", false, ""), ("127.5.6.7", "42154", false, ""), ("192.0.2.5", "42154", false, network),
+            ("192.0.2.5", "42154", true, ""), ("::1", "42154", false, ""),
             ("0.0.0.0", "42154", true, ""), ("0.0.0.0", "42154", false, every), ("::", "42154", false, every),
             ("localhost", "42154", false, address), ("127.1", "42154", false, address), ("127.0.0.01", "42154", false, address),
             ("", "42154", false, address), ("127.0.0.1", "port", false, "The trigger port must be a number."),
@@ -83,6 +86,15 @@ final class WebTriggerTests: XCTestCase {
         for (bind, port, token, want) in cases {
             XCTAssertEqual(WebTriggerContract.bindProblem(bind: bind, port: port, tokenSet: token), want, "\(bind) \(port)")
         }
+    }
+
+    func testTheListenerItselfRefusesANetworkAddressWithoutAToken() async {
+        // Checked where it starts too, not only in Settings, and before any socket is made.
+        let server = WebTriggerServer(run: { _, _ in WebTriggerReply(200, [:]) }, listing: { [] }, log: { _ in })
+        let err = await server.start(bind: "0.0.0.0", port: 0)
+        XCTAssertEqual(err, "Listening on every network (0.0.0.0) needs a token: set one first.")
+        XCTAssertFalse(server.running)
+        server.stop()
     }
 
     func testHostHeader() {
@@ -394,6 +406,7 @@ final class WebTriggerTests: XCTestCase {
     @MainActor
     func testAnAddressThatIsntOursIsNotRetried() async throws {
         let owner = WebTriggerOwner(server: plainServer(), retry: 0.1)
+        owner.server.setToken("synthetic-placeholder-token")   // a network address needs one to get as far as binding
         let err = await owner.own(bind: "192.0.2.1", port: 0)
         XCTAssertTrue(err.hasPrefix("The web trigger couldn't listen on 192.0.2.1:0 ("), err)
         XCTAssertEqual(owner.state, .failed)

@@ -116,7 +116,8 @@ The same features on every launcher (the few that don't apply to Android are mar
   a JSON body (`{}` or `{"token": "…"}`; `X-Token` / `Authorization: Bearer` work too), `GET /actions` lists the ids;
   replies 200 done · 502 it failed · 400 not a JSON request · 403 token or a web-page request · 404 no such action ·
   409 busy (one press at a time, or that app is being installed) · 422 not installed. Off until you switch it on;
-  127.0.0.1 unless you choose another address of the computer, and every address (0.0.0.0) only with a token, which is
+  127.0.0.1 unless you choose another address of the computer, and any address but 127.0.0.1 (one network address, or
+  every address, 0.0.0.0) only with a token, which is
   kept in the Keychain / Credential Manager, never shown back, compared in constant time and never logged (it goes in a
   settings backup as a password). Requests from a web page (an `Origin` header, a non-JSON body, a DNS name in `Host`) are
   refused, the port is never shared with another program, and it listens in the launcher's window or its hidden copy — never

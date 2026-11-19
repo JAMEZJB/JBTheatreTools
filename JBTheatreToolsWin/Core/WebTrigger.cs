@@ -24,7 +24,7 @@ namespace JBTheatreTools;
 /// /health names the app.
 ///
 /// Deliberately narrow: OFF until switched on in Settings; 127.0.0.1 unless another address of this computer is chosen,
-/// and every address (0.0.0.0) only with a token; ids only — the request never carries a value, path or text; a request
+/// and any address that isn't loopback (one network address, or every address, 0.0.0.0) only with a token; ids only — the request never carries a value, path or text; a request
 /// with an Origin header, a non-JSON body or a Host that isn't an IP literal (or localhost) is refused; the token is
 /// compared in constant time and never echoed or logged; the port is bound EXCLUSIVELY (on Windows no other program can
 /// share it, even with SO_REUSEADDR); it listens in the launcher's window process, or in the hidden --trigger-host copy
@@ -68,8 +68,12 @@ public static class WebTriggerContract
     public static string BindProblem(string? bind, string? port, bool tokenSet)
     {
         if (ParseIp(bind) is not { } addr) return "The trigger address must be an IP address of this computer, e.g. 127.0.0.1.";
-        if ((addr.Equals(IPAddress.Any) || addr.Equals(IPAddress.IPv6Any)) && !tokenSet)
-            return "Listening on every network (0.0.0.0) needs a token: set one first.";
+        // Any address that isn't loopback needs a token (the suite's rule since 2026-11-11;
+        // until then only 0.0.0.0 did, so a LAN address with no token let any computer on it run an action).
+        if (!tokenSet && !IPAddress.IsLoopback(addr))
+            return addr.Equals(IPAddress.Any) || addr.Equals(IPAddress.IPv6Any)
+                ? "Listening on every network (0.0.0.0) needs a token: set one first."
+                : $"Listening on a network address ({addr}) needs a token: set one first.";
         if (!int.TryParse((port ?? "").Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
             return "The trigger port must be a number.";
         if (n is < 1024 or > 65535) return "The trigger port must be between 1024 and 65535.";
@@ -164,6 +168,12 @@ public sealed class WebTriggerServer
     public bool PortTaken { get; private set; }
     public bool Running => _listener != null;
 
+    /// <summary>The token in force, or "" — a token that can't be read counts as none here (stay on loopback).</summary>
+    private string ExpectedToken()
+    {
+        try { return _expected() ?? ""; } catch (Exception) { return ""; }
+    }
+
     public WebTriggerServer(Runner run, Func<IReadOnlyList<(string Id, string Name)>> listing, Func<string> expected,
                             Action<string>? log = null, string product = "JB Theatre Tools")
     {
@@ -183,6 +193,13 @@ public sealed class WebTriggerServer
         try
         {
             var ip = WebTriggerContract.ParseIp(bind) ?? throw new FormatException("not an IP address");
+            // Checked here too, before any socket: no caller can open a network listener without a token.
+            if (!IPAddress.IsLoopback(ip) && string.IsNullOrEmpty(ExpectedToken()))
+            {
+                PortTaken = false;
+                Error = WebTriggerContract.BindProblem(bind, "1024", false);
+                return Error;
+            }
             listener = NewListener(ip, port);
             listener.Start(16);
         }

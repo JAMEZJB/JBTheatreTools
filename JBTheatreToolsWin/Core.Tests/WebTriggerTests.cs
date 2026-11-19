@@ -118,7 +118,9 @@ public sealed class WebTriggerTests : IDisposable
 
     [Theory]
     [InlineData("127.0.0.1", "42154", false, "")]
-    [InlineData("192.0.2.5", "42154", false, "")]
+    [InlineData("127.5.6.7", "42154", false, "")]
+    [InlineData("192.0.2.5", "42154", false, "Listening on a network address (192.0.2.5) needs a token: set one first.")]   // any network address needs a token
+    [InlineData("192.0.2.5", "42154", true, "")]
     [InlineData("::1", "42154", false, "")]
     [InlineData("0.0.0.0", "42154", true, "")]
     [InlineData("0.0.0.0", "42154", false, "Listening on every network (0.0.0.0) needs a token: set one first.")]
@@ -132,6 +134,17 @@ public sealed class WebTriggerTests : IDisposable
     [InlineData("127.0.0.1", "65536", false, "The trigger port must be between 1024 and 65535.")]
     public void BindProblems(string bind, string port, bool token, string want) =>
         Assert.Equal(want, WebTriggerContract.BindProblem(bind, port, token));
+
+    [Fact]
+    public void TheListenerItselfRefusesANetworkAddressWithoutAToken()
+    {
+        // Checked where it starts too, not only in Settings, and before any socket is made.
+        var server = new WebTriggerServer((_, _) => (200, new JsonObject()), () => Array.Empty<(string, string)>(), () => "");
+        Assert.Equal("Listening on every network (0.0.0.0) needs a token: set one first.", server.Start("0.0.0.0", 0));
+        Assert.False(server.Running);
+        Assert.False(server.PortTaken);
+        server.Stop();
+    }
 
     [Theory]
     [InlineData("", true)]
@@ -429,8 +442,8 @@ public sealed class WebTriggerTests : IDisposable
 
     // ── Owning the port (loopback, port 0) ─────────────────────────────────────────────────────────────
 
-    private static WebTriggerServer PlainServer() =>
-        new((_, _) => (200, new JsonObject { ["ok"] = true, ["summary"] = "synthetic" }), () => Array.Empty<(string, string)>(), () => "");
+    private static WebTriggerServer PlainServer(string token = "") =>
+        new((_, _) => (200, new JsonObject { ["ok"] = true, ["summary"] = "synthetic" }), () => Array.Empty<(string, string)>(), () => token);
 
     private static bool Eventually(Func<bool> done)
     {
@@ -517,7 +530,8 @@ public sealed class WebTriggerTests : IDisposable
     [Fact]
     public void AnAddressThatIsntOursIsNotRetried()
     {
-        var owner = new WebTriggerOwner(PlainServer(), TimeSpan.FromMilliseconds(100));
+        // A network address needs a token to get as far as binding.
+        var owner = new WebTriggerOwner(PlainServer("synthetic-placeholder-token"), TimeSpan.FromMilliseconds(100));
         try
         {
             var err = owner.Own("192.0.2.1", 0);

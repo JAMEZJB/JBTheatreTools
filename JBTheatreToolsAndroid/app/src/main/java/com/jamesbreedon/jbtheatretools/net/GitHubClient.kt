@@ -1,6 +1,7 @@
 package com.jamesbreedon.jbtheatretools.net
 
 import com.jamesbreedon.jbtheatretools.core.Passphrase
+import com.jamesbreedon.jbtheatretools.core.ReleasePaging
 import com.jamesbreedon.jbtheatretools.core.WhatsNewNotes
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -144,7 +145,8 @@ class GitHubClient private constructor(
      * with no releases and `404` only when the credential can't see the repo, so a 404 here means NO
      * ACCESS (not "no release") and a 401 means the credential itself is bad.
      */
-    fun releases(owner: String, repo: String): List<ReleaseInfo> = releasesPage(owner, repo, 1).filter { !it.draft }
+    fun releases(owner: String, repo: String): List<ReleaseInfo> = ReleasePaging.collect(
+        { page -> releasesPage(owner, repo, page) }, { it.tagName }, { it.draft }, { it.prerelease }, PAGE_SIZE)
 
     /**
      * One page of [PAGE_SIZE] releases, drafts INCLUDED (so a caller paging on can tell a full page from the last

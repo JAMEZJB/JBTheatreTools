@@ -1045,7 +1045,7 @@ public sealed class SettingsDialog : Form
     private void RemoveTriggerToken()
     {
         if (HouseMessage.Show(this,
-                "Remove the web trigger's token? Buttons then work without one, and listening on every network (0.0.0.0) switches off.",
+                "Remove the web trigger's token? Buttons then work without one, and listening on a network address switches off (only this computer, 127.0.0.1, works without a token).",
                 "Remove token", MessageBoxButtons.YesNo, MessageBoxIcon.Question, destructive: true) != DialogResult.Yes) return;
         TokenStore.ClearTriggerToken();
         _extras?.WebTriggerTokenChanged?.Invoke();

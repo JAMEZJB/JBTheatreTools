@@ -62,6 +62,8 @@ public class HeadlessHelperTests
     [InlineData(@"SD.exe --settings-describe")]
     [InlineData(@"SD.exe --SELFCHECK")]
     [InlineData(@"SD.exe --mcp=stdio")]
+    [InlineData(@"""C:\Users\x\AppData\Local\JBTheatreTools\bin\stagehand\Stagehand-Windows-x64.exe"" --relay-agent")]   // 2026-11-19
+    [InlineData(@"Stagehand-Windows-x64.exe --remote-setup --code 123456")]
     [InlineData(@"C:\apps\sd\SD.exe --trigger-host")]                 // an app's hidden copy for Dashboard buttons
     [InlineData(@"C:\apps\Stagehand.exe --trigger-hosts --ensure")]
     public void HelpersAreNotOpen(string commandLine) => Assert.True(InstallManager.IsHeadlessHelper(commandLine));

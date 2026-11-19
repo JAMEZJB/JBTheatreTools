@@ -71,7 +71,12 @@ public static partial class Cli
                         ["version"] = r.Version, ["path"] = r.Path, ["present"] = File.Exists(r.Path),
                         ["installedAt"] = r.InstalledAt,
                     });
-        PrintJson(new JsonObject { ["schema"] = 1, ["manifest"] = InstallManager.Shared.ManifestPath, ["apps"] = apps });
+        // "launcher": this launcher's own version, so a remote listing (Stagehand) can show it beside the apps.
+        PrintJson(new JsonObject
+        {
+            ["schema"] = 1, ["manifest"] = InstallManager.Shared.ManifestPath,
+            ["launcher"] = new JsonObject { ["version"] = MainForm.CurrentVersion() }, ["apps"] = apps,
+        });
         return ExitCode.Ok;
     }
 

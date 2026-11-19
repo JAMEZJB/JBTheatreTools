@@ -413,7 +413,7 @@ struct SettingsView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Buttons then work without one, and listening on every network (0.0.0.0) switches off.")
+                Text("Buttons then work without one, and listening on a network address switches off (only this computer, 127.0.0.1, works without a token).")
             }
             .sheet(isPresented: $showingTriggerGuide) {
                 WebTriggerGuideView(port: state.webTriggerPort)

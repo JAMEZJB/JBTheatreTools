@@ -16,7 +16,8 @@ import CryptoKit
 /// /health names the app.
 ///
 /// Deliberately narrow: OFF until switched on in Settings; 127.0.0.1 unless another address of this Mac is chosen, and
-/// every address (0.0.0.0) only with a token; ids only — the request never carries a value, path or text; a request with
+/// any address that isn't loopback (one network address, or every address, 0.0.0.0) only with a token (the suite's rule
+/// since 2026-11-11: until then only 0.0.0.0 needed one); ids only — the request never carries a value, path or text; a request with
 /// an Origin header, a non-JSON body or a Host that isn't an IP literal (or localhost) is refused; the token is compared in
 /// constant time and never echoed or logged; the port is never shared (no address reuse); it listens in the launcher's
 /// window process, or in the hidden `--trigger-host` copy Stagehand keeps running (TriggerHost.swift) — never in any
@@ -43,6 +44,8 @@ enum WebTriggerContract {
         let text: String
         let isV6: Bool
         let isUnspecified: Bool
+        /// Only this computer can reach it: 127.0.0.0/8 or ::1. Anywhere else needs a token.
+        var isLoopback: Bool { isV6 ? text == "::1" || IPv6Address(text)?.isLoopback == true : text.hasPrefix("127.") }
     }
 
     static func parseIP(_ raw: String?) -> IPLiteral? {
@@ -64,7 +67,10 @@ enum WebTriggerContract {
     /// "" if (bind, port) is an acceptable trigger address, else why not (plain words for the Settings panel).
     static func bindProblem(bind: String?, port: String?, tokenSet: Bool) -> String {
         guard let addr = parseIP(bind) else { return "The trigger address must be an IP address of this computer, e.g. 127.0.0.1." }
-        if addr.isUnspecified && !tokenSet { return "Listening on every network (0.0.0.0) needs a token: set one first." }
+        if !tokenSet && !addr.isLoopback {
+            if addr.isUnspecified { return "Listening on every network (0.0.0.0) needs a token: set one first." }
+            return "Listening on a network address (\(addr.text)) needs a token: set one first."
+        }
         guard let n = Int((port ?? "").trimmingCharacters(in: .whitespaces)) else { return "The trigger port must be a number." }
         if n < 1024 || n > 65535 { return "The trigger port must be between 1024 and 65535." }
         return ""
@@ -380,6 +386,10 @@ final class WebTriggerServer: @unchecked Sendable {
         stop()
         guard let ip = WebTriggerContract.parseIP(bind), (0...65535).contains(port) else {
             return fail("The web trigger couldn't listen on \(bind):\(port) (not an IP address).", taken: false)
+        }
+        // Checked here too, before any socket: no caller can open a network listener without a token.
+        if !ip.isLoopback && locked({ tokenValue }).isEmpty {
+            return fail(WebTriggerContract.bindProblem(bind: bind, port: "1024", tokenSet: false), taken: false)
         }
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = false   // a taken port is an error, never shared

@@ -3328,7 +3328,7 @@ extension AppState {
         return result
     }
 
-    /// Settings → Remove Token. Listening on every network needs a token, so that switches off too.
+    /// Settings → Remove Token. Listening on any address but loopback needs a token, so that switches off too.
     func removeWebTriggerToken() async {
         WebTriggerStore.clear()
         if webTriggerOn,
@@ -3347,7 +3347,8 @@ extension AppState {
                                          port: waiting ? webTriggerPort : s.port, error: s.error, waiting: waiting,
                                          background: background)
         let answering = LauncherActions.answering(enabled: webTriggerOn, windowOwns: s.running, background: background,
-                                                  stagehandInstalled: stagehandInstalled)
+                                                  stagehandInstalled: stagehandInstalled,
+                                                  notRunning: StagehandStatus.notRunning(stateDir: TriggerRegistration.stateDir()))
         if webTriggerStatusText != d.text { webTriggerStatusText = d.text }
         if webTriggerProblem != d.problem { webTriggerProblem = d.problem }
         if webTriggerAnsweringText != answering { webTriggerAnsweringText = answering }

@@ -166,6 +166,71 @@ public static class TriggerRegistration
         MarkedPid(stateDir) is { } pid && (alive ?? PidAlive)(pid);
 }
 
+/// <summary>What to say when Stagehand is installed but no copy answers presses — usually its window is open but its
+/// supervisor isn't (started from an SSH or elevated session and refused). Read from Stagehand's own record: its last
+/// try to start the supervisor (triggers/_ensure.json: at, via, result) and the supervisor's status
+/// (triggers/_supervisor.json). The wording follows the suite's.</summary>
+public static class StagehandStatus
+{
+    public const string OpenStagehand = "Not running — open Stagehand";
+
+    public static string NotRunning(string stateDir, DateTimeOffset now, Func<int, bool>? alive = null)
+    {
+        var (at, result) = LastStart(stateDir);
+        return Words(result, at, HostState(stateDir, alive ?? TriggerRegistration.PidAlive), now);
+    }
+
+    /// <summary>The rules, apart from reading the files.</summary>
+    public static string Words(string result, string at, string hostState, DateTimeOffset now)
+    {
+        if (result.StartsWith("failed", StringComparison.Ordinal))
+        {
+            var reason = result.StartsWith("failed: ", StringComparison.Ordinal) ? result["failed: ".Length..].Trim() : "";
+            return $"Not running — Stagehand couldn't start it ({(reason.Length > 0 ? reason : "no reason given")})";
+        }
+        if (result.Length > 0 && hostState is "restarting" or "failed")
+            return $"Not running — the background copy is {hostState}; see Stagehand";
+        if (result.Length > 0 && Recent(at, now)) return "Starting the background copy…";
+        return OpenStagehand;
+    }
+
+    /// <summary>Asked within the last minute. Stagehand writes "%Y-%m-%dT%H:%M:%S%z" (+0000); unreadable = not recent.</summary>
+    public static bool Recent(string at, DateTimeOffset now)
+    {
+        var text = at.Trim();
+        if (text.Length > 5 && (text[^5] == '+' || text[^5] == '-')) text = text[..^2] + ":" + text[^2..];   // +0000 → +00:00
+        if (!DateTimeOffset.TryParseExact(text, "yyyy-MM-dd'T'HH:mm:sszzz", System.Globalization.CultureInfo.InvariantCulture,
+                                           System.Globalization.DateTimeStyles.None, out var when)) return false;
+        var age = now - when;
+        return age >= TimeSpan.Zero && age <= TimeSpan.FromSeconds(60);
+    }
+
+    private static (string At, string Result) LastStart(string stateDir)
+    {
+        try
+        {
+            var doc = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(TriggerRegistration.TriggersDir(stateDir), "_ensure.json")));
+            return (doc?["at"]?.ToString() ?? "", doc?["result"]?.ToString() ?? "");
+        }
+        catch (Exception) { return ("", ""); }
+    }
+
+    /// <summary>The launcher's background copy as Stagehand's supervisor last reported it: "not registered", "stopped"
+    /// (also when the supervisor isn't running), or its state ("running", "restarting", "failed", …).</summary>
+    public static string HostState(string stateDir, Func<int, bool> alive)
+    {
+        var triggers = TriggerRegistration.TriggersDir(stateDir);
+        if (!File.Exists(Path.Combine(triggers, TriggerRegistration.AppId + ".json"))) return "not registered";
+        try
+        {
+            var doc = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(triggers, "_supervisor.json")));
+            if (doc?["pid"]?.GetValue<int>() is not int pid || !alive(pid)) return "stopped";
+            return doc["hosts"]?[TriggerRegistration.AppId]?["state"]?.ToString() is { Length: > 0 } state ? state : "stopped";
+        }
+        catch (Exception) { return "stopped"; }
+    }
+}
+
 /// <summary>Stagehand, the suite app that keeps the hidden copies running.</summary>
 public static class StagehandLink
 {

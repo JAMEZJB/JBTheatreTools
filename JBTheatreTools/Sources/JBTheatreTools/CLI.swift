@@ -7,7 +7,7 @@ import Foundation
 /// Token resolution order: `--token <pat>`, then `$GITHUB_TOKEN`, then the Keychain.
 ///
 ///   JBTheatreTools --list                 [--json] [--token X] [--catalog path]
-///   JBTheatreTools --installed
+///   JBTheatreTools --installed            [--json]
 ///   JBTheatreTools --releases <id>        [--token X]
 ///   JBTheatreTools --install  <id>        [--tag vX.Y.Z] [--edition E] [--token X]
 ///   JBTheatreTools --download <id> --tag vX.Y.Z --asset <name> --to <folder> [--edition E] [--json]
@@ -123,7 +123,7 @@ enum CLI {
 
         switch cmd {
         case "--list":       if json { listJSON(catalog: catalog, token: token) } else { list(catalog: catalog, token: token) }
-        case "--installed":  installed(catalog: catalog)
+        case "--installed":  if json { installedJSON(catalog: catalog) } else { installed(catalog: catalog) }
         case "--releases":   releases(catalog: catalog, token: token, id: positional.first)
         case "--install":    install(catalog: catalog, token: token, id: positional.first, tag: tag, edition: edition, toApplications: toApplications)
         case "--download":
@@ -243,6 +243,31 @@ enum CLI {
                 }
             }
         }
+    }
+
+    /// --installed --json: every install slot by catalog id (each Light/Full edition), plus this launcher's own version —
+    /// the same shape as the Windows command line's.
+    private static func installedJSON(catalog: Catalog) {
+        let im = InstallManager.shared
+        let m = im.manifest()
+        var apps: [[String: Any]] = []
+        for app in catalog.apps {
+            let slots: [(key: String, variant: String?, label: String?)] = app.hasVariants
+                ? (app.variants ?? []).map { (app.installKey(variantId: $0.id), $0.id, $0.label) }
+                : [(app.id, nil, nil)]
+            for slot in slots {
+                guard let rec = m[slot.key] else { continue }
+                apps.append(["id": app.id, "slot": slot.key, "edition": slot.variant ?? NSNull(), "editionName": slot.label ?? NSNull(),
+                             "name": app.name, "version": rec.version, "path": rec.path,
+                             "present": FileManager.default.fileExists(atPath: rec.path), "installedAt": rec.installedAt])
+            }
+        }
+        let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
+        let doc: [String: Any] = ["schema": 1, "manifest": im.manifestURL.path, "launcher": ["version": version], "apps": apps]
+        guard let data = try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else {
+            exit(fail(ExitCode.failed, "couldn't write the list as JSON."))
+        }
+        print(String(decoding: data, as: UTF8.self))
     }
 
     private static func releases(catalog: Catalog, token: String?, id: String?) {
@@ -561,7 +586,7 @@ enum CLI {
 
           --list                 List the catalog with installed & latest versions (--json: by catalog id,
                                  with every platform's file name per edition)
-          --installed            Show locally installed apps
+          --installed            Show locally installed apps (--json: by catalog id, with this launcher's version)
           --releases  <id>       List all available versions of an app
           --install   <id>       Download & install (latest, or --tag vX.Y.Z for an older one)
           --download  <id> --tag vX.Y.Z --asset <file name> --to <folder>
@@ -584,7 +609,7 @@ enum CLI {
                  --edition <e>       An app's Light or Full edition (light / full; default: its first) — with
                                      --install, --uninstall and --download
                  --catalog <path>    Use a specific catalog.json
-                 --json              Machine-readable answer (with --list, --download)
+                 --json              Machine-readable answer (with --list, --installed, --download)
                  --include-passwords Also back up saved passwords (with --backup-all)
                  --no-passwords      Leave this computer's passwords as they are (with --restore-all)
                  --passphrase-stdin  Read the backup passphrase from one line of stdin

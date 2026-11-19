@@ -39,7 +39,7 @@ public sealed class AppSettings
 
     // JBTT_SETTINGS_DIR: a test stand-in for the settings folder (like JBTT_SUPPORT_DIR), so a test run never reads or
     // writes this PC's real settings.
-    private static string Dir =>
+    internal static string Dir =>
         Environment.GetEnvironmentVariable("JBTT_SETTINGS_DIR") is { Length: > 0 } testDir ? testDir
         : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JBTheatreTools");
     private static string FilePath => Path.Combine(Dir, "settings.json");

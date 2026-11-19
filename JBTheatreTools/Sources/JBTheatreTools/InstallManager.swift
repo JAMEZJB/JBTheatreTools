@@ -92,8 +92,11 @@ enum InstallGuard {
         }
     }
 
-    static let headlessSwitches = ["--mcp", "--remote", "--describe", "--settings-describe", "--settings-export",
-                                   "--settings-import", "--selfcheck", "--trigger-host", "--trigger-hosts"]
+    // CONTRACT with Stagehand (its docs/CONNECTORS.md, "Windowless modes the launcher must not count as open"): keep this
+    // list in step with it (and with the Windows one); Stagehand announces a new mode before adding it.
+    static let headlessSwitches = ["--mcp", "--remote", "--remote-setup", "--describe", "--settings-describe",
+                                   "--settings-export", "--settings-import", "--selfcheck", "--trigger-host",
+                                   "--trigger-hosts", "--relay-agent"]
 
     /// True when a process's arguments run one of the headless helper modes.
     static func isHeadlessHelper(_ args: [String]) -> Bool {

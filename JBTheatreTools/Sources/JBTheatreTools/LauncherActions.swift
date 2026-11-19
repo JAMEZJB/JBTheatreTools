@@ -170,12 +170,16 @@ enum LauncherActions {
     }
 
     /// Settings: who answers a press right now. "" while the trigger is off.
-    static func answering(enabled: Bool, windowOwns: Bool, background: Bool, stagehandInstalled: Bool) -> String {
+    /// `notRunning`: with Stagehand installed and no copy answering, what Stagehand's own record says
+    /// (`StagehandStatus.notRunning`); nil = "Not running — open Stagehand".
+    static func answering(enabled: Bool, windowOwns: Bool, background: Bool, stagehandInstalled: Bool,
+                          notRunning: String? = nil) -> String {
         guard enabled else { return "" }
         if windowOwns { return "Answering presses: this window." }
         if background { return "Answering presses: the background copy." }
-        return stagehandInstalled ? "Answering presses: not running — open Stagehand."
-                                  : "Answering presses: not running — " + stagehandMissing
+        guard stagehandInstalled else { return "Answering presses: not running — " + stagehandMissing }
+        let words = (notRunning?.isEmpty == false ? notRunning! : StagehandStatus.openStagehand)
+        return "Answering presses: " + words.prefix(1).lowercased() + words.dropFirst() + (words.hasSuffix("…") ? "" : ".")
     }
 
     /// Settings, when Stagehand (which keeps the background copy running) isn't installed.

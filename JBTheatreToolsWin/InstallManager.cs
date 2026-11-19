@@ -177,9 +177,11 @@ public sealed class InstallManager
 
     /// <summary>The switches suite apps run headless with — a Claude connector, a Stagehand remote operation, a settings
     /// back up / restore or a self-check, all started by a program rather than a person.</summary>
+    // CONTRACT with Stagehand (its docs/CONNECTORS.md, "Windowless modes the launcher must not count as open"): keep this
+    // list in step with it; Stagehand announces a new mode before adding it. A missing one blocks that app's updates.
     private static readonly string[] HeadlessSwitches =
-        { "--mcp", "--remote", "--describe", "--settings-describe", "--settings-export", "--settings-import", "--selfcheck",
-          "--trigger-host", "--trigger-hosts" };
+        { "--mcp", "--remote", "--remote-setup", "--describe", "--settings-describe", "--settings-export", "--settings-import",
+          "--selfcheck", "--trigger-host", "--trigger-hosts", "--relay-agent" };
 
     /// <summary>True when a command line runs one of the headless helper modes (<see cref="HeadlessSwitches"/>).</summary>
     public static bool IsHeadlessHelper(string commandLine) =>

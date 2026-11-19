@@ -2741,7 +2741,8 @@ public sealed class MainForm : Form
             WebTriggerStatus: () => LauncherTrigger.Describe(_settings.WebTriggerEnabled, _settings.WebTriggerBind, Trigger.Server,
                 TriggerOwner.Waiting, _settings.WebTriggerPort, BackgroundAnswering()),
             WebTriggerAnswering: () => LauncherTrigger.Answering(_settings.WebTriggerEnabled, Trigger.Server.Running,
-                BackgroundAnswering(), InstallManager.Shared.InstalledVersion(StagehandId) != null),
+                BackgroundAnswering(), InstallManager.Shared.InstalledVersion(StagehandId) != null,
+                StagehandStatus.NotRunning(TriggerRegistration.StateDir(), DateTimeOffset.Now)),
             WebTriggerApps: TriggerAppChoices,
             WebTriggerHasToken: () => _triggerToken.Length > 0,
             WebTriggerTokenChanged: ReloadTriggerToken));

@@ -185,13 +185,16 @@ public sealed class LauncherTrigger
     }
 
     /// <summary>Settings: who answers a press right now. '' while the trigger is off.</summary>
-    public static string Answering(bool enabled, bool windowOwns, bool background, bool stagehandInstalled)
+    /// <param name="notRunning">With Stagehand installed and no copy answering, what Stagehand's own record says
+    /// (<see cref="StagehandStatus.NotRunning"/>); null = "Not running — open Stagehand".</param>
+    public static string Answering(bool enabled, bool windowOwns, bool background, bool stagehandInstalled, string? notRunning = null)
     {
         if (!enabled) return "";
         if (windowOwns) return "Answering presses: this window.";
         if (background) return "Answering presses: the background copy.";
-        return stagehandInstalled ? "Answering presses: not running — open Stagehand."
-                                  : "Answering presses: not running — " + StagehandMissing;
+        if (!stagehandInstalled) return "Answering presses: not running — " + StagehandMissing;
+        var words = string.IsNullOrEmpty(notRunning) ? StagehandStatus.OpenStagehand : notRunning;
+        return "Answering presses: " + char.ToLowerInvariant(words[0]) + words[1..] + (words.EndsWith('…') ? "" : ".");
     }
 
     /// <summary>Settings, when Stagehand (which keeps the background copy running) isn't installed.</summary>

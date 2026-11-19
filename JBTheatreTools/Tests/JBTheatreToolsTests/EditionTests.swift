@@ -61,6 +61,8 @@ final class EditionTests: XCTestCase {
         XCTAssertTrue(InstallGuard.isHeadlessHelper(["--trigger-hosts", "--ensure"]))
         XCTAssertTrue(InstallGuard.isHeadlessHelper(["--settings-export", "/tmp/x.json"]))
         XCTAssertTrue(InstallGuard.isHeadlessHelper(["--SelfCheck"]))
+        XCTAssertTrue(InstallGuard.isHeadlessHelper(["--relay-agent"]), "Stagehand's relay link (2026-11-19: it blocked updates)")
+        XCTAssertTrue(InstallGuard.isHeadlessHelper(["--remote-setup", "--code", "123456"]))
         XCTAssertFalse(InstallGuard.isHeadlessHelper([]))
         XCTAssertFalse(InstallGuard.isHeadlessHelper(["/Users/x/show.xlsx"]))
         XCTAssertFalse(InstallGuard.isHeadlessHelper(["--mcpx"]))

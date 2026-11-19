@@ -259,3 +259,47 @@ public sealed class TriggerHostTests : IDisposable
         Assert.False(TriggerRegistration.WindowRunning(StateDir, 1, _ => true));
     }
 }
+
+/// <summary>"Answering presses:" when Stagehand is installed but no copy answers: what Stagehand's own record says
+/// (the suite's wording). Files in a temporary folder; nothing is started.</summary>
+public sealed class StagehandStatusTests : IDisposable
+{
+    private readonly string stateDir = Path.Combine(Path.GetTempPath(), "shstatus-" + Guid.NewGuid().ToString("N"));
+    private static readonly DateTimeOffset Now = new(2026, 11, 19, 3, 0, 0, TimeSpan.Zero);
+
+    public StagehandStatusTests() => Directory.CreateDirectory(TriggerRegistration.TriggersDir(stateDir));
+    public void Dispose() => Directory.Delete(stateDir, recursive: true);
+
+    [Theory]
+    [InlineData("failed: access is denied", "2026-11-19T02:00:00+0000", "stopped", "Not running — Stagehand couldn't start it (access is denied)")]
+    [InlineData("failed", "", "stopped", "Not running — Stagehand couldn't start it (no reason given)")]
+    [InlineData("started (ssh)", "2026-11-19T02:00:00+0000", "restarting", "Not running — the background copy is restarting; see Stagehand")]
+    [InlineData("started (ssh)", "2026-11-19T02:59:30+0000", "stopped", "Starting the background copy…")]
+    [InlineData("started (ssh)", "2026-11-12T02:59:30+0000", "stopped", "Not running — open Stagehand")]   // days old: never "Starting…" for ever
+    [InlineData("started (ssh)", "not a time", "stopped", "Not running — open Stagehand")]
+    [InlineData("", "", "not registered", "Not running — open Stagehand")]
+    public void TheWordsFollowTheSuiteRules(string result, string at, string state, string want) =>
+        Assert.Equal(want, StagehandStatus.Words(result, at, state, Now));
+
+    [Fact]
+    public void ItReadsStagehandsRecordAndTheSupervisorsStatus()
+    {
+        var triggers = TriggerRegistration.TriggersDir(stateDir);
+        Assert.Equal("Not running — open Stagehand", StagehandStatus.NotRunning(stateDir, Now, _ => true));   // no record
+        File.WriteAllText(Path.Combine(triggers, "_ensure.json"), "{\"at\":\"2026-11-19T02:00:00+0000\",\"via\":\"ssh\",\"result\":\"failed: no desktop session\"}");
+        Assert.Equal("Not running — Stagehand couldn't start it (no desktop session)", StagehandStatus.NotRunning(stateDir, Now, _ => true));
+        File.WriteAllText(TriggerRegistration.RegistrationPath(stateDir), "{}");
+        File.WriteAllText(Path.Combine(triggers, "_supervisor.json"), "{\"pid\":4242,\"hosts\":{\"jbtheatretools\":{\"state\":\"restarting\"}}}");
+        Assert.Equal("restarting", StagehandStatus.HostState(stateDir, _ => true));
+        Assert.Equal("stopped", StagehandStatus.HostState(stateDir, _ => false));   // supervisor gone: stopped
+    }
+
+    [Fact]
+    public void TheAnsweringLineCarriesIt()
+    {
+        Assert.Equal("Answering presses: starting the background copy…",
+                     LauncherTrigger.Answering(true, false, false, true, "Starting the background copy…"));
+        Assert.Equal("Answering presses: not running — Stagehand couldn't start it (x).",
+                     LauncherTrigger.Answering(true, false, false, true, "Not running — Stagehand couldn't start it (x)"));
+    }
+}

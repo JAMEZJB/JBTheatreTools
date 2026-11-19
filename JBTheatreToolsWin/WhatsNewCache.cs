@@ -5,8 +5,8 @@ namespace JBTheatreTools;
 /// by <see cref="WhatsNewNotes.Parse"/> before it's saved); a corrupt file just means "bundled lines".</summary>
 public static class WhatsNewCache
 {
-    private static string FilePath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JBTheatreTools", "whats-new.json");
+    // Beside settings.json, so JBTT_SETTINGS_DIR (a test run's stand-in) keeps it out of the PC's real folder too.
+    private static string FilePath => Path.Combine(AppSettings.Dir, "whats-new.json");
 
     public static WhatsNewNotes? Load()
     {
