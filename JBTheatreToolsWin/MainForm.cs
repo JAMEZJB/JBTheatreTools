@@ -200,7 +200,7 @@ public sealed class MainForm : Form
         _scheduler.Tick += async (_, _) => await ScheduledTickAsync();
         Shown += async (_, _) =>
         {
-            Log.Write($"launched v{CurrentVersion()}");
+            StartupLog.Header("window");
             // Again once visible: on Windows 11 (26100) DWM didn't honour the dark title bar set before the first show.
             Theme.ApplyTitleBar(this, Theme.IsDark(_settings.Appearance));
             // Start in the search box (house plan: type to find an app), not on the first header button.
@@ -3063,7 +3063,7 @@ public sealed class MainForm : Form
 
     private void ReloadTriggerToken()
     {
-        try { _triggerToken = TokenStore.LoadTriggerToken() ?? ""; }
+        try { _triggerToken = TokenStore.LoadTriggerToken() ?? ""; Log.RegisterSecret(_triggerToken); }
         catch (Exception ex)
         {
             // Unreadable: refuse every press (an unguessable stand-in) rather than run without the token that was set.

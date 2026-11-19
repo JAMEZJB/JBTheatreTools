@@ -49,6 +49,8 @@ enum CLI {
         // would fall through and (in main.swift) launch the GUI instead of installing.
         guard let cmd = args.first(where: { commands.contains($0) }) else { printHelp(); return }
         if cmd == "--help" || cmd == "-h" { printHelp(); return }
+        atexit { AppLog.shared.flush() }   // the command ends with exit(): get every queued line onto disk first
+        AppLog.shared.writeStartHeader(mode: "command line", detail: AppLog.maskedArguments(args))
         // Show lock (set in the app) pauses installs, updates and uninstalls — the command line honours it too, and
         // refuses before touching the Keychain.
         if UserDefaults.standard.bool(forKey: AppState.showLockKey) || ClaudeSettingsFile.suiteShowLock() == true,
@@ -93,6 +95,9 @@ enum CLI {
         let needsAuth = !["--installed", "--uninstall", "--launch", "--code-id", "--self-update",
                           "--backup-all", "--restore-all"].contains(cmd)
         if needsAuth, token == nil { token = TokenStore.load() }
+        AppLog.shared.registerSecret(token)
+        AppLog.shared.registerSecret(serverPass)
+        AppLog.shared.debug("cli", "\(cmd): credentials from \(serverBase != nil || serverPass != nil ? "the command line (download server)" : token != nil ? "a token" : "none")")
 
         let catalog: Catalog
         do {

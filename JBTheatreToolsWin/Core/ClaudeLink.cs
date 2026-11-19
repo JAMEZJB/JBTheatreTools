@@ -151,7 +151,20 @@ public static class Connectors
     public static void Write(string path, JsonObject doc)
     {
         var data = SuiteBackup.Json(doc);
-        try { if (File.Exists(path) && File.ReadAllBytes(path).AsSpan().SequenceEqual(data)) return; } catch (IOException) { }
-        SuiteBackup.AtomicWrite(path, data);
+        var listed = (doc["apps"] as JsonObject)?.Select(kv => kv.Key).OrderBy(k => k).ToList() ?? new List<string>();
+        try
+        {
+            if (File.Exists(path) && File.ReadAllBytes(path).AsSpan().SequenceEqual(data))
+            {
+                Log.Debug("claude", $"connectors.json already lists {listed.Count} Claude connector(s): unchanged");
+                return;
+            }
+        } catch (IOException) { }
+        try
+        {
+            SuiteBackup.AtomicWrite(path, data);
+            Log.Debug("claude", $"connectors.json written ({LogFile.Bytes(data.Length)}) listing {listed.Count} installed app(s) Claude can use: {string.Join(", ", listed)}");
+        }
+        catch (Exception ex) { Log.Error("claude", $"connectors.json could not be saved at {path}", ex); throw; }
     }
 }

@@ -111,6 +111,20 @@ class LauncherRepository(private val context: Context) {
     private val installed = InstalledApps(context)
     private val installer = ApkInstaller(context)
 
+    init {
+        // Always written, verbose or not: what is running and the settings that explain its behaviour.
+        log.writeHeader(
+            BuildConfig.VERSION_NAME,
+            listOf(
+                "download access" to settings.authMode.name.lowercase(),
+                "development builds" to if (settings.devChannel) "on" else "off",
+                "show lock" to if (settings.showLock) "on" else "off",
+                "update checks" to settings.autoCheckInterval,
+                "log file" to log.path.absolutePath,
+            ),
+        )
+    }
+
     val catalog: Catalog by lazy {
         context.assets.open("catalog.json").use { Catalog.parse(it.readBytes().toString(Charsets.UTF_8)).forAndroid() }
     }
@@ -437,7 +451,9 @@ class LauncherRepository(private val context: Context) {
             // another's confirm dialog must not go ahead if the lock was switched on while it waited.
             val outcome = sessionMutex.withLock {
                 if (settings.showLock) throw ShowLockedException()
+                log.debug("install", "${app.id} ${release.tagName}: handing ${apk.name} (${apk.length()} bytes, package ${expectedPackage ?: declared}) to the system installer${if (unattended) " (automatic update)" else ""}")
                 var result = installer.install(apk, expectedPackage ?: declared, app.id, unattended)
+                log.debug("install", "${app.id} ${release.tagName}: the system installer answered ${result.javaClass.simpleName}")
                 if (result is ApkInstaller.Outcome.Failed && result.detail.contains("VERIFICATION_FAILURE")) {
                     log.log("install ${app.id} ${release.tagName}: verifier busy — retrying once")
                     delay(2_500)
@@ -529,8 +545,16 @@ class LauncherRepository(private val context: Context) {
             log.log("verify ${app.id} ${release.tagName}: $assetName — no signed checksums (a hand-picked version), suite cert ok")
             return
         }
-        if (sumsAsset == null) throw IllegalStateException("this release publishes no SHA256SUMS checksums")
-        if (sigAsset == null) throw IllegalStateException("this release’s SHA256SUMS isn’t signed with the suite key")
+        if (sumsAsset == null) {
+            log.warn("verify", "${app.id} ${release.tagName}: the release has no SHA256SUMS, so $assetName cannot be checked; refused")
+            throw IllegalStateException("this release publishes no SHA256SUMS checksums")
+        }
+        if (sigAsset == null) {
+            log.warn("verify", "${app.id} ${release.tagName}: the release has no SHA256SUMS.minisig, so the manifest is unsigned; refused")
+            throw IllegalStateException("this release’s SHA256SUMS isn’t signed with the suite key")
+        }
+        val t0 = System.currentTimeMillis()
+        log.debug("verify", "${app.id} ${release.tagName}: checking $assetName (${apk.length()} bytes) against the signed SHA256SUMS")
 
         val sums = File(cache, "${app.id}-${PathSafe.component(release.tagName)}-SHA256SUMS")
         val sig = File(cache, "${app.id}-${PathSafe.component(release.tagName)}-SHA256SUMS.minisig")
@@ -547,17 +571,23 @@ class LauncherRepository(private val context: Context) {
                 expectedTrustedComment = "${app.repo} ${release.tagName}",
                 publicKeyBase64 = verificationKey(),
             )
+            log.debug("verify", "${app.id} ${release.tagName}: the SHA256SUMS signature is valid for \"${app.repo} ${release.tagName}\"")
             // 2. integrity: the APK is the file that manifest lists.
             when (val r = ApkVerifier.checkChecksum(apk, assetName, String(sumsBytes, Charsets.UTF_8))) {
                 is ApkVerifier.Result.Failed -> throw IllegalStateException(r.reason)
                 else -> Unit
             }
+            log.debug("verify", "${app.id} ${release.tagName}: the SHA-256 of $assetName matches the manifest")
             // 3. provenance: the APK carries the suite signing certificate.
             when (val r = ApkVerifier.checkSigningCert(context, apk)) {
                 is ApkVerifier.Result.Failed -> throw IllegalStateException(r.reason)
                 else -> Unit
             }
             log.log("verify ${app.id} ${release.tagName}: $assetName — signed manifest ok, sha256 ok, suite cert ok")
+            log.debug("verify", "${app.id} ${release.tagName}: all three checks passed in ${System.currentTimeMillis() - t0} ms")
+        } catch (e: Exception) {
+            log.error("verify", "${app.id} ${release.tagName}: $assetName failed verification and was not installed: ${e.message}", e)
+            throw e
         } finally {
             sums.delete()
             sig.delete()

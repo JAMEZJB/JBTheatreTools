@@ -46,7 +46,7 @@ internal static class TriggerHostMain
             version: Version(),
             log: L);
         // The token is read again on every pass (a change made in the window applies at once).
-        string Token() => HeadlessTrigger.Word(TokenStore.LoadTriggerToken);
+        string Token() { var t = HeadlessTrigger.Word(TokenStore.LoadTriggerToken); Log.RegisterSecret(t); return t; }
         var trigger = new LauncherTrigger(host,
             HeadlessTrigger.Gate(() => AppSettings.Load().WebTriggerEnabled, InstallManager.Shared.Refresh), Token, L);
         var owner = new WebTriggerOwner(trigger.Server, log: L);

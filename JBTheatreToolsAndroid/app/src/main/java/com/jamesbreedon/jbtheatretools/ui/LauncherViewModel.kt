@@ -125,6 +125,8 @@ data class LauncherUiState(
     val devChannel: Boolean = false,
     /** Show lock: installs, updates and removals are paused; opening apps still works. */
     val showLock: Boolean = false,
+    /** "Verbose logging (for troubleshooting)": the log records every step. */
+    val verbose: Boolean = false,
     /** "Turn off show lock?" is showing (turning it off always asks first). */
     val confirmShowLockOff: Boolean = false,
     val autoCheckInterval: String = UpdatePolicy.DEFAULT_INTERVAL,
@@ -234,6 +236,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             devRevealed = repo.settings.devChannel,
             devChannel = repo.settings.devChannel,
             showLock = repo.settings.showLock,
+            verbose = repo.settings.verbose,
             autoCheckInterval = repo.settings.autoCheckInterval,
             notifyUpdates = repo.settings.notifyUpdates && Notifier(app).canPost(),
             autoInstallUpdates = repo.settings.autoInstallUpdates && AutoUpdatePolicy.available(android.os.Build.VERSION.SDK_INT),
@@ -1026,6 +1029,13 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     /** Builds the support report off the main thread (it reads the log), then hands it to [onReady] on the main thread. */
     fun shareDiagnostics(onReady: (String) -> Unit) {
         viewModelScope.launch { onReady(withContext(Dispatchers.IO) { diagnostics() }) }
+    }
+
+    /** About → Verbose logging: takes effect at once, is remembered, and is recorded in the log. */
+    fun setVerbose(on: Boolean) {
+        repo.settings.verbose = on
+        AppLog.get(getApplication()).noteVerboseChanged(on)
+        _state.update { it.copy(verbose = on) }
     }
 
     /** Reads the log off the main thread, then hands it to [onReady]. */

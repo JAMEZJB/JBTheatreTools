@@ -307,10 +307,12 @@ final class InstallManager: @unchecked Sendable {
     /// The running copy of an install slot's app, if it's open right now (for the "quit it first?" prompt).
     func runningInstance(_ key: String) -> NSRunningApplication? {
         guard let path = installedPath(key) else { return nil }
-        return NSWorkspace.shared.runningApplications.first { app in
+        let found = NSWorkspace.shared.runningApplications.first { app in
             guard let url = app.bundleURL, InstallGuard.isRunning(path, amongRunning: [url]) else { return false }
             return !(InstallGuard.processArguments(app.processIdentifier).map(InstallGuard.isHeadlessHelper) ?? false)
         }
+        AppLog.shared.debug("running-check", "\(key): \(found.map { "open (pid \($0.processIdentifier))" } ?? "not open") at \(path.path)")
+        return found
     }
 
     func installedPath(_ appId: String) -> URL? {
@@ -404,19 +406,28 @@ final class InstallManager: @unchecked Sendable {
     func install(app: CatalogApp, version: String, downloadedZip: URL, toApplications: Bool, variant: String? = nil,
                  expectedSHA256: String? = nil) throws -> URL {
         // Its own folder: another launcher process may be extracting the same app into this cache at the same time.
+        let t0 = Date()
         let extractDir = cacheDir.appendingPathComponent("extract-\(app.id)-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: extractDir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: extractDir) }
+        let zipSize = ((try? fm.attributesOfItem(atPath: downloadedZip.path)[.size]) as? NSNumber)?.int64Value ?? -1
+        AppLog.shared.debug("install", "\(app.id) \(version): installing from \(downloadedZip.lastPathComponent) (\(AppLog.bytes(zipSize))), \(toApplications ? "into the Applications folder" : "into the launcher's folder")")
 
         if let expectedSHA256 {
             guard try Self.sha256Hex(of: downloadedZip).caseInsensitiveCompare(expectedSHA256) == .orderedSame else {
                 try? fm.removeItem(at: downloadedZip)   // like a failed first check: the file doesn't stay in the cache
+                AppLog.shared.warn("install", "\(app.id): the zip's hash no longer matches the signed one (\(expectedSHA256.prefix(12))…), so it was deleted and nothing was installed")
                 throw InstallError.changedAfterVerify
             }
+            AppLog.shared.debug("install", "\(app.id): the zip was hashed again just before unpacking and matches the signed hash")
         }
         try ditto(extract: downloadedZip, to: extractDir)
 
-        guard let bundle = appBundle(in: extractDir, preferring: app.name) else { throw InstallError.noAppInZip }
+        guard let bundle = appBundle(in: extractDir, preferring: app.name) else {
+            AppLog.shared.warn("install", "\(app.id): the zip holds no .app bundle")
+            throw InstallError.noAppInZip
+        }
+        AppLog.shared.debug("install", "\(app.id): using bundle \(bundle.lastPathComponent) from the unpacked zip")
 
         // Each variant is its own install slot (Light and Full can coexist), keyed by the app id for
         // the default variant and `<id>@<variant>` otherwise. Only the previous install of THIS slot is
@@ -440,10 +451,15 @@ final class InstallManager: @unchecked Sendable {
             let running = InstallGuard.openBundles()
             // F4: never replace a bundle that's currently running — our old install, or whatever sits at dest.
             for candidate in ([ourPath.map { URL(fileURLWithPath: $0) }, dest].compactMap { $0 }) {
-                if InstallGuard.isRunning(candidate, amongRunning: running) { throw InstallError.appRunning(app.name) }
+                if InstallGuard.isRunning(candidate, amongRunning: running) {
+                    AppLog.shared.warn("install", "\(app.id): refused, \(candidate.lastPathComponent) at \(candidate.deletingLastPathComponent().path) is open right now (\(running.count) bundle(s) open)")
+                    throw InstallError.appRunning(app.name)
+                }
             }
+            AppLog.shared.debug("install", "\(app.id): running-app check passed (\(running.count) bundle(s) open, none of them this app)")
             // F6: a bundle at dest that we didn't install is a stranger — surface it, don't destroy it.
             if InstallGuard.isStranger(destExists: fm.fileExists(atPath: dest.path), destPath: dest.path, ourPath: ourPath) {
+                AppLog.shared.warn("install", "\(app.id): refused, something this launcher did not install is already at \(dest.path)")
                 throw InstallError.destinationOccupied(dest.path)
             }
             // Our old install in another folder (the location setting changed since): noted now, while nothing is at
@@ -461,7 +477,11 @@ final class InstallManager: @unchecked Sendable {
             m[key] = InstalledRecord(version: version, path: dest.path, installedAt: Self.isoNow(),
                                      desktopAlias: prior?.desktopAlias, variant: variant, previousVersion: previous)
             writeManifest(m)
-            if let elsewhere { try? fm.removeItem(at: elsewhere) }
+            AppLog.shared.debug("install", "\(app.id): \(prior?.version ?? "none") → \(version) at \(dest.path), recorded in installed.json; done in \(AppLog.ms(since: t0)) ms")
+            if let elsewhere {
+                AppLog.shared.debug("install", "\(app.id): removing the older copy in another folder, \(elsewhere.path)")
+                try? fm.removeItem(at: elsewhere)
+            }
             return dest
         }
     }
@@ -571,7 +591,11 @@ final class InstallManager: @unchecked Sendable {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         proc.arguments = asIntel ? ["--arch", "x86_64", path.path] : [path.path]
-        try proc.run()
+        AppLog.shared.debug("launch", "\(installKey): starting /usr/bin/open \(proc.arguments!.joined(separator: " ")) (architectures \(archs.sorted().joined(separator: ", ")))\(translated ? ", will run translated" : "")")
+        do { try proc.run() } catch {
+            AppLog.shared.error("launch", "\(installKey): could not start /usr/bin/open for \(path.path)", error)
+            throw error
+        }
     }
 
     /// Removes the installed `.app` bundle, any Desktop alias / Dock pin we created, and the
@@ -691,9 +715,21 @@ final class InstallManager: @unchecked Sendable {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         proc.arguments = ["-x", "-k", zip.path, dir.path]
-        try proc.run()
+        let t0 = Date()
+        let errPipe = Pipe()
+        proc.standardError = errPipe
+        do { try proc.run() } catch {
+            AppLog.shared.error("install", "could not start /usr/bin/ditto to unpack \(zip.lastPathComponent)", error)
+            throw error
+        }
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
-        if proc.terminationStatus != 0 { throw InstallError.unzipFailed(proc.terminationStatus) }
+        let lastErr = String(decoding: errData, as: UTF8.self).split(separator: "\n").last.map(String.init) ?? ""
+        AppLog.shared.debug("install", "ditto -x -k \(zip.lastPathComponent) → exit \(proc.terminationStatus), \(AppLog.ms(since: t0)) ms\(lastErr.isEmpty ? "" : ", last output: \(lastErr)")")
+        if proc.terminationStatus != 0 {
+            AppLog.shared.warn("install", "unpacking \(zip.lastPathComponent) failed: ditto exit \(proc.terminationStatus)\(lastErr.isEmpty ? "" : " (\(lastErr))")")
+            throw InstallError.unzipFailed(proc.terminationStatus)
+        }
     }
 
     /// Finds the `.app` bundle to install in `dir`, ignoring the `__MACOSX` metadata folder. When an

@@ -102,6 +102,8 @@ final class GitHubClient: NSObject, @unchecked Sendable {
     /// Full `Authorization` header value: `Bearer <PAT>` (direct), `Basic <…>` (server mode), or nil.
     private let authValue: String?
     private let lock = NSLock()
+    /// Words for the log: how this client reaches GitHub. Never a credential.
+    private let mode: String
     private var contexts: [Int: DownloadContext] = [:]
 
     private var sessionCreated = false
@@ -123,6 +125,8 @@ final class GitHubClient: NSObject, @unchecked Sendable {
     init(token: String?) {
         apiBase = "https://api.github.com"
         authValue = (token?.isEmpty == false) ? "Bearer \(token!)" : nil
+        mode = "direct to GitHub" + (authValue == nil ? " (no token)" : " (token)")
+        AppLog.shared.registerSecret(token)
         super.init()
     }
 
@@ -138,7 +142,45 @@ final class GitHubClient: NSObject, @unchecked Sendable {
         // recognises the same normalised phrases. (An empty result — e.g. all-punctuation — just won't match.)
         let pass = Passphrase.normalize(passphrase)
         authValue = "Basic " + Data("suite:\(pass)".utf8).base64EncodedString()
+        mode = "through the download server (passphrase)"
+        AppLog.shared.registerSecret(passphrase)
+        AppLog.shared.registerSecret(pass)
         super.init()
+    }
+
+    /// One request/response with a verbose log line: where it went, what came back and how long it took, or why it failed.
+    private func traced(_ req: URLRequest, what: String) async throws -> (Data, URLResponse) {
+        let t0 = Date()
+        let target = "\(req.httpMethod ?? "GET") \(AppLog.hostPath(req.url))" + (req.url?.query.map { "?\($0)" } ?? "")
+        do {
+            let (data, resp) = try await session.data(for: req)
+            let status = (resp as? HTTPURLResponse)?.statusCode
+            AppLog.shared.debug("github", "\(what): \(target) [\(mode)] → \(status.map(String.init) ?? "no HTTP status"), \(AppLog.bytes(Int64(data.count))), \(AppLog.ms(since: t0)) ms")
+            return (data, resp)
+        } catch {
+            AppLog.shared.warn("github", "\(what): \(target) [\(mode)] failed after \(AppLog.ms(since: t0)) ms: \(Self.explain(error))")
+            throw error
+        }
+    }
+
+    /// The system's error in plain words, for a log line.
+    static func explain(_ error: Error) -> String {
+        if let u = error as? URLError {
+            let why: String
+            switch u.code {
+            case .timedOut: why = "no reply in time"
+            case .notConnectedToInternet: why = "this computer has no internet connection"
+            case .cannotFindHost, .dnsLookupFailed: why = "the host name could not be found"
+            case .cannotConnectToHost: why = "refused: nothing is listening at that address and port"
+            case .networkConnectionLost: why = "the connection dropped part-way"
+            case .secureConnectionFailed, .serverCertificateUntrusted: why = "the secure connection could not be set up"
+            case .cancelled: why = "cancelled"
+            default: why = u.localizedDescription
+            }
+            return "\(why) (URLError \(u.errorCode))"
+        }
+        let ns = error as NSError
+        return "\(error.localizedDescription) [\(ns.domain) \(ns.code)]"
     }
 
     private func apiRequest(_ url: URL, accept: String) -> URLRequest {
@@ -156,7 +198,7 @@ final class GitHubClient: NSObject, @unchecked Sendable {
     func latestRelease(owner: String, repo: String) async throws -> ReleaseInfo {
         guard let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases/latest") else { throw GitHubError.badURL }
         let req = apiRequest(url, accept: "application/vnd.github+json")
-        let (data, resp) = try await session.data(for: req)
+        let (data, resp) = try await traced(req, what: "latest release of \(owner)/\(repo)")
         guard let http = resp as? HTTPURLResponse else { throw GitHubError.badResponse }
         if http.statusCode == 404 { throw GitHubError.noRelease }
         guard http.statusCode == 200 else { throw GitHubError.http(http.statusCode) }
@@ -178,12 +220,19 @@ final class GitHubClient: NSObject, @unchecked Sendable {
         let query = "per_page=\(ReleasePaging.pageSize)" + (page > 1 ? "&page=\(page)" : "")
         guard let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases?\(query)") else { throw GitHubError.badURL }
         let req = apiRequest(url, accept: "application/vnd.github+json")
-        let (data, resp) = try await session.data(for: req)
+        let (data, resp) = try await traced(req, what: "releases of \(owner)/\(repo) page \(page)")
         guard let http = resp as? HTTPURLResponse else { throw GitHubError.badResponse }
-        if http.statusCode == 401 { throw GitHubError.unauthorized }
-        if http.statusCode == 404 { throw GitHubError.notAccessible }
+        if http.statusCode == 401 { AppLog.shared.debug("github", "\(owner)/\(repo): 401, the credential was refused (\(mode))"); throw GitHubError.unauthorized }
+        if http.statusCode == 404 { AppLog.shared.debug("github", "\(owner)/\(repo): 404, this credential can't see the repository, so the app is hidden"); throw GitHubError.notAccessible }
         guard http.statusCode == 200 else { throw GitHubError.http(http.statusCode) }
-        return try JSONDecoder().decode([ReleaseInfo].self, from: data)
+        do {
+            let list = try JSONDecoder().decode([ReleaseInfo].self, from: data)
+            AppLog.shared.debug("github", "\(owner)/\(repo) page \(page): \(list.count) release(s)\(list.first.map { ", newest \($0.tagName)" } ?? "")")
+            return list
+        } catch {
+            AppLog.shared.error("github", "\(owner)/\(repo) page \(page): the reply from \(AppLog.hostPath(url)) could not be read as a release list", error)
+            throw error
+        }
     }
 
     /// The relay's editable "New in" lines (see `WhatsNewNotes`). Server mode only — returns nil in direct
@@ -194,9 +243,12 @@ final class GitHubClient: NSObject, @unchecked Sendable {
         var req = apiRequest(url, accept: "application/json")
         req.cachePolicy = .reloadIgnoringLocalCacheData
         req.timeoutInterval = 15
-        guard let (data, resp) = try? await session.data(for: req),
+        guard let (data, resp) = try? await traced(req, what: "what's-new lines"),
               let http = resp as? HTTPURLResponse, http.statusCode == 200,
-              let notes = try? WhatsNewNotes.parse(data) else { return nil }
+              let notes = try? WhatsNewNotes.parse(data) else {
+            AppLog.shared.debug("github", "what's-new lines: none used (the server has none, or its reply was not valid); the bundled lines stay")
+            return nil
+        }
         return (notes, data)
     }
 
@@ -207,6 +259,9 @@ final class GitHubClient: NSObject, @unchecked Sendable {
         guard let url = URL(string: "\(apiBase)/repos/\(owner)/\(repo)/releases/assets/\(assetId)") else { throw GitHubError.badURL }
         let req = apiRequest(url, accept: "application/octet-stream")
         let task = session.downloadTask(with: req)
+        let t0 = Date()
+        AppLog.shared.debug("download", "GET \(AppLog.hostPath(url)) [\(mode)] asset \(assetId) of \(owner)/\(repo) → \(dest.lastPathComponent)")
+        defer { AppLog.shared.debug("download", "asset \(assetId) of \(owner)/\(repo) ended after \(AppLog.ms(since: t0)) ms") }
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
                 // Already cancelled before the transfer started: never start it.
@@ -263,17 +318,24 @@ extension GitHubClient: URLSessionDownloadDelegate {
             try fm.createDirectory(at: ctx.dest.deletingLastPathComponent(),
                                    withIntermediateDirectories: true)
             try fm.moveItem(at: location, to: ctx.dest)
+            let size = ((try? fm.attributesOfItem(atPath: ctx.dest.path)[.size]) as? NSNumber)?.int64Value ?? -1
+            AppLog.shared.debug("download", "saved \(ctx.dest.lastPathComponent) (\(AppLog.bytes(size))) in \(ctx.dest.deletingLastPathComponent().path)")
         } catch {
             ctx.moveError = error
+            AppLog.shared.error("download", "the downloaded file could not be moved to \(ctx.dest.path)", error)
         }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let ctx = removeContext(for: task.taskIdentifier) else { return }
         if let http = task.response as? HTTPURLResponse, http.statusCode != 200 {
+            AppLog.shared.warn("download", "\(AppLog.hostPath(task.currentRequest?.url)) answered HTTP \(http.statusCode) instead of the file")
             ctx.continuation.resume(throwing: GitHubError.http(http.statusCode)); return
         }
-        if let error = error { ctx.continuation.resume(throwing: error); return }
+        if let error = error {
+            AppLog.shared.warn("download", "\(AppLog.hostPath(task.originalRequest?.url)) failed: \(Self.explain(error))")
+            ctx.continuation.resume(throwing: error); return
+        }
         if let moveError = ctx.moveError { ctx.continuation.resume(throwing: moveError); return }
         ctx.progress?(1.0)
         ctx.continuation.resume()
@@ -283,6 +345,8 @@ extension GitHubClient: URLSessionDownloadDelegate {
                     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
         var req = request
+        let crossHost = request.url?.host != response.url?.host
+        AppLog.shared.debug("download", "redirect \(response.statusCode) from \(AppLog.hostPath(response.url)) to \(AppLog.hostPath(request.url)); the credential is dropped\(crossHost ? " (a different host)" : "")")
         req.setValue(nil, forHTTPHeaderField: "Authorization")
         completionHandler(req)
     }

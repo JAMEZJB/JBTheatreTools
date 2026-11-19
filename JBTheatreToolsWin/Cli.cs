@@ -57,7 +57,7 @@ public static partial class Cli
         // History.Add queues its write on the thread pool; the process exits as soon as this returns, so wait for
         // every queued line (bounded) before any command hands back its exit code.
         try { return await RunCommandAsync(args); }
-        finally { History.Flush(); }
+        finally { History.Flush(); Log.Flush(); }
     }
 
     private static async Task<int> RunCommandAsync(string[] args)
@@ -99,6 +99,9 @@ public static partial class Cli
         // --launch) must never touch the Credential Manager / Keychain-equivalent (audit F14).
         var needsAuth = cmd is not ("--installed" or "--uninstall" or "--launch" or "--self-update" or "--install-file");
         if (needsAuth) token ??= SafeLoadToken();
+        Log.RegisterSecret(token);
+        Log.RegisterSecret(_serverPass);
+        Log.Debug("cli", $"{cmd}: credentials from {(_serverBase != null || _serverPass != null ? "the command line (download server)" : token != null ? "a token" : "none")}");
 
         Catalog catalog;
         try { catalog = Catalog.Load(catalogPath); }

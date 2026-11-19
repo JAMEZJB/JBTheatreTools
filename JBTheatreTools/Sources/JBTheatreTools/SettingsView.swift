@@ -26,6 +26,7 @@ struct SettingsView: View {
     @State private var storage: (installed: Int64, cache: Int64)?
     @State private var clearingCache = false
     @State private var diagnosticsCopied = false
+    @State private var verboseLogging = AppLog.shared.verbose
     @State private var notificationsRefused = false
     @State private var backupSheet: BackupSheet?
     @State private var restoreError: String?
@@ -71,8 +72,6 @@ struct SettingsView: View {
             .frame(maxHeight: Self.panelsMaxHeight)
             .fixedSize(horizontal: false, vertical: true)
             HStack {
-                Button("Open Log") { AppLog.shared.open() }
-                    .tint(.selectorBlue)
                 Button("Reset App Order") { state.resetAppOrder() }
                     .tint(.selectorBlue)
                 Spacer()
@@ -590,6 +589,16 @@ struct SettingsView: View {
                     }
                 }
                 Text("A plain-text report — versions, settings, each app's state and recent log lines — to paste into a message when you ask for help. It never includes your token or passphrase.")
+                    .font(JBFont.small).foregroundStyle(Color.jbText2)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    Toggle("Verbose logging (for troubleshooting)", isOn: Binding(
+                        get: { verboseLogging }, set: { verboseLogging = $0; AppLog.shared.setVerbose($0) }))
+                    Spacer()
+                    Button("Open Log") { AppLog.shared.open() }
+                        .tint(.selectorBlue)
+                }
+                Text("Records every step in the log so a problem can be traced. Turn it off when you have what you need.")
                     .font(JBFont.small).foregroundStyle(Color.jbText2)
                     .fixedSize(horizontal: false, vertical: true)
             }

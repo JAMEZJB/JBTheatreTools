@@ -314,6 +314,7 @@ final class TriggerHostRunner {
             return nil
         }
         let word = readToken()
+        AppLog.shared.registerSecret(word)
         owner.server.setToken(word)
         let bind = s.bind.trimmingCharacters(in: .whitespaces)
         let problem = WebTriggerContract.bindProblem(bind: bind, port: String(s.port), tokenSet: !word.isEmpty)
@@ -433,6 +434,8 @@ enum HeadlessTriggerHost {
 enum TriggerHostMain {
     static func run() -> Never {
         let log: @Sendable (String) -> Void = { AppLog.shared.log("[host] " + $0) }
+        atexit { AppLog.shared.flush() }
+        AppLog.shared.writeStartHeader(mode: "background web trigger")
         guard let catalog = try? Catalog.load() else {
             log("couldn't read the app list — the background copy stops")
             exit(1)

@@ -1,5 +1,6 @@
 package com.jamesbreedon.jbtheatretools.net
 
+import com.jamesbreedon.jbtheatretools.core.AppLog
 import com.jamesbreedon.jbtheatretools.core.Passphrase
 import com.jamesbreedon.jbtheatretools.core.ReleasePaging
 import com.jamesbreedon.jbtheatretools.core.WhatsNewNotes
@@ -12,6 +13,7 @@ import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Base64
+import java.util.Locale
 
 @Serializable
 data class ReleaseAsset(
@@ -75,8 +77,10 @@ class GitHubClient private constructor(
         private const val DOWNLOAD_CONNECT_MS = 15_000
 
         /** Direct GitHub access with a fine-grained PAT (or none, for public repos). */
-        fun direct(token: String?): GitHubClient =
-            GitHubClient(GITHUB_API, if (token.isNullOrEmpty()) null else "Bearer $token")
+        fun direct(token: String?): GitHubClient {
+            AppLog.current?.registerSecret(token)
+            return GitHubClient(GITHUB_API, if (token.isNullOrEmpty()) null else "Bearer $token")
+        }
 
         /**
          * Download-relay access: the same API paths, sent to the relay with HTTP Basic auth (fixed
@@ -87,6 +91,8 @@ class GitHubClient private constructor(
             val base = serverBase.trim().trimEnd('/')
             val pass = Passphrase.normalize(passphrase)
             val basic = Base64.getEncoder().encodeToString("suite:$pass".toByteArray(Charsets.UTF_8))
+            AppLog.current?.registerSecret(passphrase)
+            AppLog.current?.registerSecret(pass)
             return GitHubClient(base, "Basic $basic")
         }
 
@@ -98,6 +104,31 @@ class GitHubClient private constructor(
     }
 
     val isRelay: Boolean get() = apiBase != GITHUB_API
+
+    /** Words for the log: how this client reaches the release feed. Never a credential. */
+    private val mode: String
+        get() = when {
+            apiBase == GITHUB_API -> "direct to GitHub" + if (authValue == null) " (no token)" else " (token)"
+            authValue == null -> "local feed (no credential)"
+            else -> "through the download server (passphrase)"
+        }
+
+    /** The status line of a finished request, for the verbose log: what was asked, what came back, how long. */
+    private fun traced(what: String, conn: HttpURLConnection, startedAt: Long, code: Int, bytes: Long? = null) {
+        AppLog.current?.debug("github") {
+            "$what: ${conn.requestMethod} ${AppLog.hostPath(conn.url)}${conn.url.query?.let { "?$it" } ?: ""} [$mode] → $code" +
+                (bytes?.let { ", ${"%,d".format(Locale.UK, it)} bytes" } ?: "") + ", ${System.currentTimeMillis() - startedAt} ms"
+        }
+    }
+
+    /** A network error in plain words, for a log line. */
+    private fun explain(e: Exception): String = when (e) {
+        is java.net.SocketTimeoutException -> "no reply in time"
+        is java.net.UnknownHostException -> "the host name could not be found"
+        is java.net.ConnectException -> "refused or unreachable: nothing is listening at that address and port, or there is no route to it"
+        is javax.net.ssl.SSLException -> "the secure connection could not be set up"
+        else -> e.message ?: e.javaClass.simpleName
+    } + " (${e.javaClass.simpleName})"
 
     private fun open(url: URL, accept: String): HttpURLConnection {
         val conn = url.openConnection() as HttpURLConnection
@@ -122,8 +153,9 @@ class GitHubClient private constructor(
     /** The latest (non-prerelease) release. Throws NO_RELEASE on 404. */
     fun latestRelease(owner: String, repo: String): ReleaseInfo {
         val conn = open(url("/repos/$owner/$repo/releases/latest"), "application/vnd.github+json")
+        val t0 = System.currentTimeMillis()
         try {
-            when (val code = conn.responseCode) {
+            when (val code = conn.responseCode.also { traced("latest release of $owner/$repo", conn, t0, it) }) {
                 200 -> Unit
                 401, 403 -> throw GitHubException.unauthorized()
                 404 -> throw GitHubException.noRelease()
@@ -154,20 +186,32 @@ class GitHubClient private constructor(
      */
     fun releasesPage(owner: String, repo: String, page: Int): List<ReleaseInfo> {
         val conn = open(url("/repos/$owner/$repo/releases?per_page=$PAGE_SIZE&page=$page"), "application/vnd.github+json")
+        val t0 = System.currentTimeMillis()
         try {
-            when (val code = conn.responseCode) {
+            when (val code = try { conn.responseCode } catch (e: Exception) {
+                AppLog.current?.warn("github", "releases of $owner/$repo page $page: ${AppLog.hostPath(conn.url)} [$mode] failed after ${System.currentTimeMillis() - t0} ms: ${explain(e)}")
+                throw e
+            }) {
                 200 -> Unit
-                401 -> throw GitHubException.unauthorized()
-                404 -> throw GitHubException.notAccessible()
-                else -> throw GitHubException.http(code)
+                401 -> { traced("releases of $owner/$repo page $page", conn, t0, code); throw GitHubException.unauthorized() }
+                404 -> {
+                    traced("releases of $owner/$repo page $page", conn, t0, code)
+                    AppLog.current?.debug("github", "$owner/$repo: 404, this credential can't see the repository, so the app is hidden")
+                    throw GitHubException.notAccessible()
+                }
+                else -> { traced("releases of $owner/$repo page $page", conn, t0, code); throw GitHubException.http(code) }
             }
             val body = readBody(conn)
+            traced("releases of $owner/$repo page $page", conn, t0, 200, body.size.toLong())
             return try {
                 json.decodeFromString(
                     kotlinx.serialization.builtins.ListSerializer(ReleaseInfo.serializer()),
                     String(body, Charsets.UTF_8),
-                )
+                ).also { list ->
+                    AppLog.current?.debug("github", "$owner/$repo page $page: ${list.size} release(s)" + (list.firstOrNull()?.let { ", newest ${it.tagName}" } ?: ""))
+                }
             } catch (e: Exception) {
+                AppLog.current?.error("github", "$owner/$repo page $page: the reply from ${AppLog.hostPath(conn.url)} could not be read as a release list", e)
                 throw GitHubException.badResponse()
             }
         } finally {
@@ -214,6 +258,8 @@ class GitHubClient private constructor(
         var target = url("/repos/$owner/$repo/releases/assets/$assetId")
         var carryAuth = true
         var hops = 0
+        val t0 = System.currentTimeMillis()
+        AppLog.current?.debug("download", "GET ${AppLog.hostPath(target)} [$mode] asset $assetId of $owner/$repo → ${dest.name}")
         while (true) {
             if (shouldCancel?.invoke() == true) throw DownloadCancelledException()
             val conn = if (carryAuth) open(target, "application/octet-stream") else {
@@ -231,7 +277,9 @@ class GitHubClient private constructor(
                 if (code in 300..399) {
                     val location = conn.getHeaderField("Location") ?: throw GitHubException.badResponse()
                     if (++hops > 5) throw GitHubException.badResponse()
-                    target = URL(target, location)
+                    val next = URL(target, location)
+                    AppLog.current?.debug("download", "redirect $code from ${AppLog.hostPath(target)} to ${AppLog.hostPath(next)}; the credential is dropped")
+                    target = next
                     // Cross-host redirect to signed storage: NEVER carry the credential.
                     carryAuth = false
                     continue
@@ -246,12 +294,14 @@ class GitHubClient private constructor(
                 dest.parentFile?.mkdirs()
                 conn.inputStream.use { input -> copy(input, dest, total, progress, shouldCancel) }
                 progress?.invoke(1.0)
+                AppLog.current?.debug("download", "saved ${dest.name} (${"%,d".format(Locale.UK, dest.length())} bytes) in ${dest.parentFile?.name}; ${System.currentTimeMillis() - t0} ms")
                 return
             } catch (e: DownloadCancelledException) {
                 throw e
             } catch (e: Exception) {
                 // The watcher dropped the connection mid-connect or mid-read: that's the Cancel, not an error.
                 if (watcher?.tripped == true || shouldCancel?.invoke() == true) throw DownloadCancelledException()
+                AppLog.current?.warn("download", "asset $assetId of $owner/$repo failed after ${System.currentTimeMillis() - t0} ms: ${explain(e)}")
                 throw e
             } finally {
                 watcher?.finish()

@@ -26,6 +26,8 @@ public static class InstallTransaction
         string staging = Path.Combine(appDirectory, ".install-" + generation);
         string published = Path.Combine(appDirectory, generation);
         bool committed = false;
+        var t0 = System.Diagnostics.Stopwatch.StartNew();
+        Log.Debug("install", $"{slot}: unpacking {(zip ? "zip" : "exe")} {Path.GetFileName(download)} ({LogFile.Bytes(new FileInfo(download).Length)}) into a new folder {generation}");
         try
         {
             System.IO.Directory.CreateDirectory(staging);
@@ -37,6 +39,7 @@ public static class InstallTransaction
                     .Where(p => p.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)).ToList();
                 executable = FullApp.PickMainExe(exes, preferredStem)
                     ?? throw new InvalidDataException("No launcher executable was found in the ZIP.");
+                Log.Debug("install", $"{slot}: the zip holds {exes.Count} .exe file(s); using {Path.GetRelativePath(staging, executable)} (looked for \"{preferredStem}\")");
             }
             else
             {
@@ -55,6 +58,7 @@ public static class InstallTransaction
             // No cancellation after this callback succeeds: the installed pointer has committed.
             commit(payload);
             committed = true;
+            Log.Debug("install", $"{slot}: committed {payload.Executable} in {t0.ElapsedMilliseconds} ms");
             return payload;
         }
         finally

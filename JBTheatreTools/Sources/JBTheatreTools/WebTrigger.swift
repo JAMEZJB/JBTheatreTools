@@ -497,10 +497,13 @@ final class WebTriggerServer: @unchecked Sendable {
 
     fileprivate func answer(_ req: WebTriggerHTTP.Request, ip: String) async -> Data {
         let expected = locked { tokenValue }
+        let t0 = Date()
         let (reply, text) = await WebTriggerHTTP.respond(req, ip: ip, product: product, expected: expected,
                                                          run: { id, source in await self.run(id, source) },
                                                          listing: { await self.listing() },
                                                          log: log)
+        // The address of the caller, what it asked for (the path only: a query can carry a value) and how it ended.
+        AppLog.shared.debug("web-trigger", "\(req.method) \(WebTriggerHTTP.splitTarget(req.target).path) from \(ip) → \(reply.status), \(AppLog.ms(since: t0)) ms\(expected.isEmpty ? "" : " (token required)")")
         return WebTriggerHTTP.response(reply, text: text, product: product)
     }
 }

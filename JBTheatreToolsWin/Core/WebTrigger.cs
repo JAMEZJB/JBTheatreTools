@@ -301,7 +301,10 @@ public sealed class WebTriggerServer
             Write(stream, 400, new JsonObject { ["ok"] = false, ["error"] = "Bad request." }, false);
             return;
         }
+        var t0 = System.Diagnostics.Stopwatch.StartNew();
         var (status, reply, text) = Handle(req, ip);
+        // The caller's address, what it asked for (the path only: a query can carry a value) and how it ended.
+        Log.Debug("web-trigger", $"{req.Method} {SplitTarget(req.Target).Item1} from {ip} → {status}, {t0.ElapsedMilliseconds} ms");
         Write(stream, status, reply, text);
         Linger(client, stream);
     }

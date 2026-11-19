@@ -11,11 +11,14 @@ internal static class Program
         // gets no args; OS restart-manager args use `/`, so they still fall through to the GUI.
         // `--trigger-host` (Stagehand's hidden copy for Dashboard buttons) comes first: only the web trigger, headless —
         // never a window or a tray icon.
+        StartupLog.Init();
         switch (TriggerRegistration.ModeOf(args, Cli.Commands))
         {
             case LaunchMode.TriggerHost:
+                StartupLog.Header("background web trigger");
                 return TriggerHostMain.Run();
             case LaunchMode.Cli:
+                StartupLog.Header("command line", LogFile.MaskedArguments(args));
                 return Cli.Run(args).GetAwaiter().GetResult();
         }
 

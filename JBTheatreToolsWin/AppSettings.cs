@@ -11,6 +11,8 @@ public sealed class AppSettings
     public bool InstallToApplications { get; set; }       // true: also add Start menu + Desktop shortcuts on install
     public string AuthMode { get; set; } = "";            // "token" (GitHub PAT) | "server" (relay, DEFAULT); "" = resolved in Load()
     public string ViewMode { get; set; } = "list";        // "list" | "grid" (icon-tile layout)
+    /// <summary>"Verbose logging (for troubleshooting)": the log records every step. Off by default; saved as the key <c>verbose</c>.</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("verbose")] public bool Verbose { get; set; }
     public bool DevChannel { get; set; }                  // offer vX.Y.Z-dev.N pre-releases (hidden: Settings → click the version 7×)
     public List<string> AppOrder { get; set; } = new();   // user's row order (app ids); empty = catalog order
     public List<string> PinnedApps { get; set; } = new(); // app ids pinned to the top of the list
@@ -43,6 +45,19 @@ public sealed class AppSettings
         Environment.GetEnvironmentVariable("JBTT_SETTINGS_DIR") is { Length: > 0 } testDir ? testDir
         : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JBTheatreTools");
     private static string FilePath => Path.Combine(Dir, "settings.json");
+
+    /// <summary>Just the verbose switch, read straight from the file (the log asks every couple of seconds, and the
+    /// full <see cref="Load"/> may read the credential store).</summary>
+    public static bool ReadVerbose()
+    {
+        try
+        {
+            if (!File.Exists(FilePath)) return false;
+            using var doc = JsonDocument.Parse(File.ReadAllText(FilePath));
+            return doc.RootElement.TryGetProperty("verbose", out var v) && v.ValueKind == JsonValueKind.True;
+        }
+        catch { return false; }
+    }
 
     public static AppSettings Load()
     {

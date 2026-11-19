@@ -101,6 +101,8 @@ public sealed class GitHubClient : IDisposable
     /// <summary>Full Authorization header value: "Bearer &lt;PAT&gt;", "Basic &lt;…&gt;", or null.</summary>
     private readonly string? _authValue;
     private readonly HttpClient _http;
+    /// <summary>Words for the log: how this client reaches GitHub. Never a credential.</summary>
+    private readonly string _mode;
 
     /// <summary>Direct GitHub access. `token` may be null for unauthenticated calls against public
     /// repos (self-update check).</summary>
@@ -108,6 +110,8 @@ public sealed class GitHubClient : IDisposable
     {
         _apiBase = "https://api.github.com";
         _authValue = string.IsNullOrEmpty(token) ? null : $"Bearer {token}";
+        _mode = "direct to GitHub" + (_authValue == null ? " (no token)" : " (token)");
+        Log.RegisterSecret(token);
         _http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
         {
             Timeout = TimeSpan.FromMinutes(10)
@@ -125,10 +129,32 @@ public sealed class GitHubClient : IDisposable
         // normalised phrases. (An empty result — e.g. all-punctuation — just won't match.)
         var pass = Passphrase.Normalize(passphrase);
         _authValue = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"suite:{pass}"));
+        _mode = "through the download server (passphrase)";
+        Log.RegisterSecret(passphrase);
+        Log.RegisterSecret(pass);
         _http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
         {
             Timeout = TimeSpan.FromMinutes(10)
         };
+    }
+
+    /// <summary>One request/response with a verbose log line: where it went, what came back and how long it took, or why it failed.</summary>
+    private async Task<HttpResponseMessage> SendTracedAsync(HttpRequestMessage req, string what,
+        HttpCompletionOption completion = HttpCompletionOption.ResponseContentRead, CancellationToken ct = default)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var target = $"{req.Method} {LogFile.HostPath(req.RequestUri?.ToString())}{req.RequestUri?.Query}";
+        try
+        {
+            var resp = await _http.SendAsync(req, completion, ct).ConfigureAwait(false);
+            Log.Debug("github", $"{what}: {target} [{_mode}] → {(int)resp.StatusCode}, {resp.Content.Headers.ContentLength?.ToString("N0") ?? "unknown"} bytes, {sw.ElapsedMilliseconds} ms");
+            return resp;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            Log.Warn("github", $"{what}: {target} [{_mode}] failed after {sw.ElapsedMilliseconds} ms: {LogFile.Explain(ex)}");
+            throw;
+        }
     }
 
     private HttpRequestMessage NewRequest(string url, string accept)
@@ -157,19 +183,23 @@ public sealed class GitHubClient : IDisposable
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             // AllowAutoRedirect is off: a relay that doesn't serve the document 302s to github.com — that's a
             // "no document", never something to follow with our credentials.
-            using var resp = await _http.SendAsync(req, cts.Token).ConfigureAwait(false);
+            using var resp = await SendTracedAsync(req, "what's-new lines", ct: cts.Token).ConfigureAwait(false);
             if (resp.StatusCode != HttpStatusCode.OK) return null;
             var raw = await resp.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
             return (WhatsNewNotes.Parse(raw), raw);
         }
-        catch { return null; }
+        catch
+        {
+            Log.Debug("github", "what's-new lines: none used (the server has none, or its reply was not valid); the bundled lines stay");
+            return null;
+        }
     }
 
     public async Task<ReleaseInfo> LatestReleaseAsync(string owner, string repo)
     {
         var url = $"{_apiBase}/repos/{owner}/{repo}/releases/latest";
         using var req = NewRequest(url, "application/vnd.github+json");
-        using var resp = await _http.SendAsync(req).ConfigureAwait(false);
+        using var resp = await SendTracedAsync(req, $"latest release of {owner}/{repo}").ConfigureAwait(false);
         if (resp.StatusCode == HttpStatusCode.NotFound)
             throw new GitHubException(GitHubErrorKind.NoRelease, "No published release found.");
         if (!resp.IsSuccessStatusCode)
@@ -196,15 +226,31 @@ public sealed class GitHubClient : IDisposable
     {
         var url = $"{_apiBase}/repos/{owner}/{repo}/releases?per_page={ReleasePaging.PageSize}" + (page > 1 ? $"&page={page}" : "");
         using var req = NewRequest(url, "application/vnd.github+json");
-        using var resp = await _http.SendAsync(req).ConfigureAwait(false);
+        using var resp = await SendTracedAsync(req, $"releases of {owner}/{repo} page {page}").ConfigureAwait(false);
         if (resp.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            Log.Debug("github", $"{owner}/{repo}: 401, the credential was refused ({_mode})");
             throw new GitHubException(GitHubErrorKind.Unauthorized, "GitHub token is invalid or expired.");
+        }
         if (resp.StatusCode == HttpStatusCode.NotFound)
+        {
+            Log.Debug("github", $"{owner}/{repo}: 404, this credential can't see the repository, so the app is hidden");
             throw new GitHubException(GitHubErrorKind.NotAccessible, "This token can’t access that repository.");
+        }
         if (!resp.IsSuccessStatusCode)
             throw new GitHubException(GitHubErrorKind.Http, $"GitHub returned HTTP {(int)resp.StatusCode}.");
         var json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-        return JsonSerializer.Deserialize<List<ReleaseInfo>>(json) ?? new();
+        try
+        {
+            var list = JsonSerializer.Deserialize<List<ReleaseInfo>>(json) ?? new();
+            Log.Debug("github", $"{owner}/{repo} page {page}: {list.Count} release(s){(list.Count > 0 ? $", newest {list[0].TagName}" : "")}");
+            return list;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("github", $"{owner}/{repo} page {page}: the reply from {LogFile.HostPath(url)} could not be read as a release list", ex);
+            throw;
+        }
     }
 
     /// <summary>Sends a GET and follows GitHub's redirect(s) to S3 — bounded, resolving a relative
@@ -230,6 +276,7 @@ public sealed class GitHubClient : IDisposable
                 resp.Dispose();
                 throw new Exception($"Refusing a non-HTTPS redirect to {location.Host} — download aborted.");
             }
+            Log.Debug("download", $"redirect {(int)resp.StatusCode} from {LogFile.HostPath(current.ToString())} to {LogFile.HostPath(location.ToString())}; the credential is dropped{(location.Host != current.Host ? " (a different host)" : "")}");
             resp.Dispose();
             current = location;
             using var hopReq = new HttpRequestMessage(HttpMethod.Get, location);
@@ -252,6 +299,8 @@ public sealed class GitHubClient : IDisposable
                                          IProgress<double>? progress = null, CancellationToken cancellationToken = default)
     {
         var url = $"{_apiBase}/repos/{owner}/{repo}/releases/assets/{assetId}";
+        var swDownload = System.Diagnostics.Stopwatch.StartNew();
+        Log.Debug("download", $"GET {LogFile.HostPath(url)} [{_mode}] asset {assetId} of {owner}/{repo} → {Path.GetFileName(dest)}");
         // One watchdog for the whole transfer, re-armed whenever data arrives; the caller's cancel still wins.
         using var stall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         stall.CancelAfter(StallTimeout);
@@ -268,7 +317,10 @@ public sealed class GitHubClient : IDisposable
         }
         using var resp = response;
         if (!resp.IsSuccessStatusCode)
+        {
+            Log.Warn("download", $"{LogFile.HostPath(url)} answered HTTP {(int)resp.StatusCode} instead of the file");
             throw new GitHubException(GitHubErrorKind.Http, $"Download failed: HTTP {(int)resp.StatusCode}.");
+        }
 
         var total = resp.Content.Headers.ContentLength ?? -1L;
         Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
@@ -317,10 +369,13 @@ public sealed class GitHubClient : IDisposable
             if (File.Exists(dest)) File.Delete(dest);
             File.Move(part, dest);
             progress?.Report(1.0);
+            Log.Debug("download", $"saved {Path.GetFileName(dest)} ({LogFile.Bytes(received)}) in {Path.GetDirectoryName(dest)}; {swDownload.ElapsedMilliseconds} ms");
         }
-        catch
+        catch (Exception ex)
         {
             try { if (File.Exists(part)) File.Delete(part); } catch { /* best effort */ }
+            if (ex is OperationCanceledException) Log.Debug("download", $"asset {assetId} of {owner}/{repo} cancelled after {swDownload.ElapsedMilliseconds} ms");
+            else Log.Warn("download", $"asset {assetId} of {owner}/{repo} failed after {LogFile.Bytes(received)} and {swDownload.ElapsedMilliseconds} ms: {LogFile.Explain(ex)}");
             throw;
         }
     }

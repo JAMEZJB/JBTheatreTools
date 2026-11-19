@@ -1148,6 +1148,15 @@ private fun AboutScreen(vm: LauncherViewModel, state: LauncherUiState, gutter: a
                     VSpace(8.dp)
                     BodyText(state.logTail.ifBlank { "No entries yet." }, maxLines = 8)
                     VSpace(12.dp)
+                    LabelText("Verbose logging (for troubleshooting)")
+                    VSpace(8.dp)
+                    Segmented(listOf("Off", "On"), if (state.verbose) 1 else 0, { vm.setVerbose(it == 1) }, Modifier.fillMaxWidth())
+                    VSpace(8.dp)
+                    BodyText(
+                        "Records every step in the log so a problem can be traced. Turn it off when you have what you need.",
+                        maxLines = Int.MAX_VALUE,
+                    )
+                    VSpace(12.dp)
                     SecondaryButton("Share log", Modifier.fillMaxWidth()) {
                         vm.shareLog { text -> shareText(context, "JB Theatre Tools log", text, "Share log") }
                     }

@@ -392,7 +392,7 @@ final class AppState: ObservableObject {
             guard let self else { return }
             Task { @MainActor in self.adoptClaudeShowLock(initial: false) }
         }
-        AppLog.shared.log("launched v\(currentVersion)")
+        AppLog.shared.writeStartHeader(mode: "window")
         syncChrome()   // the menus' first state (show lock, Update All, launchable apps)
         // The Dashboard web trigger listens in the launcher's own process (never a command-line run), and only when on.
         // It lives with the process, not the window: with "keep running" the window can close and buttons still work.
@@ -589,7 +589,11 @@ final class AppState: ObservableObject {
 
     private func refreshOnce(quiet: Bool = false) async {
         await ensureKeychainExplained()
-        guard let client = activeClient() else { return }
+        guard let client = activeClient() else {
+            AppLog.shared.debug("refresh", "not checking: no credentials are saved for \(Self.authMode.rawValue) mode")
+            return
+        }
+        AppLog.shared.debug("refresh", "checking \(rows.count) app(s) for new releases (\(Self.authMode.rawValue) mode, \(quiet ? "scheduled check" : "asked for in the window"))")
         // Clear a stale network/credential error from a previous run (but keep a catalog-load error,
         // which leaves `rows` empty).
         if !rows.isEmpty { globalError = nil }
@@ -650,11 +654,13 @@ final class AppState: ObservableObject {
         switch outcome {
         case .releases(let all):
             guard let latest = Self.latest(from: all, for: macAsset(for: app)) else {
+                AppLog.shared.debug("refresh", "\(id): \(all.count) release(s), none with a macOS build for this app (\(macAsset(for: app))) → no release")
                 update(id) { $0.releases = all; $0.latestRelease = nil; $0.latest = nil; $0.latestAssetId = nil; $0.status = .noRelease }
                 return
             }
             let assetId = latest.assets.first { $0.name == macAsset(for: app) }?.id
             let installedNow = InstallManager.shared.installedVersion(slot)
+            AppLog.shared.debug("refresh", "\(id): latest \(latest.tagName) of \(all.count) release(s), installed \(installedNow ?? "none") → \(Self.status(installed: installedNow, latest: latest.tagName, hasAsset: assetId != nil))\(Self.devChannel ? " (development builds shown)" : "")")
             update(id) {
                 $0.releases = all
                 $0.latestRelease = latest
@@ -663,6 +669,7 @@ final class AppState: ObservableObject {
                 $0.status = Self.status(installed: installedNow, latest: latest.tagName, hasAsset: assetId != nil)
             }
         case .noAccess:
+            AppLog.shared.debug("refresh", "\(id): this credential can't see the repository, so the row is hidden")
             // Token can't see this repo → hide the row from the list.
             update(id) { $0.latest = nil; $0.latestAssetId = nil; $0.releases = []; $0.latestRelease = nil; $0.status = .noAccess }
         case .unauthorized:
@@ -674,6 +681,7 @@ final class AppState: ObservableObject {
                 : "The download server rejected the passphrase. Check it in Settings."
             AppLog.shared.log("refresh: credentials rejected (\(Self.authMode.rawValue) mode)")
         case .noRelease:
+            AppLog.shared.debug("refresh", "\(id): the repository has no published release yet")
             update(id) { $0.latest = nil; $0.releases = []; $0.latestRelease = nil; $0.status = .noRelease }
         case .error(let msg):
             if !quiet { update(id) { $0.status = .error(msg) } }
@@ -1577,13 +1585,19 @@ final class AppState: ObservableObject {
                                            app: CatalogApp, client: GitHubClient,
                                            onVerifiedHash: ((String) -> Void)? = nil) async throws -> VerifyResult {
         let fm = FileManager.default
+        let t0 = Date()
         if asset.size > 0,
            let attrs = try? fm.attributesOfItem(atPath: file.path),
            let size = (attrs[.size] as? NSNumber)?.intValue, size != asset.size {
             try? fm.removeItem(at: file)
+            AppLog.shared.warn("verify", "\(app.id) \(release.tagName): \(asset.name) is \(size) bytes but the release lists \(asset.size); the file was deleted")
             throw InstallError.sizeMismatch(expected: asset.size, got: size)
         }
-        guard let sumsAsset = release.assets.first(where: { $0.name == "SHA256SUMS" }) else { return .noManifest }
+        AppLog.shared.debug("verify", "\(app.id) \(release.tagName): size of \(asset.name) is \(asset.size) bytes, as the release lists")
+        guard let sumsAsset = release.assets.first(where: { $0.name == "SHA256SUMS" }) else {
+            AppLog.shared.debug("verify", "\(app.id) \(release.tagName): the release has no SHA256SUMS, so the file cannot be checked against a manifest")
+            return .noManifest
+        }
         let sumsURL = InstallManager.shared.cacheDir.appendingPathComponent("\(app.id)-\(PathSafe.component(release.tagName))-SHA256SUMS")
         try await client.downloadAsset(owner: app.owner, repo: app.repo, assetId: sumsAsset.id, to: sumsURL)
         let sumsData = (try? Data(contentsOf: sumsURL)) ?? Data()
@@ -1604,20 +1618,29 @@ final class AppState: ObservableObject {
                                     expectedTrustedComment: "\(app.repo) \(release.tagName)")
             } catch {
                 try? fm.removeItem(at: file)
+                AppLog.shared.error("verify", "\(app.id) \(release.tagName): the signature on SHA256SUMS was refused (expected the comment \"\(app.repo) \(release.tagName)\"); the download was deleted", error)
                 throw error
             }
             signed = true
+            AppLog.shared.debug("verify", "\(app.id) \(release.tagName): the SHA256SUMS signature is valid for \"\(app.repo) \(release.tagName)\"")
+        } else {
+            AppLog.shared.debug("verify", "\(app.id) \(release.tagName): the release has no SHA256SUMS.minisig, so the manifest is unsigned")
         }
 
         let text = String(decoding: sumsData, as: UTF8.self)
         do {
-            guard try InstallManager.verify(file: file, assetName: asset.name, sums: text) else { return .assetNotListed }
+            guard try InstallManager.verify(file: file, assetName: asset.name, sums: text) else {
+                AppLog.shared.debug("verify", "\(app.id) \(release.tagName): \(asset.name) is not listed in SHA256SUMS")
+                return .assetNotListed
+            }
             if signed, let expected = InstallManager.expectedSHA256(forAsset: asset.name, inSums: text) {
                 onVerifiedHash?(expected.lowercased())
             }
+            AppLog.shared.debug("verify", "\(app.id) \(release.tagName): SHA-256 of \(asset.name) matches the manifest (\(signed ? "signed" : "unsigned")), \(AppLog.ms(since: t0)) ms")
             return signed ? .verified : .unsigned
         } catch {
             try? fm.removeItem(at: file)
+            AppLog.shared.error("verify", "\(app.id) \(release.tagName): \(asset.name) could not be checked against SHA256SUMS (a mismatch, or the file could not be read); the download was deleted", error)
             throw error
         }
     }
@@ -1685,7 +1708,10 @@ final class AppState: ObservableObject {
         var releases = rows.first(where: { $0.id == id })?.releases ?? []
         if releases.isEmpty {
             do { releases = try await client.releases(owner: app.owner, repo: app.repo) }
-            catch { update(id) { $0.status = .error(error.localizedDescription) }; endBusy(id); return nil }
+            catch {
+                AppLog.shared.warn("install", "\(id): not started, the release list could not be read: \(error.localizedDescription)")
+                update(id) { $0.status = .error(error.localizedDescription) }; endBusy(id); return nil
+            }
             let picked = Self.latest(from: releases, for: macAsset(for: app))
             update(id) { $0.releases = releases; $0.latestRelease = picked }
         }
@@ -1696,11 +1722,14 @@ final class AppState: ObservableObject {
         let release = tag != nil ? releases.first { VersionDisplay.equal($0.tagName, tag!) }
                                  : Self.latest(from: releases, for: app.macAssetName(variantId: variantId))
         guard let rel = release else {
+            AppLog.shared.warn("install", "\(id): not started, version \(tag ?? "latest") was not found among \(releases.count) release(s)")
             update(id) { $0.status = .error("Version \(tag ?? "latest") not found.") }; endBusy(id); return nil
         }
         guard let asset = rel.assets.first(where: { $0.name == app.macAssetName(variantId: variantId) }) else {
+            AppLog.shared.warn("install", "\(id): not started, \(rel.tagName) has no \(app.macAssetName(variantId: variantId))")
             update(id) { $0.status = .error("No macOS asset in \(rel.tagName).") }; endBusy(id); return nil
         }
+        AppLog.shared.debug("install", "\(id): \(unattended ? "automatic update" : "asked for in the window") → \(rel.tagName) \(asset.name) (\(asset.size) bytes)\(tag != nil ? ", a chosen version" : ", the latest")\(lenient ? ", lenient check" : ", strict check")")
         let slotName = app.name + app.variantSuffix(variantId)
         let slotKey = app.installKey(variantId: variantId)
         transientFailures.remove(slotKey)   // only THIS attempt's failure may earn a batch retry
@@ -3280,6 +3309,7 @@ extension AppState {
         // A saved token that can't be read (access refused): refuse every press rather than run without it.
         let token = WebTriggerStore.exists() ? (WebTriggerStore.load() ?? UUID().uuidString + UUID().uuidString) : ""
         server.setToken(token)
+        if !token.isEmpty { AppLog.shared.registerSecret(token) }
         let bind = webTriggerBind.trimmingCharacters(in: .whitespaces)
         let problem = WebTriggerContract.bindProblem(bind: bind, port: String(webTriggerPort), tokenSet: !token.isEmpty)
         if !problem.isEmpty {

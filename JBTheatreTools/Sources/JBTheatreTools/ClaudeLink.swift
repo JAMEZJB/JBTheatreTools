@@ -28,8 +28,11 @@ enum ClaudeSettingsFile {
         }
         guard d["showLock"] as? Bool != on || !FileManager.default.fileExists(atPath: url.path) else { return }
         d["showLock"] = on
-        do { try writePrivate(try SuiteBackup.jsonData(d), to: url) }
-        catch { AppLog.shared.log("claude.json: couldn't save show lock (\(error.localizedDescription))") }
+        do {
+            try writePrivate(try SuiteBackup.jsonData(d), to: url)
+            AppLog.shared.debug("claude", "claude.json: suite show lock set to \(on ? "on" : "off") (shared with Stagehand and the apps)")
+        }
+        catch { AppLog.shared.error("claude", "claude.json could not be saved at \(url.path), so the show lock change is not shared", error) }
     }
 
     /// Apps whose own Show lock is on (their in-window switch, Stagehand, or the launcher's app details).
@@ -113,8 +116,15 @@ enum Connectors {
     static func sync(apps: [CatalogApp], manifest: [String: InstalledRecord], at url: URL = url) {
         let doc: [String: Any] = ["schema": 1, "apps": entries(apps: apps, manifest: manifest)]
         guard let data = try? SuiteBackup.jsonData(doc) else { return }
-        if let old = try? Data(contentsOf: url), old == data { return }
-        do { try SuiteBackup.atomicWrite(data, to: url) }
-        catch { AppLog.shared.log("connectors.json: couldn't save (\(error.localizedDescription))") }
+        let entryCount = (doc["apps"] as? [String: Any])?.count ?? 0
+        if let old = try? Data(contentsOf: url), old == data {
+            AppLog.shared.debug("claude", "connectors.json already lists \(entryCount) Claude connector(s): unchanged")
+            return
+        }
+        do {
+            try SuiteBackup.atomicWrite(data, to: url)
+            AppLog.shared.debug("claude", "connectors.json written (\(AppLog.bytes(Int64(data.count)))) listing \(entryCount) installed app(s) Claude can use: \(((doc["apps"] as? [String: Any]) ?? [:]).keys.sorted().joined(separator: ", "))")
+        }
+        catch { AppLog.shared.error("claude", "connectors.json could not be saved at \(url.path)", error) }
     }
 }

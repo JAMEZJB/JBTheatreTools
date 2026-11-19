@@ -56,6 +56,11 @@ class Settings(context: Context) {
         get() = prefs.getString(KEY_RELAY_OVERRIDE, "").orEmpty()
         set(value) = prefs.edit().putString(KEY_RELAY_OVERRIDE, value.trim()).apply()
 
+    /** "Verbose logging (for troubleshooting)": the log records every step. Off by default; the key is `verbose`. */
+    var verbose: Boolean
+        get() = prefs.getBoolean(KEY_VERBOSE, false)
+        set(value) = prefs.edit().putBoolean(KEY_VERBOSE, value).apply()
+
     /**
      * Development builds (`vX.Y.Z-dev.N` pre-releases built on the maintainer's Mac): off unless switched on
      * on THIS device. The switch is shown only while this is on, or right after seven quick taps on the version
@@ -160,6 +165,7 @@ class Settings(context: Context) {
         const val KEY_RELAY_OVERRIDE = "relay-override"
         const val KEY_FIRST_RUN_DONE = "first-run-done"
         const val KEY_DEV_CHANNEL = "dev-channel"
+        const val KEY_VERBOSE = "verbose"
         const val KEY_TAG_PREFIX = "installed-tag:"
         const val KEY_SHOW_LOCK = "show-lock"
         const val KEY_HELD = "held-apps"

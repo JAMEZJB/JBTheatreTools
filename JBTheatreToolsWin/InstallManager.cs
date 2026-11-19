@@ -158,7 +158,7 @@ public sealed class InstallManager
         var exe = InstalledPath(key);
         if (exe == null) return Array.Empty<System.Diagnostics.Process>();
         var full = Path.GetFullPath(exe);
-        return System.Diagnostics.Process.GetProcessesByName(Path.GetFileNameWithoutExtension(exe))
+        var found = System.Diagnostics.Process.GetProcessesByName(Path.GetFileNameWithoutExtension(exe))
             .Where(p =>
             {
                 // A windowless helper (Claude's --mcp connector, Stagehand's --remote) isn't "open": nobody can close
@@ -168,6 +168,8 @@ public sealed class InstallManager
                 return image == null || RunsInstalledExe(image, full);   // unreadable → same name counts; asking is harmless
             })
             .ToArray();
+        Log.Debug("running-check", $"{key}: {(found.Length == 0 ? "not open" : $"open ({found.Length} process(es), first pid {found[0].Id})")} at {full}");
+        return found;
     }
 
     private static string? TryMainModule(System.Diagnostics.Process p)
@@ -284,11 +286,16 @@ public sealed class InstallManager
         string? expectedSha256 = null)
     {
         InstallTransaction.ValidateComponent(app.Id);
-        if (expectedSha256 != null &&
-            !string.Equals(Sha256Hex(downloadedExe), expectedSha256, StringComparison.OrdinalIgnoreCase))
+        Log.Debug("install", $"{app.Id} {version}: installing {assetName}{(variant == null ? "" : $" [{variant}]")}, {(toApplications ? "with Desktop shortcut" : "Start menu shortcut only")}");
+        if (expectedSha256 != null)
         {
-            TryDelete(downloadedExe);   // like a failed first check: the file doesn't stay in the cache
-            throw new InstallVerificationException("The download changed after it was verified — nothing was installed. Try again.");
+            if (!string.Equals(Sha256Hex(downloadedExe), expectedSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                TryDelete(downloadedExe);   // like a failed first check: the file doesn't stay in the cache
+                Log.Warn("install", $"{app.Id}: the download's hash no longer matches the signed one ({expectedSha256[..Math.Min(12, expectedSha256.Length)]}…), so it was deleted and nothing was installed");
+                throw new InstallVerificationException("The download changed after it was verified — nothing was installed. Try again.");
+            }
+            Log.Debug("install", $"{app.Id}: hashed again just before unpacking; it matches the signed hash");
         }
         var dir = Path.Combine(AppsDir, app.Id);
         var key = app.InstallKey(variant);
@@ -366,6 +373,7 @@ public sealed class InstallManager
         // Only when the shortcuts now point at this version: a folder kept because a shortcut couldn't be
         // recreated is still what the old shortcut opens.
         if (shortcutsUpdated) CleanOrphanedVersions(dir, key);
+        Log.Debug("install", $"{app.Id}: {previous?.Version ?? "none"} → {version} at {payload.Executable}; shortcuts {(shortcutsUpdated ? "updated" : "left as they were (one could not be recreated)")}");
         return payload.Executable;
     }
 
@@ -490,7 +498,9 @@ public sealed class InstallManager
     public void Launch(string installKey)
     {
         var path = InstalledPath(installKey) ?? throw new InvalidOperationException("App is not installed.");
-        Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+        Log.Debug("launch", $"{installKey}: starting {path}");
+        try { Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true }); }
+        catch (Exception ex) { Log.Error("launch", $"{installKey}: could not start {path}", ex); throw; }
     }
 
     /// <summary>Removes the installed app's folder, its shortcuts, and its manifest entry.</summary>
@@ -711,13 +721,20 @@ public sealed class InstallManager
                                                                Action<string>? onVerifiedHash = null)
     {
         var fi = new FileInfo(file);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         if (asset.Size > 0 && fi.Exists && fi.Length != asset.Size)
         {
             TryDelete(file);
+            Log.Warn("verify", $"{repo} {release.TagName}: {asset.Name} is {fi.Length} bytes but the release lists {asset.Size}; the file was deleted");
             throw new InstallVerificationException($"Download is {fi.Length} bytes but the release lists {asset.Size}. Aborting install.");
         }
+        Log.Debug("verify", $"{repo} {release.TagName}: size of {asset.Name} is {asset.Size} bytes, as the release lists");
         var sumsAsset = release.Assets.FirstOrDefault(a => a.Name == "SHA256SUMS");
-        if (sumsAsset == null) return VerifyResult.NoManifest;
+        if (sumsAsset == null)
+        {
+            Log.Debug("verify", $"{repo} {release.TagName}: the release has no SHA256SUMS, so the file cannot be checked against a manifest");
+            return VerifyResult.NoManifest;
+        }
 
         var sumsPath = file + ".SHA256SUMS";
         await client.DownloadAssetAsync(owner, repo, sumsAsset.Id, sumsPath, null);
@@ -742,21 +759,30 @@ public sealed class InstallManager
             catch (Minisign.VerifyException ex)
             {
                 TryDelete(file);
+                Log.Error("verify", $"{repo} {release.TagName}: the signature on SHA256SUMS was refused (expected the comment \"{repo} {release.TagName}\"); the download was deleted", ex);
                 throw new InstallVerificationException($"Refusing {asset.Name}: {ex.Message} Aborting install.");
             }
             signed = true;
+            Log.Debug("verify", $"{repo} {release.TagName}: the SHA256SUMS signature is valid for \"{repo} {release.TagName}\"");
         }
+        else Log.Debug("verify", $"{repo} {release.TagName}: the release has no SHA256SUMS.minisig, so the manifest is unsigned");
 
         var text = System.Text.Encoding.UTF8.GetString(sumsBytes);
         var expected = ExpectedSha256(asset.Name, text);
-        if (expected == null) return VerifyResult.AssetNotListed;
+        if (expected == null)
+        {
+            Log.Debug("verify", $"{repo} {release.TagName}: {asset.Name} is not listed in SHA256SUMS");
+            return VerifyResult.AssetNotListed;
+        }
         var actual = await Task.Run(() => Sha256Hex(file));   // 450 MB hash — never on the UI thread
         if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
         {
             TryDelete(file);
+            Log.Warn("verify", $"{repo} {release.TagName}: the SHA-256 of {asset.Name} does not match SHA256SUMS; the download was deleted");
             throw new InstallVerificationException($"Checksum mismatch for {asset.Name} — the download does not match the release's SHA256SUMS. Aborting install.");
         }
         if (signed) onVerifiedHash?.Invoke(expected.ToLowerInvariant());
+        Log.Debug("verify", $"{repo} {release.TagName}: SHA-256 of {asset.Name} matches the manifest ({(signed ? "signed" : "unsigned")}), {sw.ElapsedMilliseconds} ms");
         return signed ? VerifyResult.Verified : VerifyResult.Unsigned;
     }
 

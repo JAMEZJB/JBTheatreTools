@@ -22,7 +22,7 @@ public sealed record SettingsExtras(
 /// <summary>Settings, laid out like the macOS Settings sheet (SettingsView.swift): two equal columns of rounded panels,
 /// each under a caps micro-label, with the same grouping — Download access, Updates, Appearance, When I close the window
 /// and Quick launch on the left; Show lock, When updates are found, Install location, Storage and Support on the right —
-/// and a bottom bar with Open Log / Reset App Order / Show Hidden Apps and Done. The window is as tall as the panels
+/// and a bottom bar with Reset App Order / Show Hidden Apps and Done. The window is as tall as the panels
 /// need, up to the screen's working area; beyond that the panel area scrolls (a 1366×768 laptop) and Done stays in view.
 ///
 /// Layout is done here in device pixels from the dialog's DeviceDpi (every number is a 96-DPI design value through S()),
@@ -117,6 +117,7 @@ public sealed class SettingsDialog : Form
 
     // Bottom bar.
     private readonly HouseButton _openLog = new() { Text = "Open Log", AutoSize = true };
+    private readonly HouseCheckBox _verbose = new();
     private readonly HouseButton _resetOrder = new() { Text = "Reset App Order", AutoSize = true };
     private readonly HouseButton _showHidden = new() { AutoSize = true };
     private readonly HouseButton _done = new(HouseRole.Primary) { Text = "Done", DialogResult = DialogResult.OK };
@@ -368,6 +369,15 @@ public sealed class SettingsDialog : Form
         // --- Support ---
         _diag.Text = "Copy Diagnostics";
         _diag.Click += (_, _) => _extras?.CopyDiagnostics(this);
+        _verbose.Text = "Verbose logging (for troubleshooting)";
+        _verbose.Checked = _settings.Verbose;
+        _verbose.CheckedChanged += (_, _) =>
+        {
+            // At once, and remembered: the log switches now, and the setting is on disk for the next start.
+            _settings.Verbose = _verbose.Checked;
+            Log.SetVerbose(_verbose.Checked);
+            _settings.Save();
+        };
 
         // --- Claude: show lock for every app (shared with Stagehand and the apps) + Open Stagehand ---
         _lockHeld.Text = ShowLockWords.Held;
@@ -450,7 +460,7 @@ public sealed class SettingsDialog : Form
 
         // Tab order = reading order: the panel area (left column, then right), then the bar with Done last.
         _scroll.Controls.Add(_content);
-        _bar.Controls.AddRange(new Control[] { _openLog, _resetOrder, _showHidden, _done });
+        _bar.Controls.AddRange(new Control[] { _resetOrder, _showHidden, _done });
         for (int i = 0; i < _bar.Controls.Count; i++) _bar.Controls[i].TabIndex = i;
         _bar.Paint += (_, e) => { using var pen = new Pen(Theme.Line(Theme.CurrentDark)); e.Graphics.DrawLine(pen, 0, 0, _bar.Width, 0); };
         _bar.Resize += (_, _) => LayoutBar();
@@ -543,7 +553,9 @@ public sealed class SettingsDialog : Form
         _right.Add(NewSection("Storage", Split(_storageInstalledLabel, _storageInstalled), Split(_storageCacheLabel, _storageCache),
             Row(null, _clearCache), Full(_storageNote)));
         _right.Add(NewSection("Support", Row(null, _diag),
-            Full(Hint("Versions, settings and recent log lines for a support question — never passwords or tokens."))));
+            Full(Hint("Versions, settings and recent log lines for a support question — never passwords or tokens.")),
+            Full(_verbose), Row(null, _openLog),
+            Full(Hint("Records every step in the log so a problem can be traced. Turn it off when you have what you need."))));
 
         _subLabels.AddRange(new[] { _tokenHelp, _serverHint, _serverRelay, _updateHint, _checkResult, _closeHint, _installHint,
                                     _storageInstalled, _storageCache, _storageNote, _trigTokenState, _trigNoApps, _trigAnswering });
@@ -802,10 +814,10 @@ public sealed class SettingsDialog : Form
     private void LayoutBar()
     {
         if (!_built) return;
-        int pad = S(20), h = _openLog.GetPreferredSize(Size.Empty).Height;
+        int pad = S(20), h = _resetOrder.GetPreferredSize(Size.Empty).Height;
         _bar.Height = h + 2 * S(14);
         int y = (_bar.Height - h) / 2, x = pad;
-        foreach (var b in new[] { _openLog, _resetOrder, _showHidden })
+        foreach (var b in new[] { _resetOrder, _showHidden })
         {
             b.Size = b.GetPreferredSize(Size.Empty);
             b.Location = new Point(x, y);
